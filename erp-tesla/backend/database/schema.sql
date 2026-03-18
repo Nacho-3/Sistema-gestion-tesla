@@ -1,7 +1,5 @@
 -- ERP Tesla - Schema PostgreSQL local
 
---Get-Process node | Stop-Process -Force
-
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- =========================
@@ -94,20 +92,17 @@ CREATE TABLE IF NOT EXISTS horas (
 CREATE TABLE IF NOT EXISTS liquidaciones (
   id SERIAL PRIMARY KEY,
   empleado_id INTEGER NOT NULL REFERENCES empleados(id),
-  mes INTEGER NOT NULL,
-  anio INTEGER NOT NULL,
+  periodo_inicio DATE NOT NULL,
+  periodo_fin DATE NOT NULL,
   total_horas NUMERIC(12,2) DEFAULT 0,
-  valor_hora NUMERIC(12,2) DEFAULT 0,
-  importe_horas NUMERIC(12,2) DEFAULT 0,
-  importe_horas_extra NUMERIC(12,2) DEFAULT 0,
-  no_remunerativo NUMERIC(12,2) DEFAULT 0,
-  aguinaldo NUMERIC(12,2) DEFAULT 0,
-  vacaciones NUMERIC(12,2) DEFAULT 0,
-  adelantos NUMERIC(12,2) DEFAULT 0,
-  total NUMERIC(12,2) DEFAULT 0,
+  monto_bruto NUMERIC(12,2) DEFAULT 0,
+  descuentos NUMERIC(12,2) DEFAULT 0,
+  monto_neto NUMERIC(12,2) DEFAULT 0,
+  estado VARCHAR(20) DEFAULT 'pendiente',
+  observaciones TEXT DEFAULT '',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT uq_liquidacion_periodo UNIQUE (empleado_id, mes, anio)
+  CONSTRAINT uq_liquidacion_periodo UNIQUE (empleado_id, periodo_inicio, periodo_fin)
 );
 
 CREATE TABLE IF NOT EXISTS pagos_sueldo (
@@ -115,9 +110,93 @@ CREATE TABLE IF NOT EXISTS pagos_sueldo (
   liquidacion_id INTEGER NOT NULL REFERENCES liquidaciones(id) ON DELETE CASCADE,
   monto NUMERIC(12,2) NOT NULL,
   medio_pago VARCHAR(50),
-  fecha DATE NOT NULL,
+  fecha_pago DATE NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- =========================
+-- COMPATIBILIDAD / MIGRACIÓN
+-- =========================
+-- Permite ejecutar este schema sobre una base vieja sin romper rutas actuales.
+
+ALTER TABLE IF EXISTS liquidaciones
+  ADD COLUMN IF NOT EXISTS periodo_inicio DATE,
+  ADD COLUMN IF NOT EXISTS periodo_fin DATE,
+  ADD COLUMN IF NOT EXISTS monto_bruto NUMERIC(12,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS descuentos NUMERIC(12,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS monto_neto NUMERIC(12,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS estado VARCHAR(20) DEFAULT 'pendiente',
+  ADD COLUMN IF NOT EXISTS observaciones TEXT DEFAULT '';
+
+ALTER TABLE IF EXISTS pagos_sueldo
+  ADD COLUMN IF NOT EXISTS fecha_pago DATE;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'pagos_sueldo'
+      AND column_name = 'fecha'
+  ) THEN
+    UPDATE pagos_sueldo
+    SET fecha_pago = COALESCE(fecha_pago, fecha)
+    WHERE fecha_pago IS NULL;
+  END IF;
+END $$;
+
+ALTER TABLE IF EXISTS pagos_sueldo
+  ALTER COLUMN fecha_pago SET DEFAULT CURRENT_DATE;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'liquidaciones'
+      AND column_name = 'anio'
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'liquidaciones'
+      AND column_name = 'mes'
+  ) THEN
+    UPDATE liquidaciones
+    SET periodo_inicio = COALESCE(periodo_inicio, make_date(anio, mes, 1))
+    WHERE periodo_inicio IS NULL
+      AND anio IS NOT NULL
+      AND mes IS NOT NULL;
+  END IF;
+END $$;
+
+UPDATE liquidaciones
+SET periodo_fin = COALESCE(periodo_fin, (date_trunc('month', periodo_inicio)::date + INTERVAL '1 month - 1 day')::date)
+WHERE periodo_inicio IS NOT NULL
+  AND periodo_fin IS NULL;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'uq_liquidacion_periodo'
+      AND conrelid = 'liquidaciones'::regclass
+  ) THEN
+    ALTER TABLE liquidaciones DROP CONSTRAINT uq_liquidacion_periodo;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'uq_liquidacion_periodo'
+      AND conrelid = 'liquidaciones'::regclass
+  ) THEN
+    ALTER TABLE liquidaciones
+      ADD CONSTRAINT uq_liquidacion_periodo UNIQUE (empleado_id, periodo_inicio, periodo_fin);
+  END IF;
+END $$;
 
 -- =========================
 -- CAJA
@@ -149,8 +228,9 @@ CREATE INDEX IF NOT EXISTS idx_obras_estado ON obras(estado);
 CREATE INDEX IF NOT EXISTS idx_empleados_activo ON empleados(activo);
 CREATE INDEX IF NOT EXISTS idx_horas_fecha ON horas(fecha);
 CREATE INDEX IF NOT EXISTS idx_horas_empleado ON horas(empleado_id);
-CREATE INDEX IF NOT EXISTS idx_liquidaciones_periodo ON liquidaciones(anio, mes);
+CREATE INDEX IF NOT EXISTS idx_liquidaciones_periodo ON liquidaciones(periodo_inicio, periodo_fin);
 CREATE INDEX IF NOT EXISTS idx_pagos_liquidacion ON pagos_sueldo(liquidacion_id);
+CREATE INDEX IF NOT EXISTS idx_pagos_fecha_pago ON pagos_sueldo(fecha_pago);
 CREATE INDEX IF NOT EXISTS idx_movimientos_fecha ON movimientos_caja(fecha);
 CREATE INDEX IF NOT EXISTS idx_detalles_movimiento ON detalles_medio_pago(movimiento_id);
 
