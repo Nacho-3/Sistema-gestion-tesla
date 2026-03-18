@@ -79,7 +79,9 @@ CREATE TABLE IF NOT EXISTS horas (
   hora_inicio TIME,
   hora_fin TIME,
   cantidad_horas NUMERIC(8,2) NOT NULL,
+  horas_trabajadas NUMERIC(8,2),
   es_prestada BOOLEAN DEFAULT FALSE,
+  tipo VARCHAR(20) DEFAULT 'normal',
   grupo_origen_id INTEGER REFERENCES grupos(id),
   grupo_destino_id INTEGER REFERENCES grupos(id),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -130,6 +132,21 @@ ALTER TABLE IF EXISTS liquidaciones
 
 ALTER TABLE IF EXISTS pagos_sueldo
   ADD COLUMN IF NOT EXISTS fecha_pago DATE;
+
+ALTER TABLE IF EXISTS horas
+  ADD COLUMN IF NOT EXISTS horas_trabajadas NUMERIC(8,2),
+  ADD COLUMN IF NOT EXISTS tipo VARCHAR(20) DEFAULT 'normal';
+
+UPDATE horas
+SET horas_trabajadas = COALESCE(horas_trabajadas, cantidad_horas)
+WHERE horas_trabajadas IS NULL;
+
+UPDATE horas
+SET tipo = COALESCE(
+  NULLIF(tipo, ''),
+  CASE WHEN es_prestada THEN 'prestada' ELSE 'normal' END
+)
+WHERE tipo IS NULL OR tipo = '';
 
 DO $$
 BEGIN
@@ -273,11 +290,22 @@ CREATE TRIGGER trg_movimientos_caja_updated_at BEFORE UPDATE ON movimientos_caja
 -- DATOS MÍNIMOS
 -- =========================
 INSERT INTO grupos (nombre, descripcion)
-VALUES
-  ('Grupo A', 'Grupo inicial'),
-  ('Grupo B', 'Grupo inicial')
-ON CONFLICT DO NOTHING;
+SELECT x.nombre, x.descripcion
+FROM (
+  VALUES
+    ('Grupo A', 'Grupo inicial'),
+    ('Grupo B', 'Grupo inicial')
+) AS x(nombre, descripcion)
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM grupos g
+  WHERE g.nombre = x.nombre
+);
 
 INSERT INTO clientes (razon_social, cuit, email)
-VALUES ('Cliente Demo S.A.', '30-12345678-9', 'contacto@demo.com')
-ON CONFLICT DO NOTHING;
+SELECT 'Cliente Demo S.A.', '30-12345678-9', 'contacto@demo.com'
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM clientes c
+  WHERE c.razon_social = 'Cliente Demo S.A.'
+);
