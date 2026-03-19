@@ -237,6 +237,48 @@ CREATE TABLE IF NOT EXISTS detalles_medio_pago (
 );
 
 -- =========================
+-- PRESUPUESTOS
+-- =========================
+CREATE TABLE IF NOT EXISTS app_config (
+  key TEXT PRIMARY KEY,
+  value_int INTEGER,
+  value_text TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS presupuestos (
+  id SERIAL PRIMARY KEY,
+  numero INTEGER NOT NULL UNIQUE,
+  cliente_id INTEGER NOT NULL REFERENCES clientes(id),
+  obra_id INTEGER NOT NULL REFERENCES obras(id),
+  fecha DATE NOT NULL DEFAULT CURRENT_DATE,
+  validez_dias INTEGER NOT NULL DEFAULT 15,
+  estado VARCHAR(20) NOT NULL DEFAULT 'pendiente',
+  forma_pago VARCHAR(120) DEFAULT 'Contado',
+  observaciones TEXT DEFAULT '',
+  subtotal_materiales NUMERIC(12,2) NOT NULL DEFAULT 0,
+  subtotal_mano_obra NUMERIC(12,2) NOT NULL DEFAULT 0,
+  iva_porcentaje NUMERIC(6,2) NOT NULL DEFAULT 21,
+  iva_monto NUMERIC(12,2) NOT NULL DEFAULT 0,
+  total NUMERIC(12,2) NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS presupuesto_items (
+  id SERIAL PRIMARY KEY,
+  presupuesto_id INTEGER NOT NULL REFERENCES presupuestos(id) ON DELETE CASCADE,
+  tipo VARCHAR(20) NOT NULL CHECK (tipo IN ('material', 'mano_obra')),
+  orden INTEGER NOT NULL,
+  descripcion TEXT NOT NULL,
+  cantidad NUMERIC(12,2) NOT NULL DEFAULT 1,
+  precio_unitario NUMERIC(12,2) NOT NULL DEFAULT 0,
+  subtotal NUMERIC(12,2) NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =========================
 -- ÍNDICES
 -- =========================
 CREATE INDEX IF NOT EXISTS idx_grupos_activo ON grupos(activo);
@@ -250,6 +292,11 @@ CREATE INDEX IF NOT EXISTS idx_pagos_liquidacion ON pagos_sueldo(liquidacion_id)
 CREATE INDEX IF NOT EXISTS idx_pagos_fecha_pago ON pagos_sueldo(fecha_pago);
 CREATE INDEX IF NOT EXISTS idx_movimientos_fecha ON movimientos_caja(fecha);
 CREATE INDEX IF NOT EXISTS idx_detalles_movimiento ON detalles_medio_pago(movimiento_id);
+CREATE INDEX IF NOT EXISTS idx_presupuestos_cliente ON presupuestos(cliente_id);
+CREATE INDEX IF NOT EXISTS idx_presupuestos_obra ON presupuestos(obra_id);
+CREATE INDEX IF NOT EXISTS idx_presupuestos_fecha ON presupuestos(fecha);
+CREATE INDEX IF NOT EXISTS idx_presupuesto_items_presupuesto ON presupuesto_items(presupuesto_id);
+CREATE INDEX IF NOT EXISTS idx_presupuesto_items_tipo ON presupuesto_items(tipo);
 
 -- =========================
 -- UPDATED_AT AUTOMÁTICO
@@ -286,6 +333,12 @@ CREATE TRIGGER trg_liquidaciones_updated_at BEFORE UPDATE ON liquidaciones FOR E
 DROP TRIGGER IF EXISTS trg_movimientos_caja_updated_at ON movimientos_caja;
 CREATE TRIGGER trg_movimientos_caja_updated_at BEFORE UPDATE ON movimientos_caja FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
+DROP TRIGGER IF EXISTS trg_presupuestos_updated_at ON presupuestos;
+CREATE TRIGGER trg_presupuestos_updated_at BEFORE UPDATE ON presupuestos FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_app_config_updated_at ON app_config;
+CREATE TRIGGER trg_app_config_updated_at BEFORE UPDATE ON app_config FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
 -- =========================
 -- DATOS MÍNIMOS
 -- =========================
@@ -293,14 +346,21 @@ INSERT INTO grupos (nombre, descripcion)
 SELECT x.nombre, x.descripcion
 FROM (
   VALUES
-    ('Grupo A', 'Grupo inicial'),
-    ('Grupo B', 'Grupo inicial')
+    ('Tesla', 'Grupo operativo principal'),
+    ('Teslita', 'Grupo operativo secundario'),
+    ('grupo juani', 'Grupo operativo')
 ) AS x(nombre, descripcion)
 WHERE NOT EXISTS (
   SELECT 1
   FROM grupos g
-  WHERE g.nombre = x.nombre
+  WHERE lower(g.nombre) = lower(x.nombre)
 );
+
+DELETE FROM grupos g
+WHERE g.nombre IN ('Grupo A', 'Grupo B')
+  AND NOT EXISTS (SELECT 1 FROM obras o WHERE o.grupo_id = g.id)
+  AND NOT EXISTS (SELECT 1 FROM empleados e WHERE e.grupo_id = g.id)
+  AND NOT EXISTS (SELECT 1 FROM horas h WHERE h.grupo_origen_id = g.id OR h.grupo_destino_id = g.id);
 
 INSERT INTO clientes (razon_social, cuit, email)
 SELECT 'Cliente Demo S.A.', '30-12345678-9', 'contacto@demo.com'
@@ -309,3 +369,7 @@ WHERE NOT EXISTS (
   FROM clientes c
   WHERE c.razon_social = 'Cliente Demo S.A.'
 );
+
+INSERT INTO app_config (key, value_int)
+VALUES ('presupuesto_next_number', 1)
+ON CONFLICT (key) DO NOTHING;

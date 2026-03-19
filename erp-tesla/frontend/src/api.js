@@ -228,5 +228,34 @@ export default {
 
   deleteMovimientoCaja(id) {
     return api.delete(`/caja/${id}`)
+  },
+
+  // Presupuestos
+  getPresupuestos() {
+    return api.get("/presupuestos")
+  },
+
+  getPresupuesto(id) {
+    return api.get(`/presupuestos/${id}`)
+  },
+
+  createPresupuesto(payload) {
+    return api.post("/presupuestos", payload)
+  },
+
+  updateEstadoPresupuesto(id, estado) {
+    return api.patch(`/presupuestos/${id}/estado`, { estado })
+  },
+
+  getPresupuestoPdf(id) {
+    return api.get(`/presupuestos/${id}/pdf`, { responseType: "blob" })
+  },
+
+  getNumeroSiguientePresupuesto() {
+    return api.get("/presupuestos/config/numero-siguiente")
+  },
+
+  updateNumeroSiguientePresupuesto(numero_siguiente) {
+    return api.put("/presupuestos/config/numero-siguiente", { numero_siguiente })
   }
 }

@@ -2,7 +2,7 @@
 import { ref } from "vue"
 import api from "../api"
 import { useRouter } from "vue-router"
-import logoTesla from "../assets/logo-tesla.png"
+import logoTesla from "../assets/logo.png"
 
 const router = useRouter()
 

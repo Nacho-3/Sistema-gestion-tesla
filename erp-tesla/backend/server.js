@@ -9,6 +9,7 @@ import empleadosRoutes from "./routes/empleados.js"
 import horasRoutes from "./routes/horas.js"
 import liquidacionesRoutes from "./routes/liquidaciones.js"
 import cajaRoutes from "./routes/caja.js"
+import presupuestosRoutes from "./routes/presupuestos.js"
 
 
 dotenv.config()
@@ -25,6 +26,7 @@ app.use("/empleados", empleadosRoutes)
 app.use("/horas", horasRoutes)
 app.use("/liquidaciones", liquidacionesRoutes)
 app.use("/caja", cajaRoutes)
+app.use("/presupuestos", presupuestosRoutes)
 
 app.listen(3000, () => {
   console.log("Servidor corriendo en puerto 3000")
