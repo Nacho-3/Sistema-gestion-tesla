@@ -1,5 +1,6 @@
 import express from "express"
 import db from "../db.js"
+import { getIo } from '../socket.js'
 
 const router = express.Router()
 
@@ -319,6 +320,7 @@ router.post("/", async (req, res) => {
 
     console.log("✅ Liquidación creada:", data)
     const creada = Array.isArray(data) ? data[0] : data
+    getIo()?.emit('liquidaciones:changed')
     res.status(201).json(mapLiquidacion(creada, 0))
   } catch (err) {
     console.error("❌ Error en try-catch:", err)
@@ -361,6 +363,7 @@ router.put("/:id", async (req, res) => {
       .select()
 
     if (error) return res.status(400).json({ error: error.message })
+    getIo()?.emit('liquidaciones:changed')
     res.json({
       ...mapLiquidacion(updatedRows[0], 0),
       importe_horas_extra: importe_horas_extra || 0,
@@ -408,6 +411,7 @@ router.delete("/:id", async (req, res) => {
     }
     
     console.log("✅ Liquidación eliminada")
+    getIo()?.emit('liquidaciones:changed')
     res.json({ message: "Liquidación y sus pagos eliminados correctamente" })
   } catch (err) {
     console.error("❌ Error en try-catch DELETE:", err)
@@ -483,6 +487,7 @@ router.post("/:liquidacion_id/pagos", async (req, res) => {
 
     if (error) return res.status(400).json({ error: error.message })
 
+    getIo()?.emit('liquidaciones:changed')
     res.status(201).json(data[0])
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -496,6 +501,7 @@ router.delete("/pagos/:id", async (req, res) => {
 
     if (error) return res.status(400).json({ error: error.message })
 
+    getIo()?.emit('liquidaciones:changed')
     res.json({ message: "Pago eliminado" })
   } catch (err) {
     res.status(500).json({ error: err.message })

@@ -1,6 +1,7 @@
 import express from "express"
 import db from "../db.js"
 import { pool } from "../db.js"
+import { getIo } from '../socket.js'
 import PDFDocument from "pdfkit"
 import path from "path"
 import { fileURLToPath } from "url"
@@ -557,6 +558,7 @@ router.post("/", async (req, res) => {
       .eq("id", movimientoId)
       .single()
 
+    getIo()?.emit('caja:changed')
     res.status(201).json(normalizarMovimiento(movimientoCompleto))
   } catch (err) {
     console.error("Error en POST /caja:", err)
@@ -640,6 +642,7 @@ router.put("/:id", async (req, res) => {
       .eq("id", id)
       .single()
 
+    getIo()?.emit('caja:changed')
     res.json(normalizarMovimiento(movimientoFinal))
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -664,6 +667,7 @@ router.delete("/:id", async (req, res) => {
     if (error) return res.status(400).json({ error: error.message })
     if (data.length === 0) return res.status(404).json({ error: "Movimiento no encontrado" })
 
+    getIo()?.emit('caja:changed')
     res.json({ mensaje: "Movimiento eliminado", data: data[0] })
   } catch (err) {
     res.status(500).json({ error: err.message })

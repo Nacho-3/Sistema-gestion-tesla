@@ -1,7 +1,8 @@
 <script setup>
-import { ref, onMounted, computed } from "vue"
+import { ref, onMounted, onUnmounted, computed } from "vue"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
+import socket from '../socket.js'
 
 // Estado
 const obras = ref([])
@@ -223,6 +224,14 @@ const formatearFecha = (fecha) => {
 
 onMounted(async () => {
   await Promise.all([loadObras(), loadClientes(), loadGrupos()])
+  socket.on('obras:changed', loadObras)
+  socket.on('clientes:changed', loadClientes)
+  socket.on('grupos:changed', loadGrupos)
+})
+onUnmounted(() => {
+  socket.off('obras:changed', loadObras)
+  socket.off('clientes:changed', loadClientes)
+  socket.off('grupos:changed', loadGrupos)
 })
 </script>
 

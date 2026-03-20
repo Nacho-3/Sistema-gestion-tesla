@@ -1,7 +1,8 @@
 <script setup>
-import { ref, onMounted, computed } from "vue"
+import { ref, onMounted, onUnmounted, computed } from "vue"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
+import socket from '../socket.js'
 
 const empleados = ref([])
 const grupos = ref([])
@@ -194,7 +195,13 @@ const obtenerNombreGrupo = (grupoId) => {
   return grupo ? grupo.nombre : "Sin grupo"
 }
 
-onMounted(cargarDatos)
+onMounted(() => {
+  cargarDatos()
+  socket.on('empleados:changed', cargarDatos)
+})
+onUnmounted(() => {
+  socket.off('empleados:changed', cargarDatos)
+})
 </script>
 
 <template>

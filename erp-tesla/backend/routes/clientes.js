@@ -1,5 +1,6 @@
 ﻿import express from "express"
 import db from "../db.js"
+import { getIo } from '../socket.js'
 import PDFDocument from "pdfkit"
 import path from "path"
 import { fileURLToPath } from "url"
@@ -194,6 +195,7 @@ router.post("/", async (req, res) => {
       .single()
 
     if (error) return res.status(400).json({ error: error.message })
+    getIo()?.emit('clientes:changed')
     res.status(201).json(data)
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -214,6 +216,7 @@ router.put("/:id", async (req, res) => {
       .single()
 
     if (error) return res.status(400).json({ error: error.message })
+    getIo()?.emit('clientes:changed')
     res.json(data)
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -233,6 +236,7 @@ router.delete("/:id", async (req, res) => {
       .single()
 
     if (error) return res.status(400).json({ error: error.message })
+    getIo()?.emit('clientes:changed')
     res.json(data)
   } catch (err) {
     res.status(500).json({ error: err.message })

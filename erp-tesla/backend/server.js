@@ -1,6 +1,11 @@
+import { createServer } from "http"
 import express from "express"
 import cors from "cors"
 import dotenv from "dotenv"
+import helmet from "helmet"
+import rateLimit from "express-rate-limit"
+import { Server as SocketIO } from "socket.io"
+import { setIo } from "./socket.js"
 import authRoutes from "./auth.js"
 import clientesRoutes from "./routes/clientes.js"
 import obrasRoutes from "./routes/obras.js"
@@ -16,9 +21,75 @@ dotenv.config()
 
 const app = express()
 
-app.use(cors())
-app.use(express.json())
-app.use("/auth", authRoutes)
+const parseAllowedOrigins = () => {
+  const raw = String(process.env.ALLOWED_ORIGINS || "").trim()
+  if (raw) {
+    return raw
+      .split(",")
+      .map((origin) => origin.trim())
+      .filter(Boolean)
+  }
+
+  return [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+  ]
+}
+
+const allowedOrigins = parseAllowedOrigins()
+const hasExplicitAllowedOrigins = Boolean(String(process.env.ALLOWED_ORIGINS || "").trim())
+
+const isPrivateLanOrigin = (origin) => {
+  try {
+    const url = new URL(origin)
+    const host = url.hostname
+    const port = url.port || (url.protocol === "https:" ? "443" : "80")
+
+    if (port !== "5173") return false
+    if (host.startsWith("192.168.")) return true
+    if (host === "localhost" || host === "127.0.0.1") return true
+
+    if (host.startsWith("10.")) return true
+
+    if (host.startsWith("172.")) {
+      const octets = host.split(".")
+      const second = Number(octets[1])
+      if (Number.isInteger(second) && second >= 16 && second <= 31) return true
+    }
+
+    return false
+  } catch {
+    return false
+  }
+}
+
+const corsOriginValidator = (origin, callback) => {
+  if (!origin) return callback(null, true)
+  if (allowedOrigins.includes(origin)) return callback(null, true)
+  if (!hasExplicitAllowedOrigins && isPrivateLanOrigin(origin)) return callback(null, true)
+  return callback(new Error("Origen no permitido por CORS"))
+}
+
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.RATE_LIMIT_MAX || 1000),
+  standardHeaders: true,
+  legacyHeaders: false,
+})
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.AUTH_RATE_LIMIT_MAX || 80),
+  standardHeaders: true,
+  legacyHeaders: false,
+})
+
+app.set("trust proxy", 1)
+app.use(helmet({ crossOriginResourcePolicy: false }))
+app.use(cors({ origin: corsOriginValidator }))
+app.use(express.json({ limit: "1mb" }))
+app.use(apiLimiter)
+app.use("/auth", authLimiter, authRoutes)
 app.use("/clientes", clientesRoutes)
 app.use("/obras", obrasRoutes)
 app.use("/grupos", gruposRoutes)
@@ -28,6 +99,22 @@ app.use("/liquidaciones", liquidacionesRoutes)
 app.use("/caja", cajaRoutes)
 app.use("/presupuestos", presupuestosRoutes)
 
-app.listen(3000, () => {
+const httpServer = createServer(app)
+
+const io = new SocketIO(httpServer, {
+  cors: {
+    origin: corsOriginValidator,
+    methods: ["GET", "POST"],
+  }
+})
+
+setIo(io)
+
+io.on("connection", (socket) => {
+  console.log("Cliente conectado:", socket.id)
+  socket.on("disconnect", () => console.log("Cliente desconectado:", socket.id))
+})
+
+httpServer.listen(3000, "0.0.0.0", () => {
   console.log("Servidor corriendo en puerto 3000")
 })

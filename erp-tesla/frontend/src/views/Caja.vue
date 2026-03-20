@@ -1,7 +1,8 @@
 <script setup>
-import { ref, onMounted, computed } from "vue"
+import { ref, onMounted, onUnmounted, computed } from "vue"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
+import socket from '../socket.js'
 
 const movimientos = ref([])
 const vistaActual = ref("lista") // "lista" o "detalle"
@@ -314,7 +315,13 @@ const formatoMoneda = (valor) => {
   }).format(valor)
 }
 
-onMounted(cargarDatos)
+onMounted(() => {
+  cargarDatos()
+  socket.on('caja:changed', cargarDatos)
+})
+onUnmounted(() => {
+  socket.off('caja:changed', cargarDatos)
+})
 </script>
 
 <template>

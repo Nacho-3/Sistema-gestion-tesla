@@ -1,7 +1,8 @@
 <script setup>
-import { ref, onMounted } from "vue"
+import { ref, onMounted, onUnmounted } from "vue"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
+import socket from '../socket.js'
 
 // Estado
 const clientes = ref([])
@@ -180,6 +181,10 @@ const descargarFichaPdf = async () => {
 
 onMounted(() => {
   loadClientes()
+  socket.on('clientes:changed', loadClientes)
+})
+onUnmounted(() => {
+  socket.off('clientes:changed', loadClientes)
 })
 </script>
 

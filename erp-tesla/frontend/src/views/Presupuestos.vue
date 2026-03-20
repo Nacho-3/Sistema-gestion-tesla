@@ -1,7 +1,8 @@
 <script setup>
-import { ref, onMounted, computed } from "vue"
+import { ref, onMounted, onUnmounted, computed } from "vue"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
+import socket from '../socket.js'
 
 const presupuestos = ref([])
 const clientes = ref([])
@@ -226,6 +227,10 @@ const cambiarEstado = async (id, estado) => {
 
 onMounted(async () => {
   await loadData()
+  socket.on('presupuestos:changed', loadData)
+})
+onUnmounted(() => {
+  socket.off('presupuestos:changed', loadData)
 })
 </script>
 

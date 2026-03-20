@@ -1,6 +1,7 @@
 import express from "express"
 import fs from "fs"
 import db, { pool } from "../db.js"
+import { getIo } from '../socket.js'
 import PDFDocument from "pdfkit"
 import path from "path"
 import { fileURLToPath } from "url"
@@ -303,6 +304,7 @@ router.post("/", async (req, res) => {
 		await client.query("COMMIT")
 
 		const completo = await getPresupuestoCompleto(presupuesto.id)
+		getIo()?.emit('presupuestos:changed')
 		res.status(201).json(completo)
 	} catch (err) {
 		await client.query("ROLLBACK")
@@ -335,6 +337,7 @@ router.patch("/:id/estado", async (req, res) => {
 			return res.status(404).json({ error: "Presupuesto no encontrado" })
 		}
 
+		getIo()?.emit('presupuestos:changed')
 		res.json(result.rows[0])
 	} catch (err) {
 		res.status(500).json({ error: err.message })

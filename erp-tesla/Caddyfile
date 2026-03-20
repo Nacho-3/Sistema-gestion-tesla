@@ -1,0 +1,25 @@
+{
+	admin off
+}
+
+# Cambiar este host por el nombre interno que usen en la empresa.
+# Ejemplo: erp.tesla.local
+erp.tesla.local {
+	tls internal
+	encode gzip zstd
+
+	@socket path /socket.io*
+	handle @socket {
+		reverse_proxy localhost:3000
+	}
+
+	handle_path /api/* {
+		reverse_proxy localhost:3000
+	}
+
+	handle {
+		root * ./frontend/dist
+		try_files {path} /index.html
+		file_server
+	}
+}

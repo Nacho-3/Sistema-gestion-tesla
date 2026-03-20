@@ -1,7 +1,8 @@
 <script setup>
-import { ref, onMounted } from "vue"
+import { ref, onMounted, onUnmounted } from "vue"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
+import socket from '../socket.js'
 
 const grupos = ref([])
 const loading = ref(false)
@@ -98,7 +99,13 @@ const normalizeEstado = (estado = "") => {
   return estado || "-"
 }
 
-onMounted(loadGrupos)
+onMounted(() => {
+  loadGrupos()
+  socket.on('grupos:changed', loadGrupos)
+})
+onUnmounted(() => {
+  socket.off('grupos:changed', loadGrupos)
+})
 </script>
 
 <template>

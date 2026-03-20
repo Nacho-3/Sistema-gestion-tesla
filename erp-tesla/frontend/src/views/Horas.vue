@@ -1,7 +1,8 @@
 <script setup>
-import { ref, onMounted, computed } from "vue"
+import { ref, onMounted, onUnmounted, computed } from "vue"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
+import socket from '../socket.js'
 
 // Estado
 const horas = ref([])
@@ -430,6 +431,10 @@ const aplicarFiltros = async () => {
 onMounted(async () => {
   await loadDatos()
   await loadHoras()
+  socket.on('horas:changed', loadHoras)
+})
+onUnmounted(() => {
+  socket.off('horas:changed', loadHoras)
 })
 </script>
 

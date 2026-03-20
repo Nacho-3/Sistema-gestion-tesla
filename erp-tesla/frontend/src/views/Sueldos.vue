@@ -1,7 +1,8 @@
 <script setup>
-import { ref, onMounted, computed } from "vue"
+import { ref, onMounted, onUnmounted, computed } from "vue"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
+import socket from '../socket.js'
 
 // Estado - Lista
 const liquidaciones = ref([])
@@ -309,6 +310,12 @@ const cancelarEdicionTarifa = () => {
 
 onMounted(async () => {
   await Promise.all([cargarLiquidaciones(), cargarEmpleados()])
+  socket.on('liquidaciones:changed', cargarLiquidaciones)
+  socket.on('horas:changed', cargarLiquidaciones)
+})
+onUnmounted(() => {
+  socket.off('liquidaciones:changed', cargarLiquidaciones)
+  socket.off('horas:changed', cargarLiquidaciones)
 })
 </script>
 
