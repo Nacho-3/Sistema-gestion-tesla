@@ -23,11 +23,27 @@ router.get("/", async (req, res) => {
 // Crear nuevo empleado
 router.post("/", async (req, res) => {
   try {
-    const { nombre, apellido, dni, grupo_id, valor_hora } = req.body
+    const {
+      nombre,
+      apellido,
+      dni,
+      cuit,
+      fecha_nacimiento,
+      direccion,
+      telefono,
+      tipo,
+      alias,
+      grupo_id,
+      valor_hora,
+    } = req.body
 
     // Validar campos requeridos
-    if (!nombre || !apellido || !dni || !grupo_id) {
-      return res.status(400).json({ error: "Campos requeridos: nombre, apellido, dni, grupo_id" })
+    if (!nombre || !apellido || !dni || !cuit || !fecha_nacimiento || !direccion || !telefono || !tipo || !alias || !grupo_id) {
+      return res.status(400).json({ error: "Campos requeridos: nombre, apellido, dni, cuit, fecha_nacimiento, direccion, telefono, tipo, alias, grupo_id" })
+    }
+
+    if (!["monotributista", "empleado_dependiente"].includes(tipo)) {
+      return res.status(400).json({ error: "Tipo inválido. Valores permitidos: monotributista, empleado_dependiente" })
     }
 
     if (!valor_hora || valor_hora <= 0) {
@@ -45,6 +61,17 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Este DNI ya existe" })
     }
 
+    // Verificar que el CUIT no exista
+    const { data: cuitExistente } = await db
+      .from("empleados")
+      .select("id")
+      .eq("cuit", cuit)
+      .eq("activo", true)
+
+    if (cuitExistente && cuitExistente.length > 0) {
+      return res.status(400).json({ error: "Este CUIT ya existe" })
+    }
+
     const { data, error } = await db
       .from("empleados")
       .insert([
@@ -52,6 +79,12 @@ router.post("/", async (req, res) => {
           nombre,
           apellido,
           dni,
+          cuit,
+          fecha_nacimiento,
+          direccion,
+          telefono,
+          tipo,
+          alias,
           grupo_id,
           valor_hora,
           activo: true
@@ -101,13 +134,36 @@ router.get("/:id", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params
-    const { nombre, apellido, dni, grupo_id, valor_hora } = req.body
+    const {
+      nombre,
+      apellido,
+      dni,
+      cuit,
+      fecha_nacimiento,
+      direccion,
+      telefono,
+      tipo,
+      alias,
+      grupo_id,
+      valor_hora,
+    } = req.body
 
     const actualizaciones = {}
     if (nombre !== undefined) actualizaciones.nombre = nombre
     if (apellido !== undefined) actualizaciones.apellido = apellido
     if (grupo_id !== undefined) actualizaciones.grupo_id = grupo_id
     if (valor_hora !== undefined) actualizaciones.valor_hora = valor_hora
+    if (fecha_nacimiento !== undefined) actualizaciones.fecha_nacimiento = fecha_nacimiento
+    if (direccion !== undefined) actualizaciones.direccion = direccion
+    if (telefono !== undefined) actualizaciones.telefono = telefono
+    if (alias !== undefined) actualizaciones.alias = alias
+
+    if (tipo !== undefined) {
+      if (!["monotributista", "empleado_dependiente"].includes(tipo)) {
+        return res.status(400).json({ error: "Tipo inválido. Valores permitidos: monotributista, empleado_dependiente" })
+      }
+      actualizaciones.tipo = tipo
+    }
 
     // Validar DNI si se actualiza
     if (dni !== undefined) {
@@ -121,6 +177,20 @@ router.put("/:id", async (req, res) => {
         return res.status(400).json({ error: "Este DNI ya existe" })
       }
       actualizaciones.dni = dni
+    }
+
+    // Validar CUIT si se actualiza
+    if (cuit !== undefined) {
+      const { data: cuitExistente } = await db
+        .from("empleados")
+        .select("id")
+        .eq("cuit", cuit)
+        .neq("id", id)
+
+      if (cuitExistente && cuitExistente.length > 0) {
+        return res.status(400).json({ error: "Este CUIT ya existe" })
+      }
+      actualizaciones.cuit = cuit
     }
 
     const { data, error } = await db

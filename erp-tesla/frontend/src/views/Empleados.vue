@@ -11,6 +11,7 @@ const empleadoSeleccionado = ref(null)
 const loading = ref(false)
 const error = ref("")
 const showForm = ref(false)
+const editingId = ref(null)
 const showConfirm = ref(false)
 const empleadoAEliminar = ref(null)
 
@@ -22,11 +23,36 @@ const loadingHorasId = ref(null)
 // Filtros
 const filtroGrupo = ref("")
 
+const TIPOS_CONTRATO = [
+  { value: "monotributista", label: "Monotributista" },
+  { value: "empleado_dependiente", label: "Empleado dependiente" }
+]
+
 // Formulario
 const form = ref({
   nombre: "",
   apellido: "",
   dni: "",
+  cuit: "",
+  fecha_nacimiento: "",
+  direccion: "",
+  telefono: "",
+  tipo: "",
+  alias: "",
+  grupo_id: "",
+  valor_hora: 0
+})
+
+const getEmptyForm = () => ({
+  nombre: "",
+  apellido: "",
+  dni: "",
+  cuit: "",
+  fecha_nacimiento: "",
+  direccion: "",
+  telefono: "",
+  tipo: "",
+  alias: "",
   grupo_id: "",
   valor_hora: 0
 })
@@ -35,6 +61,12 @@ const esFormularioValido = computed(() => {
   return form.value.nombre && 
          form.value.apellido && 
          form.value.dni && 
+      form.value.cuit && 
+      form.value.fecha_nacimiento && 
+      form.value.direccion && 
+      form.value.telefono && 
+      form.value.tipo && 
+      form.value.alias && 
          form.value.grupo_id && 
          form.value.valor_hora > 0
 })
@@ -107,36 +139,73 @@ const cargarDatos = async () => {
   }
 }
 
-const abrirFormulario = () => {
-  form.value = {
-    nombre: "",
-    apellido: "",
-    dni: "",
-    grupo_id: "",
-    valor_hora: 0
+const abrirFormulario = (empleado = null) => {
+  if (empleado) {
+    editingId.value = empleado.id
+    form.value = {
+      ...getEmptyForm(),
+      ...empleado,
+      grupo_id: empleado.grupo_id ?? "",
+      valor_hora: Number(empleado.valor_hora || 0),
+      fecha_nacimiento: empleado.fecha_nacimiento
+        ? String(empleado.fecha_nacimiento).split("T")[0]
+        : "",
+    }
+  } else {
+    editingId.value = null
+    form.value = getEmptyForm()
   }
+
   showForm.value = true
 }
 
-const crearEmpleado = async () => {
+const cerrarFormulario = () => {
+  showForm.value = false
+  editingId.value = null
+  form.value = getEmptyForm()
+}
+
+const guardarEmpleado = async () => {
   if (!esFormularioValido.value) {
     error.value = "Por favor completa todos los campos"
     return
   }
 
   try {
-    await api.createEmpleado({
+    const payload = {
       nombre: form.value.nombre,
       apellido: form.value.apellido,
       dni: form.value.dni,
+      cuit: form.value.cuit,
+      fecha_nacimiento: form.value.fecha_nacimiento,
+      direccion: form.value.direccion,
+      telefono: form.value.telefono,
+      tipo: form.value.tipo,
+      alias: form.value.alias,
       grupo_id: form.value.grupo_id,
       valor_hora: parseFloat(form.value.valor_hora)
-    })
+    }
+
+    if (editingId.value) {
+      await api.updateEmpleado(editingId.value, payload)
+    } else {
+      await api.createEmpleado(payload)
+    }
+
     await cargarDatos()
-    showForm.value = false
+    if (empleadoSeleccionado.value && editingId.value === empleadoSeleccionado.value.id) {
+      empleadoSeleccionado.value = {
+        ...empleadoSeleccionado.value,
+        ...payload,
+      }
+    }
+
+    cerrarFormulario()
     error.value = ""
   } catch (err) {
-    error.value = `Error al crear: ${err.response?.data?.error || err.message}`
+    error.value = editingId.value
+      ? `Error al modificar: ${err.response?.data?.error || err.message}`
+      : `Error al crear: ${err.response?.data?.error || err.message}`
   }
 }
 
@@ -245,6 +314,7 @@ onUnmounted(() => {
           <!-- Botones dentro del recuadro -->
           <div class="empleado-acciones">
             <button @click="verDetalle(emp)" class="btn-action btn-detail">👁️ Ver detalle</button>
+            <button @click="abrirFormulario(emp)" class="btn-action btn-edit">✏️ Modificar</button>
             <button @click="confirmarEliminar(emp)" class="btn-action btn-delete">🗑️ Eliminar</button>
           </div>
         </div>
@@ -262,6 +332,7 @@ onUnmounted(() => {
             <h2>{{ empleadoSeleccionado.nombre }} {{ empleadoSeleccionado.apellido }}</h2>
             <p class="subtitle">{{ obtenerNombreGrupo(empleadoSeleccionado.grupo_id) }}</p>
           </div>
+          <button class="btn-action btn-edit" @click="abrirFormulario(empleadoSeleccionado)">✏️ Modificar</button>
         </div>
 
         <!-- Información básica -->
@@ -271,6 +342,30 @@ onUnmounted(() => {
             <div class="info-item">
               <label>DNI</label>
               <p>{{ empleadoSeleccionado.dni }}</p>
+            </div>
+            <div class="info-item">
+              <label>CUIT</label>
+              <p>{{ empleadoSeleccionado.cuit || "-" }}</p>
+            </div>
+            <div class="info-item">
+              <label>Fecha Nacimiento</label>
+              <p>{{ empleadoSeleccionado.fecha_nacimiento || "-" }}</p>
+            </div>
+            <div class="info-item">
+              <label>Dirección</label>
+              <p>{{ empleadoSeleccionado.direccion || "-" }}</p>
+            </div>
+            <div class="info-item">
+              <label>Teléfono</label>
+              <p>{{ empleadoSeleccionado.telefono || "-" }}</p>
+            </div>
+            <div class="info-item">
+              <label>Tipo</label>
+              <p>{{ empleadoSeleccionado.tipo === "monotributista" ? "Monotributista" : (empleadoSeleccionado.tipo === "empleado_dependiente" ? "Empleado dependiente" : "-") }}</p>
+            </div>
+            <div class="info-item">
+              <label>Alias</label>
+              <p>{{ empleadoSeleccionado.alias || "-" }}</p>
             </div>
             <div class="info-item">
               <label>Valor Hora</label>
@@ -310,14 +405,14 @@ onUnmounted(() => {
   </LayoutShell>
 
   <!-- Modal para crear empleado -->
-  <div v-if="showForm" class="modal-overlay" @click.self="showForm = false">
+  <div v-if="showForm" class="modal-overlay" @click.self="cerrarFormulario">
     <div class="modal">
       <div class="modal-header">
-        <h3>Nuevo Empleado</h3>
-        <button class="btn-close" @click="showForm = false">×</button>
+        <h3>{{ editingId ? "Modificar Empleado" : "Nuevo Empleado" }}</h3>
+        <button class="btn-close" @click="cerrarFormulario">×</button>
       </div>
 
-      <form @submit.prevent="crearEmpleado" class="modal-form">
+      <form @submit.prevent="guardarEmpleado" class="modal-form">
         <div v-if="error" class="alert alert-error">{{ error }}</div>
 
         <label class="form-group">
@@ -333,6 +428,41 @@ onUnmounted(() => {
         <label class="form-group">
           <span>DNI *</span>
           <input v-model="form.dni" type="text" placeholder="DNI" required />
+        </label>
+
+        <label class="form-group">
+          <span>CUIT *</span>
+          <input v-model="form.cuit" type="text" placeholder="CUIT" required />
+        </label>
+
+        <label class="form-group">
+          <span>Fecha de nacimiento *</span>
+          <input v-model="form.fecha_nacimiento" type="date" required />
+        </label>
+
+        <label class="form-group">
+          <span>Dirección *</span>
+          <input v-model="form.direccion" type="text" placeholder="Dirección" required />
+        </label>
+
+        <label class="form-group">
+          <span>Teléfono *</span>
+          <input v-model="form.telefono" type="text" placeholder="Teléfono" required />
+        </label>
+
+        <label class="form-group">
+          <span>Tipo *</span>
+          <select v-model="form.tipo" required>
+            <option value="" disabled>Selecciona un tipo</option>
+            <option v-for="tipoOption in TIPOS_CONTRATO" :key="tipoOption.value" :value="tipoOption.value">
+              {{ tipoOption.label }}
+            </option>
+          </select>
+        </label>
+
+        <label class="form-group">
+          <span>Alias *</span>
+          <input v-model="form.alias" type="text" placeholder="Alias" required />
         </label>
 
         <label class="form-group">
@@ -352,9 +482,9 @@ onUnmounted(() => {
 
         <div class="modal-actions">
           <button type="submit" class="btn-primary" :disabled="!esFormularioValido">
-            Crear Empleado
+            {{ editingId ? "Guardar cambios" : "Crear Empleado" }}
           </button>
-          <button type="button" class="btn-secondary" @click="showForm = false">
+          <button type="button" class="btn-secondary" @click="cerrarFormulario">
             Cancelar
           </button>
         </div>
@@ -1084,6 +1214,16 @@ onUnmounted(() => {
 .btn-detail:hover {
   background: rgba(59, 130, 246, 0.15);
   border-color: rgba(59, 130, 246, 0.5);
+}
+
+.btn-edit {
+  color: #fcd34d;
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+.btn-edit:hover {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.55);
 }
 
 .btn-delete {

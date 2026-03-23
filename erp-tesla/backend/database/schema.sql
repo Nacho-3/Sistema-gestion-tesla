@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS empleados (
   nombre VARCHAR(120) NOT NULL,
   apellido VARCHAR(120) NOT NULL,
   dni VARCHAR(20) UNIQUE NOT NULL,
+  cuit VARCHAR(30),
+  fecha_nacimiento DATE,
+  direccion TEXT,
+  telefono VARCHAR(50),
+  tipo VARCHAR(30),
+  alias VARCHAR(120),
   grupo_id INTEGER REFERENCES grupos(id),
   valor_hora NUMERIC(12,2) NOT NULL DEFAULT 0,
   activo BOOLEAN DEFAULT TRUE,
@@ -136,6 +142,14 @@ ALTER TABLE IF EXISTS pagos_sueldo
 ALTER TABLE IF EXISTS horas
   ADD COLUMN IF NOT EXISTS horas_trabajadas NUMERIC(8,2),
   ADD COLUMN IF NOT EXISTS tipo VARCHAR(20) DEFAULT 'normal';
+
+ALTER TABLE IF EXISTS empleados
+  ADD COLUMN IF NOT EXISTS cuit VARCHAR(30),
+  ADD COLUMN IF NOT EXISTS fecha_nacimiento DATE,
+  ADD COLUMN IF NOT EXISTS direccion TEXT,
+  ADD COLUMN IF NOT EXISTS telefono VARCHAR(50),
+  ADD COLUMN IF NOT EXISTS tipo VARCHAR(30),
+  ADD COLUMN IF NOT EXISTS alias VARCHAR(120);
 
 UPDATE horas
 SET horas_trabajadas = COALESCE(horas_trabajadas, cantidad_horas)

@@ -21,7 +21,8 @@ const form = ref({
   cuit: "",
   direccion: "",
   telefono: "",
-  email: ""
+  email: "",
+  iva: "Responsable Inscripto"
 })
 
 // Cargar clientes
@@ -90,7 +91,8 @@ const closeForm = () => {
     cuit: "",
     direccion: "",
     telefono: "",
-    email: ""
+    email: "",
+    iva: "Responsable Inscripto"
   }
 }
 
@@ -290,6 +292,10 @@ onUnmounted(() => {
               <span class="dato-label">Dirección:</span>
               <span class="dato-valor">{{ clienteSeleccionado.direccion || "-" }}</span>
             </div>
+            <div class="dato-item">
+              <span class="dato-label">IVA:</span>
+              <span class="dato-valor">{{ clienteSeleccionado.iva || "-" }}</span>
+            </div>
           </div>
         </div>
 
@@ -379,6 +385,19 @@ onUnmounted(() => {
                 type="text"
                 placeholder="XX-XXXXXXXX-X"
               />
+            </label>
+
+            <label class="form-group">
+              <span>IVA *</span>
+              <select
+                v-model="form.iva"
+                required
+              >
+                <option value="Responsable Inscripto">Responsable Inscripto</option>
+                <option value="Exento">Exento</option>
+                <option value="Consumidor Final">Consumidor Final</option>
+                <option value="Monotributo">Monotributo</option>
+              </select>
             </label>
 
             <label class="form-group">
@@ -646,6 +665,29 @@ td {
   border-color: #3b82f6;
   background-color: rgba(30, 41, 59, 1);
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.form-group select {
+  padding: 0.5rem 0.75rem;
+  background-color: rgba(30, 41, 59, 0.8);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 0.375rem;
+  color: #e2e8f0;
+  font-size: 0.875rem;
+  transition: all 0.2s;
+  cursor: pointer;
+}
+
+.form-group select:focus {
+  outline: none;
+  border-color: #3b82f6;
+  background-color: rgba(30, 41, 59, 1);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.form-group select option {
+  background-color: rgba(30, 41, 59, 0.8);
+  color: #e2e8f0;
 }
 
 .modal-actions {

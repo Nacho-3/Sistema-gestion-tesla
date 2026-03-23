@@ -182,7 +182,7 @@ router.get("/:id/ficha-pdf", async (req, res) => {
 // Crear cliente
 router.post("/", async (req, res) => {
   try {
-    const { razon_social, cuit, direccion, telefono, email } = req.body
+    const { razon_social, cuit, direccion, telefono, email, iva } = req.body
 
     if (!razon_social) {
       return res.status(400).json({ error: "La razon social es obligatoria" })
@@ -190,7 +190,7 @@ router.post("/", async (req, res) => {
 
     const { data, error } = await db
       .from("clientes")
-      .insert([{ razon_social, cuit, direccion, telefono, email, activo: true }])
+      .insert([{ razon_social, cuit, direccion, telefono, email, iva: iva || "Responsable Inscripto", activo: true }])
       .select()
       .single()
 
@@ -206,11 +206,11 @@ router.post("/", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params
-    const { razon_social, cuit, direccion, telefono, email } = req.body
+    const { razon_social, cuit, direccion, telefono, email, iva } = req.body
 
     const { data, error } = await db
       .from("clientes")
-      .update({ razon_social, cuit, direccion, telefono, email })
+      .update({ razon_social, cuit, direccion, telefono, email, iva })
       .eq("id", id)
       .select()
       .single()
