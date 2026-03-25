@@ -13,6 +13,8 @@ const editingId = ref(null)
 const vistaActual = ref("lista") // "lista" o "ficha"
 const clienteSeleccionado = ref(null)
 const obrasCliente = ref([])
+const presupuestosCliente = ref([])
+const presupuestosAceptados = ref([])
 const downloadingPdf = ref(false)
 
 // Formulario
@@ -31,13 +33,21 @@ const loadClientes = async () => {
   error.value = ""
   try {
     const res = await api.getClientes()
-    clientes.value = res.data || []
+    clientes.value = (res.data || []).filter(c => String(c.razon_social || "").toUpperCase() !== "ADMINISTRACION INTERNA")
   } catch (err) {
     error.value = "Error al cargar clientes"
     console.error(err)
   } finally {
     loading.value = false
   }
+}
+
+const cargarPresupuestosCliente = async (clienteId) => {
+  const resPresupuestos = await api.getPresupuestos()
+  const presupuestos = (resPresupuestos.data || []).filter(p => Number(p.cliente_id) === Number(clienteId))
+  const isAceptado = (p) => ["aprobado", "aceptado"].includes(String(p.estado || "").toLowerCase())
+  presupuestosAceptados.value = presupuestos.filter(isAceptado)
+  presupuestosCliente.value = presupuestos.filter(p => !isAceptado(p))
 }
 
 // Ver ficha del cliente
@@ -48,7 +58,10 @@ const verFicha = async (cliente) => {
   // Cargar obras del cliente
   loading.value = true
   try {
-    const resObras = await api.getObras()
+    const [resObras] = await Promise.all([
+      api.getObras(),
+      cargarPresupuestosCliente(cliente.id)
+    ])
     obrasCliente.value = resObras.data?.filter(o => o.cliente_id === cliente.id) || []
   } catch (err) {
     console.error("Error al cargar datos del cliente:", err)
@@ -62,6 +75,16 @@ const volverALista = () => {
   vistaActual.value = "lista"
   clienteSeleccionado.value = null
   obrasCliente.value = []
+  presupuestosCliente.value = []
+  presupuestosAceptados.value = []
+}
+
+const handlePresupuestosChanged = () => {
+  if (vistaActual.value === "ficha" && clienteSeleccionado.value?.id) {
+    cargarPresupuestosCliente(clienteSeleccionado.value.id).catch((err) => {
+      console.error("Error al actualizar presupuestos del cliente:", err)
+    })
+  }
 }
 
 // Abrir formulario
@@ -184,9 +207,11 @@ const descargarFichaPdf = async () => {
 onMounted(() => {
   loadClientes()
   socket.on('clientes:changed', loadClientes)
+  socket.on('presupuestos:changed', handlePresupuestosChanged)
 })
 onUnmounted(() => {
   socket.off('clientes:changed', loadClientes)
+  socket.off('presupuestos:changed', handlePresupuestosChanged)
 })
 </script>
 
@@ -218,6 +243,7 @@ onUnmounted(() => {
                 <th>Razón Social</th>
                 <th>CUIT</th>
                 <th>Teléfono</th>
+                <th>IVA</th>
                 <th>Acciones</th>
               </tr>
             </thead>
@@ -226,6 +252,7 @@ onUnmounted(() => {
                 <td>{{ cliente.razon_social }}</td>
                 <td>{{ cliente.cuit || "-" }}</td>
                 <td>{{ cliente.telefono || "-" }}</td>
+                <td>{{ cliente.iva || "-" }}</td>
                 <td>
                   <div class="acciones">
                     <button class="btn-ficha" @click="verFicha(cliente)">
@@ -326,13 +353,37 @@ onUnmounted(() => {
         <!-- Presupuestos generados -->
         <div class="ficha-seccion">
           <h3>📄 Presupuestos generados</h3>
-          <p class="sin-datos">Funcionalidad disponible cuando se implemente el módulo de Presupuestos</p>
+          <div v-if="presupuestosCliente.length > 0" class="presupuestos-lista">
+            <div v-for="p in presupuestosCliente" :key="p.id" class="presupuesto-card">
+              <div class="presupuesto-head">
+                <h4>#{{ p.numero }} - {{ p.obra || 'Sin obra' }}</h4>
+                <span class="presupuesto-estado" :class="`estado-${String(p.estado || '').toLowerCase()}`">{{ p.estado }}</span>
+              </div>
+              <div class="presupuesto-detalles">
+                <span>{{ new Date(p.fecha).toLocaleDateString('es-AR') }}</span>
+                <span>$ {{ Number(p.total || 0).toLocaleString('es-AR', { minimumFractionDigits: 2 }) }}</span>
+              </div>
+            </div>
+          </div>
+          <p v-else class="sin-datos">No hay presupuestos asociados a este cliente</p>
         </div>
 
         <!-- Presupuestos aceptados -->
         <div class="ficha-seccion">
           <h3>✅ Presupuestos aceptados</h3>
-          <p class="sin-datos">Funcionalidad disponible cuando se implemente el módulo de Presupuestos</p>
+          <div v-if="presupuestosAceptados.length > 0" class="presupuestos-lista">
+            <div v-for="p in presupuestosAceptados" :key="p.id" class="presupuesto-card">
+              <div class="presupuesto-head">
+                <h4>#{{ p.numero }} - {{ p.obra || 'Sin obra' }}</h4>
+                <span class="presupuesto-estado estado-aprobado">{{ p.estado }}</span>
+              </div>
+              <div class="presupuesto-detalles">
+                <span>{{ new Date(p.fecha).toLocaleDateString('es-AR') }}</span>
+                <span>$ {{ Number(p.total || 0).toLocaleString('es-AR', { minimumFractionDigits: 2 }) }}</span>
+              </div>
+            </div>
+          </div>
+          <p v-else class="sin-datos">No hay presupuestos aceptados para este cliente</p>
         </div>
 
         <!-- Certificados asociados -->
@@ -918,6 +969,66 @@ td {
   gap: 1rem;
   font-size: 0.875rem;
   color: #94a3b8;
+}
+
+.presupuestos-lista {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1rem;
+}
+
+.presupuesto-card {
+  padding: 1.1rem;
+  background-color: rgba(30, 41, 59, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 0.5rem;
+}
+
+.presupuesto-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+  margin-bottom: 0.7rem;
+}
+
+.presupuesto-head h4 {
+  margin: 0;
+  color: #f9fafb;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.presupuesto-estado {
+  padding: 0.25rem 0.6rem;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  background-color: rgba(148, 163, 184, 0.2);
+  color: #cbd5e1;
+}
+
+.estado-pendiente {
+  background-color: rgba(251, 191, 36, 0.2);
+  color: #fde047;
+}
+
+.estado-aprobado {
+  background-color: rgba(34, 197, 94, 0.2);
+  color: #86efac;
+}
+
+.estado-rechazado {
+  background-color: rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+}
+
+.presupuesto-detalles {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.875rem;
+  color: #cbd5e1;
 }
 
 .sin-datos {

@@ -28,7 +28,10 @@ router.get("/", async (req, res) => {
       .order("created_at", { ascending: false })
 
     if (error) return res.status(400).json({ error: error.message })
-    res.json(data)
+    const clientesVisibles = (data || []).filter(
+      (c) => String(c?.razon_social || "").trim().toUpperCase() !== "ADMINISTRACION INTERNA"
+    )
+    res.json(clientesVisibles)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

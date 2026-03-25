@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed } from "vue"
+import { ref, onMounted, onUnmounted, computed, watch } from "vue"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
@@ -15,6 +15,8 @@ const saving = ref(false)
 const error = ref("")
 const activeTab = ref("carga") // "carga" o "resumen"
 const modalidadCarga = ref("diaria") // "diaria" o "rango"
+const modoDiaria = ref("cantidad") // "cantidad" o "horario"
+const modoRango = ref("cantidad")  // "cantidad" o "horario"
 const showFormDiaria = ref(false)
 const showFormRango = ref(false)
 const editingId = ref(null)
@@ -27,6 +29,7 @@ const filtroAnio = ref(new Date().getFullYear())
 const filtroEmpleado = ref("")
 const filtroObra = ref("")
 const nombresMes = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+const ADMIN_GROUP_REGEX = /admin/i
 
 // Formulario carga diaria
 const formDiaria = ref({
@@ -48,6 +51,8 @@ const formRango = ref({
   fecha_desde: new Date().toISOString().split("T")[0],
   fecha_hasta: new Date().toISOString().split("T")[0],
   horas_por_dia: "",
+  hora_inicio: "",
+  hora_fin: "",
   es_prestada: false,
   grupo_origen_id: "",
   grupo_destino_id: ""
@@ -95,6 +100,59 @@ const loadDatos = async () => {
   }
 }
 
+const getEmpleadoById = (empleadoId) => empleados.value.find((e) => String(e.id) === String(empleadoId))
+
+const isGrupoAdministrativo = (grupoId) => {
+  const grupo = grupos.value.find((g) => String(g.id) === String(grupoId))
+  return ADMIN_GROUP_REGEX.test(String(grupo?.nombre || ""))
+}
+
+const isEmpleadoAdministrativo = (empleadoId) => {
+  const emp = getEmpleadoById(empleadoId)
+  if (!emp) return false
+  return isGrupoAdministrativo(emp.grupo_id)
+}
+
+const getObraAdministrativa = (grupoId) => {
+  const obrasDelGrupo = obras.value.filter((o) => String(o.grupo_id) === String(grupoId))
+  if (!obrasDelGrupo.length) return null
+
+  const obraConNombreAdmin = obrasDelGrupo.find((o) => ADMIN_GROUP_REGEX.test(String(o.nombre || "")))
+  return obraConNombreAdmin || obrasDelGrupo[0]
+}
+
+const getObraAdministrativaParaEmpleado = (empleadoId) => {
+  const emp = getEmpleadoById(empleadoId)
+  if (!emp) return null
+  if (!isGrupoAdministrativo(emp.grupo_id)) return null
+  return getObraAdministrativa(emp.grupo_id)
+}
+
+const isObraAdministrativa = (obra) => {
+  if (!obra) return false
+  if (isGrupoAdministrativo(obra.grupo_id)) return true
+  return ADMIN_GROUP_REGEX.test(String(obra.nombre || ""))
+}
+
+const obrasNoAdministrativas = computed(() => {
+  return (obras.value || []).filter((obra) => !isObraAdministrativa(obra))
+})
+
+const syncObraDiariaPorEmpleado = () => {
+  if (!isEmpleadoAdministrativo(formDiaria.value.empleado_id)) return
+  const obraAdmin = getObraAdministrativaParaEmpleado(formDiaria.value.empleado_id)
+  formDiaria.value.obra_id = obraAdmin ? obraAdmin.id : ""
+}
+
+const syncObraRangoPorEmpleado = () => {
+  if (!isEmpleadoAdministrativo(formRango.value.empleado_id)) return
+  const obraAdmin = getObraAdministrativaParaEmpleado(formRango.value.empleado_id)
+  formRango.value.obra_id = obraAdmin ? obraAdmin.id : ""
+}
+
+watch(() => formDiaria.value.empleado_id, syncObraDiariaPorEmpleado)
+watch(() => formRango.value.empleado_id, syncObraRangoPorEmpleado)
+
 // Cargar resúmenes
 const loadResumenes = async () => {
   loadingResumen.value = true
@@ -132,8 +190,10 @@ const openModalDiaria = (hora = null) => {
   if (hora) {
     editingId.value = hora.id
     formDiaria.value = { ...hora }
+    modoDiaria.value = (hora.hora_inicio && hora.hora_fin) ? "horario" : "cantidad"
   } else {
     editingId.value = null
+    modoDiaria.value = "cantidad"
     formDiaria.value = {
       empleado_id: "",
       obra_id: "",
@@ -153,17 +213,21 @@ const openModalDiaria = (hora = null) => {
 const closeModalDiaria = () => {
   showFormDiaria.value = false
   editingId.value = null
+  modoDiaria.value = "cantidad"
 }
 
 // Cerrar modal de carga por rango
 const closeModalRango = () => {
   showFormRango.value = false
+  modoRango.value = "cantidad"
   formRango.value = {
     empleado_id: "",
     obra_id: "",
     fecha_desde: new Date().toISOString().split("T")[0],
     fecha_hasta: new Date().toISOString().split("T")[0],
     horas_por_dia: "",
+    hora_inicio: "",
+    hora_fin: "",
     es_prestada: false,
     grupo_origen_id: "",
     grupo_destino_id: ""
@@ -173,13 +237,27 @@ const closeModalRango = () => {
 // Guardar hora diaria
 const saveHoraDiaria = async () => {
   error.value = ""
-  if (!formDiaria.value.empleado_id || !formDiaria.value.obra_id || !formDiaria.value.fecha) {
-    error.value = "Empleado, obra y fecha son obligatorios"
+  const esEmpleadoAdmin = isEmpleadoAdministrativo(formDiaria.value.empleado_id)
+
+  // Asegurar que la obra esté sincronizada para empleados administrativos
+  if (esEmpleadoAdmin && !formDiaria.value.obra_id) {
+    const obraAdmin = getObraAdministrativaParaEmpleado(formDiaria.value.empleado_id)
+    if (obraAdmin?.id) {
+      formDiaria.value.obra_id = obraAdmin.id
+    }
+  }
+
+  if (!formDiaria.value.empleado_id || !formDiaria.value.fecha) {
+    error.value = "Empleado y fecha son obligatorios"
     return
   }
 
-  if (!formDiaria.value.cantidad_horas && (!formDiaria.value.hora_inicio || !formDiaria.value.hora_fin)) {
-    error.value = "Ingresa cantidad de horas o ambas horas (inicio y fin)"
+  if (modoDiaria.value === "cantidad" && !formDiaria.value.cantidad_horas) {
+    error.value = "Ingresá la cantidad de horas"
+    return
+  }
+  if (modoDiaria.value === "horario" && (!formDiaria.value.hora_inicio || !formDiaria.value.hora_fin)) {
+    error.value = "Ingresá hora de inicio y hora de fin"
     return
   }
 
@@ -194,9 +272,9 @@ const saveHoraDiaria = async () => {
       empleado_id: formDiaria.value.empleado_id,
       obra_id: formDiaria.value.obra_id,
       fecha: formDiaria.value.fecha,
-      cantidad_horas: formDiaria.value.cantidad_horas,
-      hora_inicio: formDiaria.value.hora_inicio || null,
-      hora_fin: formDiaria.value.hora_fin || null,
+      cantidad_horas: modoDiaria.value === "cantidad" ? formDiaria.value.cantidad_horas : null,
+      hora_inicio: modoDiaria.value === "horario" ? formDiaria.value.hora_inicio || null : null,
+      hora_fin: modoDiaria.value === "horario" ? formDiaria.value.hora_fin || null : null,
       es_prestada: formDiaria.value.es_prestada,
       grupo_origen_id: formDiaria.value.es_prestada ? formDiaria.value.grupo_origen_id : null,
       grupo_destino_id: formDiaria.value.es_prestada ? formDiaria.value.grupo_destino_id : null
@@ -221,13 +299,27 @@ const saveHoraDiaria = async () => {
 // Guardar horas por rango
 const saveHoraRango = async () => {
   error.value = ""
-  if (!formRango.value.empleado_id || !formRango.value.obra_id || !formRango.value.fecha_desde || !formRango.value.fecha_hasta) {
-    error.value = "Empleado, obra y fechas son obligatorios"
+  const esEmpleadoAdmin = isEmpleadoAdministrativo(formRango.value.empleado_id)
+
+  // Asegurar que la obra esté sincronizada para empleados administrativos
+  if (esEmpleadoAdmin && !formRango.value.obra_id) {
+    const obraAdmin = getObraAdministrativaParaEmpleado(formRango.value.empleado_id)
+    if (obraAdmin?.id) {
+      formRango.value.obra_id = obraAdmin.id
+    }
+  }
+
+  if (!formRango.value.empleado_id || !formRango.value.fecha_desde || !formRango.value.fecha_hasta) {
+    error.value = "Empleado y fechas son obligatorios"
     return
   }
 
-  if (!formRango.value.horas_por_dia || formRango.value.horas_por_dia <= 0) {
-    error.value = "Ingresa las horas por día (mayor a 0)"
+  if (modoRango.value === "cantidad" && (!formRango.value.horas_por_dia || formRango.value.horas_por_dia <= 0)) {
+    error.value = "Ingresá las horas por día (mayor a 0)"
+    return
+  }
+  if (modoRango.value === "horario" && (!formRango.value.hora_inicio || !formRango.value.hora_fin)) {
+    error.value = "Ingresá hora de inicio y hora de fin"
     return
   }
 
@@ -258,7 +350,9 @@ const saveHoraRango = async () => {
           empleado_id: formRango.value.empleado_id,
           obra_id: formRango.value.obra_id,
           fecha: fechaStr,
-          cantidad_horas: parseFloat(formRango.value.horas_por_dia),
+          cantidad_horas: modoRango.value === "cantidad" ? parseFloat(formRango.value.horas_por_dia) : null,
+          hora_inicio: modoRango.value === "horario" ? formRango.value.hora_inicio || null : null,
+          hora_fin: modoRango.value === "horario" ? formRango.value.hora_fin || null : null,
           es_prestada: formRango.value.es_prestada,
           grupo_origen_id: formRango.value.es_prestada ? formRango.value.grupo_origen_id : null,
           grupo_destino_id: formRango.value.es_prestada ? formRango.value.grupo_destino_id : null
@@ -302,8 +396,22 @@ const getNombreEmpleado = (empleadoId) => {
 }
 
 const getNombreObra = (obraId) => {
+  if (!obraId) return "Sin obra"
   const obra = obras.value.find((o) => String(o.id) === String(obraId))
-  return obra ? obra.nombre : "-"
+  if (!obra) return "Sin obra"
+  return isObraAdministrativa(obra) ? "Administración" : obra.nombre
+}
+
+const getNombreObraRegistro = (hora) => {
+  if (!hora?.obra_id) return "Sin obra"
+  const obra = obras.value.find((o) => String(o.id) === String(hora?.obra_id))
+  if (!obra) return "Sin obra"
+
+  if (isObraAdministrativa(obra) && isEmpleadoAdministrativo(hora?.empleado_id)) {
+    return "Administración"
+  }
+
+  return obra.nombre
 }
 
 const getNombreGrupo = (grupoId) => {
@@ -530,7 +638,7 @@ onUnmounted(() => {
               <label>Obra:</label>
               <select v-model="filtroObra" @change="aplicarFiltros">
                 <option value="">Todas</option>
-                <option v-for="obra in obras" :key="obra.id" :value="obra.id">
+                <option v-for="obra in obrasNoAdministrativas" :key="obra.id" :value="obra.id">
                   {{ obra.nombre }}
                 </option>
               </select>
@@ -706,7 +814,7 @@ onUnmounted(() => {
               </thead>
               <tbody>
                 <tr v-for="(obra, idx) in resumenObra" :key="idx">
-                  <td>{{ getNombreObra(obra.obra_id) }}</td>
+                  <td>{{ obra.obra_nombre || getNombreObra(obra.obra_id) }}</td>
                   <td>{{ obra.total_horas?.toFixed(2) || 0 }}</td>
                 </tr>
               </tbody>
@@ -806,23 +914,38 @@ onUnmounted(() => {
               </select>
             </label>
 
-            <label class="form-group">
-              <span>Obra *</span>
-              <select v-model="formDiaria.obra_id" required>
-                <option value="">Seleccionar obra...</option>
-                <option v-for="obra in obras" :key="obra.id" :value="obra.id">
+            <label v-if="!isEmpleadoAdministrativo(formDiaria.empleado_id)" class="form-group">
+              <span>Obra</span>
+              <select v-model="formDiaria.obra_id">
+                <option value="">Sin obra</option>
+                <option v-for="obra in obrasNoAdministrativas" :key="obra.id" :value="obra.id">
                   {{ obra.nombre }}
                 </option>
               </select>
             </label>
+
+            <div v-else class="info-rango">
+              Obra: <strong>Administración</strong>
+            </div>
 
             <label class="form-group">
               <span>Fecha *</span>
               <input v-model="formDiaria.fecha" type="date" required />
             </label>
 
-            <label class="form-group">
-              <span>Cantidad de horas</span>
+            <div class="modo-selector">
+              <label :class="['modo-btn', { active: modoDiaria === 'cantidad' }]">
+                <input type="radio" v-model="modoDiaria" value="cantidad" hidden />
+                Cantidad de horas
+              </label>
+              <label :class="['modo-btn', { active: modoDiaria === 'horario' }]">
+                <input type="radio" v-model="modoDiaria" value="horario" hidden />
+                De hora a hora
+              </label>
+            </div>
+
+            <label v-if="modoDiaria === 'cantidad'" class="form-group">
+              <span>Cantidad de horas *</span>
               <input
                 v-model.number="formDiaria.cantidad_horas"
                 type="number"
@@ -831,14 +954,13 @@ onUnmounted(() => {
               />
             </label>
 
-            <div class="form-row">
+            <div v-if="modoDiaria === 'horario'" class="form-row">
               <label class="form-group">
-                <span>Hora inicio</span>
+                <span>Hora inicio *</span>
                 <input v-model="formDiaria.hora_inicio" type="time" />
               </label>
-
               <label class="form-group">
-                <span>Hora fin</span>
+                <span>Hora fin *</span>
                 <input v-model="formDiaria.hora_fin" type="time" />
               </label>
             </div>
@@ -901,15 +1023,19 @@ onUnmounted(() => {
               </select>
             </label>
 
-            <label class="form-group">
-              <span>Obra *</span>
-              <select v-model="formRango.obra_id" required>
-                <option value="">Seleccionar obra...</option>
-                <option v-for="obra in obras" :key="obra.id" :value="obra.id">
+            <label v-if="!isEmpleadoAdministrativo(formRango.empleado_id)" class="form-group">
+              <span>Obra</span>
+              <select v-model="formRango.obra_id">
+                <option value="">Sin obra</option>
+                <option v-for="obra in obrasNoAdministrativas" :key="obra.id" :value="obra.id">
                   {{ obra.nombre }}
                 </option>
               </select>
             </label>
+
+            <div v-else class="info-rango">
+              Obra: <strong>Administración</strong>
+            </div>
 
             <div class="form-row">
               <label class="form-group">
@@ -923,16 +1049,37 @@ onUnmounted(() => {
               </label>
             </div>
 
-            <label class="form-group">
+            <div class="modo-selector">
+              <label :class="['modo-btn', { active: modoRango === 'cantidad' }]">
+                <input type="radio" v-model="modoRango" value="cantidad" hidden />
+                Horas por día
+              </label>
+              <label :class="['modo-btn', { active: modoRango === 'horario' }]">
+                <input type="radio" v-model="modoRango" value="horario" hidden />
+                De hora a hora
+              </label>
+            </div>
+
+            <label v-if="modoRango === 'cantidad'" class="form-group">
               <span>Horas por día *</span>
               <input
                 v-model.number="formRango.horas_por_dia"
                 type="number"
                 step="0.5"
                 placeholder="Ej: 8"
-                required
               />
             </label>
+
+            <div v-if="modoRango === 'horario'" class="form-row">
+              <label class="form-group">
+                <span>Hora inicio *</span>
+                <input v-model="formRango.hora_inicio" type="time" />
+              </label>
+              <label class="form-group">
+                <span>Hora fin *</span>
+                <input v-model="formRango.hora_fin" type="time" />
+              </label>
+            </div>
 
             <label class="form-group checkbox">
               <input v-model="formRango.es_prestada" type="checkbox" />
@@ -981,6 +1128,36 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.modo-selector {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.modo-btn {
+  flex: 1;
+  text-align: center;
+  padding: 0.5rem 1rem;
+  background-color: rgba(30, 41, 59, 0.5);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 0.375rem;
+  color: #94a3b8;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.modo-btn:hover {
+  background-color: rgba(30, 41, 59, 0.8);
+  border-color: rgba(148, 163, 184, 0.3);
+}
+
+.modo-btn.active {
+  background-color: #3b82f6;
+  border-color: #3b82f6;
+  color: white;
+}
 .horas-container {
   padding: 1.5rem;
 }

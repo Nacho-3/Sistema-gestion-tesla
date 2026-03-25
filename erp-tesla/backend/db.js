@@ -30,7 +30,7 @@ function sanitizeIdentifier(value, kind = "identifier") {
 }
 
 function parseColumns(columnsRaw) {
-  if (!columnsRaw || columnsRaw.trim() === "*" || columnsRaw.includes("detalles_medio_pago(") || columnsRaw.includes("grupos(")) {
+  if (!columnsRaw || columnsRaw.trim() === "*" || columnsRaw.includes("(") || columnsRaw.includes("*")) {
     return "*"
   }
 

@@ -4,6 +4,8 @@ import { getIo } from '../socket.js'
 
 const router = express.Router()
 
+const ADMIN_REGEX = /admin/i
+
 // Listar todas las obras (opcionalmente filtrar por estado)
 router.get("/", async (req, res) => {
   try {
@@ -13,7 +15,17 @@ router.get("/", async (req, res) => {
 
     const { data, error } = await query
     if (error) return res.status(400).json({ error: error.message })
-    res.json(data)
+
+    // Filtrar obras administrativas
+    const { data: grupos } = await db.from("grupos").select("id, nombre")
+    const gruposMap = new Map((grupos || []).map((g) => [g.id, g]))
+    const obrasVisibles = (data || []).filter((o) => {
+      if (ADMIN_REGEX.test(String(o.nombre || ""))) return false
+      const grupo = gruposMap.get(o.grupo_id)
+      return !ADMIN_REGEX.test(String(grupo?.nombre || ""))
+    })
+
+    res.json(obrasVisibles)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

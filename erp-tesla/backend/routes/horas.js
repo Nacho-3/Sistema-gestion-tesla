@@ -33,6 +33,49 @@ const getRangoMes = (mes, anio) => {
   return { inicio, fin }
 }
 
+const ADMIN_GROUP_REGEX = /admin/i
+
+const isAdministrativeObra = (obra, grupos = []) => {
+  if (!obra) return false
+  if (ADMIN_GROUP_REGEX.test(String(obra.nombre || ""))) return true
+  const grupo = grupos.find((g) => String(g.id) === String(obra.grupo_id))
+  return ADMIN_GROUP_REGEX.test(String(grupo?.nombre || ""))
+}
+
+// Resolver automáticamente la obra para empleados administrativos
+const resolveObraForAdministrativeEmpleado = async (empleadoId) => {
+  const { data: empleado } = await db
+    .from("empleados")
+    .select("id, grupo_id")
+    .eq("id", empleadoId)
+    .single()
+
+  if (!empleado?.grupo_id) return null
+
+  const { data: grupo } = await db
+    .from("grupos")
+    .select("id, nombre")
+    .eq("id", empleado.grupo_id)
+    .single()
+
+  const isAdminGrupo = ADMIN_GROUP_REGEX.test(String(grupo?.nombre || ""))
+  if (!isAdminGrupo) return null
+
+  // Buscar obra administrativa para este grupo
+  const { data: obras } = await db
+    .from("obras")
+    .select("id, nombre")
+    .eq("grupo_id", empleado.grupo_id)
+
+  if (!obras || obras.length === 0) {
+    return null
+  }
+
+  // Retornar primera obra administrativa o la que tenga nombre con "admin"
+  const obraAdmin = obras.find((o) => ADMIN_GROUP_REGEX.test(String(o.nombre || ""))) || obras[0]
+  return obraAdmin?.id || null
+}
+
 router.get("/resumen/pdf", async (req, res) => {
   try {
     const { mes, anio } = req.query
@@ -76,7 +119,7 @@ router.get("/resumen/pdf", async (req, res) => {
       const grupo = gruposData.find((g) => g.id === obra?.grupo_id)
 
       const empLabel = emp ? `${emp.nombre} ${emp.apellido}` : `Empleado ${h.empleado_id}`
-      const obraLabel = obra?.nombre || "Obra sin nombre"
+      const obraLabel = isAdministrativeObra(obra, gruposData) ? "Administración" : (obra?.nombre || "Obra sin nombre")
       const grupoLabel = grupo?.nombre || "Sin grupo"
 
       if (!resumenEmpleado[empLabel]) resumenEmpleado[empLabel] = 0
@@ -303,10 +346,17 @@ router.post("/", async (req, res) => {
       grupo_destino_id
     } = req.body
 
-    if (!empleado_id || !obra_id || !fecha) {
+    // Validar campos obligatorios
+    if (!empleado_id || !fecha) {
       return res.status(400).json({
-        error: "Empleado, obra y fecha son obligatorios"
+        error: "Empleado y fecha son obligatorios"
       })
+    }
+
+    // Resolver obra automáticamente si no viene en el request y el empleado es administrativo
+    let obraIdFinal = obra_id || null
+    if (!obraIdFinal) {
+      obraIdFinal = await resolveObraForAdministrativeEmpleado(empleado_id)
     }
 
     const cantidadNumerica = Number(cantidad_horas)
@@ -334,7 +384,7 @@ router.post("/", async (req, res) => {
       .insert([
         {
           empleado_id,
-          obra_id,
+          obra_id: obraIdFinal,
           fecha,
           hora_inicio,
           hora_fin,
@@ -373,6 +423,24 @@ router.put("/:id", async (req, res) => {
       grupo_destino_id
     } = req.body
 
+    const { data: actual, error: actualError } = await db
+      .from("horas")
+      .select("id, empleado_id, obra_id")
+      .eq("id", id)
+      .single()
+
+    if (actualError || !actual) {
+      return res.status(404).json({ error: "Registro de horas no encontrado" })
+    }
+
+    const empleadoIdResolved = empleado_id || actual.empleado_id
+    let obraIdResolved = obra_id !== undefined ? (obra_id || null) : actual.obra_id
+
+    // Si no hay obra, intentar resolver automáticamente para empleados administrativos
+    if (!obraIdResolved) {
+      obraIdResolved = await resolveObraForAdministrativeEmpleado(empleadoIdResolved)
+    }
+
     const cantidadNumerica = Number(cantidad_horas)
     const tieneCantidadValida = Number.isFinite(cantidadNumerica) && cantidadNumerica > 0
     let horas = tieneCantidadValida ? cantidadNumerica : null
@@ -390,8 +458,8 @@ router.put("/:id", async (req, res) => {
     const { data, error } = await db
       .from("horas")
       .update({
-        empleado_id,
-        obra_id,
+        empleado_id: empleadoIdResolved,
+        obra_id: obraIdResolved,
         fecha,
         hora_inicio,
         hora_fin,
@@ -491,19 +559,37 @@ router.get("/resumen/obra", async (req, res) => {
 
     if (error) return res.status(400).json({ error: error.message })
 
-    // Agrupar manualmente por obra
+    const [obrasDataRes, empleadosDataRes, gruposDataRes] = await Promise.all([
+      db.from("obras").select("id, nombre, grupo_id"),
+      db.from("empleados").select("id, grupo_id"),
+      db.from("grupos").select("id, nombre")
+    ])
+
+    const obrasData = obrasDataRes.data || []
+    const empleadosData = empleadosDataRes.data || []
+    const gruposData = gruposDataRes.data || []
+
+    // Agrupar manualmente por obra, pero las horas del grupo administrativo van a "Administración"
     const resumen = {}
     data.forEach((h) => {
-      if (!resumen[h.obra_id]) {
-        resumen[h.obra_id] = 0
+      const empleado = empleadosData.find((e) => e.id === h.empleado_id)
+      const grupoEmpleado = gruposData.find((g) => g.id === empleado?.grupo_id)
+      const esAdministrativo = /admin/i.test(String(grupoEmpleado?.nombre || ""))
+
+      const claveResumen = esAdministrativo ? "administracion" : String(h.obra_id || "sin_obra")
+      if (!resumen[claveResumen]) {
+        resumen[claveResumen] = {
+          obra_id: esAdministrativo ? null : (h.obra_id ? Number(h.obra_id) : null),
+          obra_nombre: esAdministrativo
+            ? "Administración"
+            : (obrasData.find((o) => o.id === h.obra_id)?.nombre || "Sin obra"),
+          total_horas: 0
+        }
       }
-      resumen[h.obra_id] += getCantidadHoras(h)
+      resumen[claveResumen].total_horas += getCantidadHoras(h)
     })
 
-    const resultado = Object.entries(resumen).map(([obraId, totalHoras]) => ({
-      obra_id: Number(obraId),
-      total_horas: totalHoras
-    }))
+    const resultado = Object.values(resumen)
 
     res.json(resultado)
   } catch (err) {

@@ -40,17 +40,20 @@ CREATE TABLE IF NOT EXISTS clientes (
   direccion TEXT,
   telefono VARCHAR(50),
   email VARCHAR(120),
+  iva VARCHAR(100) DEFAULT 'Responsable Inscripto',
   activo BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE clientes ADD COLUMN IF NOT EXISTS iva VARCHAR(100) DEFAULT 'Responsable Inscripto';
 
 CREATE TABLE IF NOT EXISTS obras (
   id SERIAL PRIMARY KEY,
   nombre VARCHAR(255) NOT NULL,
   cliente_id INTEGER NOT NULL REFERENCES clientes(id),
   grupo_id INTEGER NOT NULL REFERENCES grupos(id),
-  estado VARCHAR(30) NOT NULL DEFAULT 'activa',
+  estado VARCHAR(30) NOT NULL DEFAULT 'activa' CONSTRAINT chk_obras_estado CHECK (estado IN ('activa', 'finalizada', 'cerrada')),
+  activo BOOLEAN DEFAULT TRUE,
   fecha_inicio DATE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -60,12 +63,12 @@ CREATE TABLE IF NOT EXISTS empleados (
   id SERIAL PRIMARY KEY,
   nombre VARCHAR(120) NOT NULL,
   apellido VARCHAR(120) NOT NULL,
-  dni VARCHAR(20) UNIQUE NOT NULL,
+  dni VARCHAR(20) NOT NULL,
   cuit VARCHAR(30),
   fecha_nacimiento DATE,
   direccion TEXT,
   telefono VARCHAR(50),
-  tipo VARCHAR(30),
+  tipo VARCHAR(30) CONSTRAINT chk_empleados_tipo CHECK (tipo IS NULL OR tipo IN ('monotributista', 'empleado_dependiente')),
   alias VARCHAR(120),
   grupo_id INTEGER REFERENCES grupos(id),
   valor_hora NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -104,6 +107,17 @@ CREATE TABLE IF NOT EXISTS liquidaciones (
   periodo_fin DATE NOT NULL,
   total_horas NUMERIC(12,2) DEFAULT 0,
   monto_bruto NUMERIC(12,2) DEFAULT 0,
+  presentismo NUMERIC(12,2) DEFAULT 0,
+  horas_extra_cantidad NUMERIC(12,2) DEFAULT 0,
+  importe_horas_extra NUMERIC(12,2) DEFAULT 0,
+  no_remunerativo NUMERIC(12,2) DEFAULT 0,
+  aguinaldo NUMERIC(12,2) DEFAULT 0,
+  vacaciones NUMERIC(12,2) DEFAULT 0,
+  feriados_cantidad NUMERIC(12,2) DEFAULT 0,
+  importe_feriados NUMERIC(12,2) DEFAULT 0,
+  dias_no_trabajados NUMERIC(12,2) DEFAULT 0,
+  descuento_dias_no_trabajados NUMERIC(12,2) DEFAULT 0,
+  adelantos NUMERIC(12,2) DEFAULT 0,
   descuentos NUMERIC(12,2) DEFAULT 0,
   monto_neto NUMERIC(12,2) DEFAULT 0,
   estado VARCHAR(20) DEFAULT 'pendiente',
@@ -131,6 +145,17 @@ ALTER TABLE IF EXISTS liquidaciones
   ADD COLUMN IF NOT EXISTS periodo_inicio DATE,
   ADD COLUMN IF NOT EXISTS periodo_fin DATE,
   ADD COLUMN IF NOT EXISTS monto_bruto NUMERIC(12,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS presentismo NUMERIC(12,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS horas_extra_cantidad NUMERIC(12,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS importe_horas_extra NUMERIC(12,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS no_remunerativo NUMERIC(12,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS aguinaldo NUMERIC(12,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS vacaciones NUMERIC(12,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS feriados_cantidad NUMERIC(12,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS importe_feriados NUMERIC(12,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS dias_no_trabajados NUMERIC(12,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS descuento_dias_no_trabajados NUMERIC(12,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS adelantos NUMERIC(12,2) DEFAULT 0,
   ADD COLUMN IF NOT EXISTS descuentos NUMERIC(12,2) DEFAULT 0,
   ADD COLUMN IF NOT EXISTS monto_neto NUMERIC(12,2) DEFAULT 0,
   ADD COLUMN IF NOT EXISTS estado VARCHAR(20) DEFAULT 'pendiente',
@@ -229,6 +254,57 @@ BEGIN
   END IF;
 END $$;
 
+-- Obras: columna activo (soft-delete, igual que clientes/empleados/grupos)
+ALTER TABLE IF EXISTS obras
+  ADD COLUMN IF NOT EXISTS activo BOOLEAN DEFAULT TRUE;
+
+UPDATE obras SET activo = TRUE WHERE activo IS NULL;
+
+-- Obras: CHECK en estado para DBs existentes sin el constraint
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'chk_obras_estado'
+      AND conrelid = 'obras'::regclass
+  ) THEN
+    ALTER TABLE obras ADD CONSTRAINT chk_obras_estado
+      CHECK (estado IN ('activa', 'finalizada', 'cerrada'));
+  END IF;
+END $$;
+
+-- Empleados: CHECK en tipo para DBs existentes sin el constraint
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'chk_empleados_tipo'
+      AND conrelid = 'empleados'::regclass
+  ) THEN
+    UPDATE empleados
+    SET tipo = NULL
+    WHERE tipo IS NOT NULL AND tipo NOT IN ('monotributista', 'empleado_dependiente');
+
+    ALTER TABLE empleados ADD CONSTRAINT chk_empleados_tipo
+      CHECK (tipo IS NULL OR tipo IN ('monotributista', 'empleado_dependiente'));
+  END IF;
+END $$;
+
+-- Empleados: reemplazar UNIQUE global en DNI por índice parcial (solo activos)
+-- Permite reutilizar DNI de empleados dados de baja (activo = false)
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'empleados_dni_key'
+      AND conrelid = 'empleados'::regclass
+  ) THEN
+    ALTER TABLE empleados DROP CONSTRAINT empleados_dni_key;
+  END IF;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_empleados_dni_activo ON empleados(dni) WHERE activo = TRUE;
+
 -- =========================
 -- CAJA
 -- =========================
@@ -237,10 +313,20 @@ CREATE TABLE IF NOT EXISTS movimientos_caja (
   fecha DATE NOT NULL,
   tipo VARCHAR(20) NOT NULL CHECK (tipo IN ('ingreso', 'egreso')),
   detalle TEXT NOT NULL,
+  categoria VARCHAR(20) CONSTRAINT chk_movimientos_categoria CHECK (categoria IS NULL OR categoria IN ('mano_obra', 'materiales')),
+  con_iva BOOLEAN NOT NULL DEFAULT true,
+  cliente_id INTEGER REFERENCES clientes(id) ON DELETE SET NULL,
+  presupuesto_id INTEGER,
   monto_total NUMERIC(12,2) NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE IF EXISTS movimientos_caja
+  ADD COLUMN IF NOT EXISTS categoria VARCHAR(20),
+  ADD COLUMN IF NOT EXISTS con_iva BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS cliente_id INTEGER,
+  ADD COLUMN IF NOT EXISTS presupuesto_id INTEGER;
 
 CREATE TABLE IF NOT EXISTS detalles_medio_pago (
   id SERIAL PRIMARY KEY,
@@ -287,10 +373,81 @@ CREATE TABLE IF NOT EXISTS presupuesto_items (
   orden INTEGER NOT NULL,
   descripcion TEXT NOT NULL,
   cantidad NUMERIC(12,2) NOT NULL DEFAULT 1,
+  ganancia_porcentaje NUMERIC(6,2) NOT NULL DEFAULT 0,
   precio_unitario NUMERIC(12,2) NOT NULL DEFAULT 0,
   subtotal NUMERIC(12,2) NOT NULL DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS certificados (
+  id SERIAL PRIMARY KEY,
+  presupuesto_id INTEGER NOT NULL REFERENCES presupuestos(id) ON DELETE CASCADE,
+  numero INTEGER NOT NULL,
+  secuencia INTEGER NOT NULL,
+  fecha DATE NOT NULL DEFAULT CURRENT_DATE,
+  estado VARCHAR(20) NOT NULL DEFAULT 'pendiente' CHECK (estado IN ('pendiente', 'pagado')),
+  tipo_registro VARCHAR(20) NOT NULL DEFAULT 'porcentaje' CHECK (tipo_registro IN ('porcentaje', 'monto')),
+  porcentaje_avance NUMERIC(6,2) NOT NULL DEFAULT 0,
+  importe_original NUMERIC(12,2) NOT NULL DEFAULT 0,
+  certificado NUMERIC(12,2) NOT NULL DEFAULT 0,
+  monto_base NUMERIC(12,2) NOT NULL DEFAULT 0,
+  indice_cac NUMERIC(12,4) NOT NULL DEFAULT 1,
+  ajuste_porcentaje NUMERIC(6,2) NOT NULL DEFAULT 0,
+  actualizacion NUMERIC(12,2) NOT NULL DEFAULT 0,
+  iva NUMERIC(12,2) NOT NULL DEFAULT 0,
+  total_cert_sin_iva NUMERIC(12,2) NOT NULL DEFAULT 0,
+  total_cert_con_iva NUMERIC(12,2) NOT NULL DEFAULT 0,
+  acumulado_certificado NUMERIC(12,2) NOT NULL DEFAULT 0,
+  saldo_pre_original NUMERIC(12,2) NOT NULL DEFAULT 0,
+  pagos NUMERIC(12,2) NOT NULL DEFAULT 0,
+  saldo_pendiente NUMERIC(12,2) NOT NULL DEFAULT 0,
+  observaciones TEXT DEFAULT '',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE certificados ADD COLUMN IF NOT EXISTS secuencia INTEGER;
+ALTER TABLE certificados ADD COLUMN IF NOT EXISTS estado VARCHAR(20) NOT NULL DEFAULT 'pendiente';
+ALTER TABLE certificados ADD COLUMN IF NOT EXISTS tipo_registro VARCHAR(20) NOT NULL DEFAULT 'porcentaje';
+ALTER TABLE certificados ADD COLUMN IF NOT EXISTS porcentaje_avance NUMERIC(6,2) NOT NULL DEFAULT 0;
+ALTER TABLE certificados ADD COLUMN IF NOT EXISTS monto_base NUMERIC(12,2) NOT NULL DEFAULT 0;
+ALTER TABLE certificados ADD COLUMN IF NOT EXISTS indice_cac NUMERIC(12,4) NOT NULL DEFAULT 1;
+ALTER TABLE certificados ADD COLUMN IF NOT EXISTS total_cert_con_iva NUMERIC(12,2) NOT NULL DEFAULT 0;
+ALTER TABLE certificados ADD COLUMN IF NOT EXISTS acumulado_certificado NUMERIC(12,2) NOT NULL DEFAULT 0;
+ALTER TABLE certificados ADD COLUMN IF NOT EXISTS observaciones TEXT DEFAULT '';
+
+UPDATE certificados
+SET
+  secuencia = COALESCE(secuencia, numero, 1),
+  estado = COALESCE(NULLIF(estado, ''), 'pendiente'),
+  tipo_registro = COALESCE(NULLIF(tipo_registro, ''), 'monto'),
+  porcentaje_avance = COALESCE(porcentaje_avance, 0),
+  monto_base = COALESCE(monto_base, certificado, 0),
+  indice_cac = COALESCE(NULLIF(indice_cac, 0), 1),
+  total_cert_con_iva = COALESCE(total_cert_con_iva, total_cert_sin_iva + iva, 0),
+  acumulado_certificado = COALESCE(acumulado_certificado, certificado, 0),
+  observaciones = COALESCE(observaciones, '')
+WHERE
+  secuencia IS NULL
+  OR estado IS NULL
+  OR tipo_registro IS NULL
+  OR porcentaje_avance IS NULL
+  OR monto_base IS NULL
+  OR indice_cac IS NULL
+  OR total_cert_con_iva IS NULL
+  OR acumulado_certificado IS NULL
+  OR observaciones IS NULL;
+
+WITH numerados AS (
+  SELECT id, ROW_NUMBER() OVER (PARTITION BY presupuesto_id ORDER BY fecha ASC, id ASC) AS nueva_secuencia
+  FROM certificados
+)
+UPDATE certificados c
+SET
+  secuencia = n.nueva_secuencia,
+  numero = n.nueva_secuencia
+FROM numerados n
+WHERE c.id = n.id;
 
 -- =========================
 -- ÍNDICES
@@ -301,10 +458,15 @@ CREATE INDEX IF NOT EXISTS idx_obras_estado ON obras(estado);
 CREATE INDEX IF NOT EXISTS idx_empleados_activo ON empleados(activo);
 CREATE INDEX IF NOT EXISTS idx_horas_fecha ON horas(fecha);
 CREATE INDEX IF NOT EXISTS idx_horas_empleado ON horas(empleado_id);
+CREATE INDEX IF NOT EXISTS idx_certificados_presupuesto ON certificados(presupuesto_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_certificados_presupuesto_secuencia ON certificados(presupuesto_id, secuencia);
+CREATE INDEX IF NOT EXISTS idx_certificados_estado ON certificados(estado);
 CREATE INDEX IF NOT EXISTS idx_liquidaciones_periodo ON liquidaciones(periodo_inicio, periodo_fin);
 CREATE INDEX IF NOT EXISTS idx_pagos_liquidacion ON pagos_sueldo(liquidacion_id);
 CREATE INDEX IF NOT EXISTS idx_pagos_fecha_pago ON pagos_sueldo(fecha_pago);
 CREATE INDEX IF NOT EXISTS idx_movimientos_fecha ON movimientos_caja(fecha);
+CREATE INDEX IF NOT EXISTS idx_movimientos_cliente ON movimientos_caja(cliente_id);
+CREATE INDEX IF NOT EXISTS idx_movimientos_presupuesto ON movimientos_caja(presupuesto_id);
 CREATE INDEX IF NOT EXISTS idx_detalles_movimiento ON detalles_medio_pago(movimiento_id);
 CREATE INDEX IF NOT EXISTS idx_presupuestos_cliente ON presupuestos(cliente_id);
 CREATE INDEX IF NOT EXISTS idx_presupuestos_obra ON presupuestos(obra_id);
@@ -350,40 +512,76 @@ CREATE TRIGGER trg_movimientos_caja_updated_at BEFORE UPDATE ON movimientos_caja
 DROP TRIGGER IF EXISTS trg_presupuestos_updated_at ON presupuestos;
 CREATE TRIGGER trg_presupuestos_updated_at BEFORE UPDATE ON presupuestos FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
+DROP TRIGGER IF EXISTS trg_certificados_updated_at ON certificados;
+CREATE TRIGGER trg_certificados_updated_at BEFORE UPDATE ON certificados FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
 DROP TRIGGER IF EXISTS trg_app_config_updated_at ON app_config;
 CREATE TRIGGER trg_app_config_updated_at BEFORE UPDATE ON app_config FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- =========================
--- DATOS MÍNIMOS
+-- INTEGRIDAD REFERENCIAL
+-- (debe ejecutarse luego de que todas las tablas existan)
 -- =========================
-INSERT INTO grupos (nombre, descripcion)
-SELECT x.nombre, x.descripcion
-FROM (
-  VALUES
-    ('Tesla', 'Grupo operativo principal'),
-    ('Teslita', 'Grupo operativo secundario'),
-    ('grupo juani', 'Grupo operativo')
-) AS x(nombre, descripcion)
-WHERE NOT EXISTS (
-  SELECT 1
-  FROM grupos g
-  WHERE lower(g.nombre) = lower(x.nombre)
-);
 
-DELETE FROM grupos g
-WHERE g.nombre IN ('Grupo A', 'Grupo B')
-  AND NOT EXISTS (SELECT 1 FROM obras o WHERE o.grupo_id = g.id)
-  AND NOT EXISTS (SELECT 1 FROM empleados e WHERE e.grupo_id = g.id)
-  AND NOT EXISTS (SELECT 1 FROM horas h WHERE h.grupo_origen_id = g.id OR h.grupo_destino_id = g.id);
+-- movimientos_caja.cliente_id → clientes (ON DELETE SET NULL)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'movimientos_caja_cliente_id_fkey'
+      AND conrelid = 'movimientos_caja'::regclass
+  ) THEN
+    UPDATE movimientos_caja
+    SET cliente_id = NULL
+    WHERE cliente_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM clientes WHERE id = movimientos_caja.cliente_id);
 
-INSERT INTO clientes (razon_social, cuit, email)
-SELECT 'Cliente Demo S.A.', '30-12345678-9', 'contacto@demo.com'
-WHERE NOT EXISTS (
-  SELECT 1
-  FROM clientes c
-  WHERE c.razon_social = 'Cliente Demo S.A.'
-);
+    ALTER TABLE movimientos_caja
+      ADD CONSTRAINT movimientos_caja_cliente_id_fkey
+      FOREIGN KEY (cliente_id) REFERENCES clientes(id) ON DELETE SET NULL;
+  END IF;
+END $$;
 
-INSERT INTO app_config (key, value_int)
-VALUES ('presupuesto_next_number', 1)
-ON CONFLICT (key) DO NOTHING;
+-- movimientos_caja.presupuesto_id → presupuestos (ON DELETE SET NULL)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'movimientos_caja_presupuesto_id_fkey'
+      AND conrelid = 'movimientos_caja'::regclass
+  ) THEN
+    UPDATE movimientos_caja
+    SET presupuesto_id = NULL
+    WHERE presupuesto_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM presupuestos WHERE id = movimientos_caja.presupuesto_id);
+
+    ALTER TABLE movimientos_caja
+      ADD CONSTRAINT movimientos_caja_presupuesto_id_fkey
+      FOREIGN KEY (presupuesto_id) REFERENCES presupuestos(id) ON DELETE SET NULL;
+  END IF;
+END $$;
+
+-- movimientos_caja.categoria: normalizar nombre del CHECK (para DBs migradas sin constraint nombrado)
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'movimientos_caja_categoria_check'
+      AND conrelid = 'movimientos_caja'::regclass
+  ) THEN
+    ALTER TABLE movimientos_caja DROP CONSTRAINT movimientos_caja_categoria_check;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'chk_movimientos_categoria'
+      AND conrelid = 'movimientos_caja'::regclass
+  ) THEN
+    UPDATE movimientos_caja
+    SET categoria = NULL
+    WHERE categoria IS NOT NULL AND categoria NOT IN ('mano_obra', 'materiales');
+
+    ALTER TABLE movimientos_caja ADD CONSTRAINT chk_movimientos_categoria
+      CHECK (categoria IS NULL OR categoria IN ('mano_obra', 'materiales'));
+  END IF;
+END $$;

@@ -183,6 +183,10 @@ export default {
     return api.put(`/liquidaciones/${id}`, payload)
   },
 
+  getLiquidacionPdf(id) {
+    return api.get(`/liquidaciones/${id}/pdf`, { responseType: "blob" })
+  },
+
   deleteLiquidacion(id) {
     return api.delete(`/liquidaciones/${id}`)
   },
@@ -249,6 +253,14 @@ export default {
     return api.post("/presupuestos", payload)
   },
 
+  updatePresupuesto(id, payload) {
+    return api.put(`/presupuestos/${id}`, payload)
+  },
+
+  deletePresupuesto(id) {
+    return api.delete(`/presupuestos/${id}`)
+  },
+
   updateEstadoPresupuesto(id, estado) {
     return api.patch(`/presupuestos/${id}/estado`, { estado })
   },
@@ -263,5 +275,21 @@ export default {
 
   updateNumeroSiguientePresupuesto(numero_siguiente) {
     return api.put("/presupuestos/config/numero-siguiente", { numero_siguiente })
+  },
+
+  getCertificados() {
+    return api.get("/certificados")
+  },
+
+  getCertificadosResumenPorPresupuesto() {
+    return api.get("/certificados/resumen-por-presupuesto")
+  },
+
+  createCertificado(payload) {
+    return api.post("/certificados", payload)
+  },
+
+  updateCertificado(id, payload) {
+    return api.put(`/certificados/${id}`, payload)
   }
 }

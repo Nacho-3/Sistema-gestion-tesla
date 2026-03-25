@@ -1,9 +1,11 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed } from "vue"
+import { useRouter } from "vue-router"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
 
+const router = useRouter()
 const presupuestos = ref([])
 const clientes = ref([])
 const obras = ref([])
@@ -14,9 +16,11 @@ const ok = ref("")
 
 const showForm = ref(false)
 const numeroSiguiente = ref(1)
+const editingId = ref(null)
+const editingNumero = ref(null)
 
-const newMaterialItem = () => ({ uid: Date.now() + Math.random(), descripcion: "", cantidad: 1, precio_unitario: 0 })
-const newManoObraItem = () => ({ uid: Date.now() + Math.random(), descripcion: "", precio_unitario: 0 })
+const newMaterialItem = () => ({ uid: Date.now() + Math.random(), descripcion: "", cantidad: 1, precio_unitario: 0, ganancia_porcentaje: 0 })
+const newManoObraItem = () => ({ uid: Date.now() + Math.random(), descripcion: "" })
 
 const form = ref({
   cliente_id: "",
@@ -26,6 +30,7 @@ const form = ref({
   forma_pago: "Contado",
   aplica_iva: true,
   iva_porcentaje: 21,
+  subtotal_general_mano_obra: 0,
   observaciones: "",
   items_materiales: [newMaterialItem()],
   items_mano_obra: [newManoObraItem()],
@@ -49,15 +54,21 @@ const materialRowsValidas = computed(() =>
 )
 
 const manoObraRowsValidas = computed(() =>
-  form.value.items_mano_obra.filter((item) => item.descripcion && Number(item.precio_unitario) > 0)
+  form.value.items_mano_obra.filter((item) => item.descripcion)
 )
 
 const subtotalMateriales = computed(() =>
-  materialRowsValidas.value.reduce((acc, item) => acc + (Number(item.cantidad) || 0) * (Number(item.precio_unitario) || 0), 0)
+  materialRowsValidas.value.reduce((acc, item) => {
+    const cantidad = Number(item.cantidad) || 0
+    const unitarioBase = Number(item.precio_unitario) || 0
+    const ganancia = Math.max(0, Number(item.ganancia_porcentaje) || 0)
+    const unitarioConGanancia = unitarioBase * (1 + ganancia / 100)
+    return acc + cantidad * unitarioConGanancia
+  }, 0)
 )
 
 const subtotalManoObra = computed(() =>
-  manoObraRowsValidas.value.reduce((acc, item) => acc + (Number(item.precio_unitario) || 0), 0)
+  Number(form.value.subtotal_general_mano_obra) || 0
 )
 
 const ivaMonto = computed(() => {
@@ -66,6 +77,70 @@ const ivaMonto = computed(() => {
 })
 
 const total = computed(() => subtotalMateriales.value + subtotalManoObra.value + ivaMonto.value)
+
+const totalPresupuestado = computed(() =>
+  presupuestos.value.reduce((acc, p) => acc + (Number(p.total) || 0), 0)
+)
+
+const totalPendiente = computed(() =>
+  presupuestos.value
+    .filter((p) => String(p.estado || "") === "pendiente")
+    .reduce((acc, p) => acc + (Number(p.total) || 0), 0)
+)
+
+const totalAceptado = computed(() =>
+  presupuestos.value
+    .filter((p) => String(p.estado || "") === "aceptado")
+    .reduce((acc, p) => acc + (Number(p.total) || 0), 0)
+)
+
+const formatDate = (value) => {
+  if (!value) return "-"
+  return new Date(value).toLocaleDateString("es-AR")
+}
+
+const estadoLabel = (estado) => {
+  const key = String(estado || "").toLowerCase()
+  return key.charAt(0).toUpperCase() + key.slice(1)
+}
+
+const estadoClass = (estado) => {
+  const key = String(estado || "").toLowerCase()
+  return `estado-pill estado-${key}`
+}
+
+const certificadoStatusLabel = (presupuesto) => {
+  const cantidad = Number(presupuesto?.cantidad_certificados || 0)
+  if (!cantidad) return "Sin certificar"
+  if (presupuesto?.tiene_certificados_pendientes) return `Certificado pendiente (${cantidad})`
+  return `Certificado al dia (${cantidad})`
+}
+
+const certificadoStatusClass = (presupuesto) => {
+  const cantidad = Number(presupuesto?.cantidad_certificados || 0)
+  if (!cantidad) return "cert-badge cert-badge-empty"
+  if (presupuesto?.tiene_certificados_pendientes) return "cert-badge cert-badge-pending"
+  return "cert-badge cert-badge-ok"
+}
+
+const abrirCertificados = (presupuesto) => {
+  const query = Number(presupuesto?.cantidad_certificados || 0) > 0
+    ? { presupuesto_id: String(presupuesto.id), modo: "avances" }
+    : { presupuesto_id: String(presupuesto.id), modo: "generar" }
+
+  router.push({ path: "/certificados", query })
+}
+
+const precioUnitarioConGanancia = (row) => {
+  const base = Number(row?.precio_unitario) || 0
+  const ganancia = Math.max(0, Number(row?.ganancia_porcentaje) || 0)
+  return base * (1 + ganancia / 100)
+}
+
+const subtotalMaterialRowConGanancia = (row) => {
+  const cantidad = Number(row?.cantidad) || 0
+  return cantidad * precioUnitarioConGanancia(row)
+}
 
 const formatMoney = (value) => {
   const n = Number(value) || 0
@@ -106,6 +181,8 @@ const removeManoObraRow = (uid) => {
 }
 
 const resetForm = () => {
+  editingId.value = null
+  editingNumero.value = null
   form.value = {
     cliente_id: "",
     obra_id: "",
@@ -114,6 +191,7 @@ const resetForm = () => {
     forma_pago: "Contado",
     aplica_iva: true,
     iva_porcentaje: 21,
+    subtotal_general_mano_obra: 0,
     observaciones: "",
     items_materiales: [newMaterialItem()],
     items_mano_obra: [newManoObraItem()],
@@ -148,6 +226,52 @@ const openForm = () => {
   showForm.value = true
 }
 
+const editPresupuesto = async (id) => {
+  error.value = ""
+  ok.value = ""
+  try {
+    const { data } = await api.getPresupuesto(id)
+    const materiales = (data?.items || []).filter((item) => item.tipo === "material")
+    const manoObra = (data?.items || []).filter((item) => item.tipo === "mano_obra")
+
+    editingId.value = data.id
+    editingNumero.value = data.numero
+    form.value = {
+      cliente_id: data.cliente_id || "",
+      obra_id: data.obra_id || "",
+      fecha: data.fecha ? String(data.fecha).slice(0, 10) : new Date().toISOString().slice(0, 10),
+      validez_dias: Number(data.validez_dias) || 15,
+      forma_pago: data.forma_pago || "Contado",
+      aplica_iva: Number(data.iva_monto || 0) > 0,
+      iva_porcentaje: Number(data.iva_porcentaje) || 21,
+      subtotal_general_mano_obra: Number(data.subtotal_mano_obra) || 0,
+      observaciones: data.observaciones || "",
+      items_materiales: materiales.length
+        ? materiales.map((item) => ({
+            uid: Date.now() + Math.random(),
+            descripcion: item.descripcion || "",
+            cantidad: Number(item.cantidad) || 0,
+            ganancia_porcentaje: Math.max(0, Number(item.ganancia_porcentaje) || 0),
+            precio_unitario:
+              (Number(item.precio_unitario) || 0) /
+              (1 + Math.max(0, Number(item.ganancia_porcentaje) || 0) / 100),
+          }))
+        : [newMaterialItem()],
+      items_mano_obra: manoObra.length
+        ? manoObra.map((item) => ({
+            uid: Date.now() + Math.random(),
+            descripcion: item.descripcion || "",
+          }))
+        : [newManoObraItem()],
+    }
+
+    showForm.value = true
+  } catch (err) {
+    error.value = "No se pudo cargar el presupuesto para editar"
+    console.error(err)
+  }
+}
+
 const closeForm = () => {
   showForm.value = false
   resetForm()
@@ -170,45 +294,98 @@ const savePresupuesto = async () => {
     forma_pago: form.value.forma_pago,
     aplica_iva: Boolean(form.value.aplica_iva),
     iva_porcentaje: Number(form.value.iva_porcentaje) || 0,
+    subtotal_general_mano_obra: Number(form.value.subtotal_general_mano_obra) || 0,
     observaciones: form.value.observaciones,
     items_materiales: form.value.items_materiales.map((item) => ({
       descripcion: String(item.descripcion || "").trim(),
       cantidad: Number(item.cantidad) || 0,
+      ganancia_porcentaje: Math.max(0, Number(item.ganancia_porcentaje) || 0),
       precio_unitario: Number(item.precio_unitario) || 0,
     })),
     items_mano_obra: form.value.items_mano_obra.map((item) => ({
       descripcion: String(item.descripcion || "").trim(),
       cantidad: 1,
-      precio_unitario: Number(item.precio_unitario) || 0,
+      precio_unitario: 0,
     })),
   }
 
   saving.value = true
+  const wasEditing = Boolean(editingId.value)
   try {
-    await api.createPresupuesto(payload)
+    if (editingId.value) {
+      await api.updatePresupuesto(editingId.value, payload)
+    } else {
+      await api.createPresupuesto(payload)
+    }
     await loadData()
     closeForm()
-    ok.value = "Presupuesto generado correctamente"
+    ok.value = wasEditing ? "Presupuesto actualizado correctamente" : "Presupuesto generado correctamente"
   } catch (err) {
-    error.value = err?.response?.data?.error || "No se pudo generar el presupuesto"
+    error.value = err?.response?.data?.error || "No se pudo guardar el presupuesto"
     console.error(err)
   } finally {
     saving.value = false
   }
 }
 
+const buildWhatsappMessage = (presupuesto) => {
+  const totalTexto = formatMoney(presupuesto.total)
+  return `Hola, te compartimos el presupuesto Nro ${presupuesto.numero} de Tesla Montajes Electricos. Total: ${totalTexto}.`
+}
+
+const descargarPdfBlob = async (id) => {
+  const res = await api.getPresupuestoPdf(id)
+  return new Blob([res.data], { type: "application/pdf" })
+}
+
+const triggerBlobDownload = (blob, numero) => {
+  const url = window.URL.createObjectURL(blob)
+  const a = document.createElement("a")
+  a.href = url
+  a.download = `Presupuesto-${numero}.pdf`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  window.URL.revokeObjectURL(url)
+}
+
+const enviarWhatsapp = async (presupuesto) => {
+  error.value = ""
+  ok.value = ""
+
+  try {
+    const mensaje = buildWhatsappMessage(presupuesto)
+    const pdfBlob = await descargarPdfBlob(presupuesto.id)
+    const fileName = `Presupuesto-${presupuesto.numero}.pdf`
+
+    if (navigator.share && navigator.canShare) {
+      const pdfFile = new File([pdfBlob], fileName, { type: "application/pdf" })
+      if (navigator.canShare({ files: [pdfFile] })) {
+        await navigator.share({
+          title: `Presupuesto ${presupuesto.numero}`,
+          text: mensaje,
+          files: [pdfFile],
+        })
+        return
+      }
+    }
+
+    // Fallback desktop/web: abre WhatsApp para elegir contacto y descarga el PDF para adjuntar manualmente.
+    triggerBlobDownload(pdfBlob, presupuesto.numero)
+    const link = `https://wa.me/?text=${encodeURIComponent(mensaje)}`
+    window.open(link, "_blank", "noopener,noreferrer")
+    ok.value = "Se abrio WhatsApp para elegir contacto. Se descargo el PDF para adjuntarlo al mensaje."
+  } catch (err) {
+    if (err?.name === "AbortError") return
+    error.value = "No se pudo preparar el envio por WhatsApp"
+    console.error(err)
+  }
+}
+
 const descargarPdf = async (id, numero) => {
   try {
-    const res = await api.getPresupuestoPdf(id)
-    const blob = new Blob([res.data], { type: "application/pdf" })
-    const url = window.URL.createObjectURL(blob)
-    const a = document.createElement("a")
-    a.href = url
-    a.download = `Presupuesto-${numero}.pdf`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    window.URL.revokeObjectURL(url)
+    const blob = await descargarPdfBlob(id)
+    triggerBlobDownload(blob, numero)
   } catch (err) {
     error.value = "No se pudo descargar el PDF"
     console.error(err)
@@ -225,6 +402,23 @@ const cambiarEstado = async (id, estado) => {
   }
 }
 
+const eliminarPresupuesto = async (presupuesto) => {
+  const confirmado = window.confirm(`Se eliminara el presupuesto #${presupuesto.numero}. Esta accion no se puede deshacer. Desea continuar?`)
+  if (!confirmado) return
+
+  ok.value = ""
+  error.value = ""
+
+  try {
+    await api.deletePresupuesto(presupuesto.id)
+    await loadData()
+    ok.value = `Presupuesto #${presupuesto.numero} eliminado correctamente`
+  } catch (err) {
+    error.value = err?.response?.data?.error || "No se pudo eliminar el presupuesto"
+    console.error(err)
+  }
+}
+
 onMounted(async () => {
   await loadData()
   socket.on('presupuestos:changed', loadData)
@@ -235,17 +429,36 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <LayoutShell title="Presupuestos" subtitle="Carga rapida de mano de obra + materiales en un unico PDF">
+  <LayoutShell title="Presupuestos" subtitle="Generacion de presupuestos, edicion, envio por WhatsApp y gestion de estados">
     <div class="presupuestos-page">
       <div class="hero-card">
         <div class="hero-text">
           <span class="hero-kicker">Presupuestos Tesla</span>
-          <h2>Generador de presupuestos</h2>
-          <p>Carga rapida de mano de obra y materiales en un unico PDF con numeracion automatica.</p>
+          <h2>Gestion de presupuestos</h2>
+          <p>Crea, edita y envia presupuestos con calculo automatico de materiales, mano de obra e IVA.</p>
         </div>
         <div class="hero-actions">
           <div class="next-number">Proximo: #{{ numeroSiguiente }}</div>
           <button class="btn-primary hero-new-btn" @click="openForm">+ Nuevo presupuesto</button>
+        </div>
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-card">
+          <span>Presupuestos registrados</span>
+          <strong>{{ presupuestos.length }}</strong>
+        </div>
+        <div class="stat-card">
+          <span>Total presupuestado</span>
+          <strong>{{ formatMoney(totalPresupuestado) }}</strong>
+        </div>
+        <div class="stat-card">
+          <span>Total pendiente</span>
+          <strong>{{ formatMoney(totalPendiente) }}</strong>
+        </div>
+        <div class="stat-card">
+          <span>Total aceptado</span>
+          <strong>{{ formatMoney(totalAceptado) }}</strong>
         </div>
       </div>
 
@@ -255,7 +468,7 @@ onUnmounted(() => {
 
       <div v-if="showForm" class="form-card">
         <div class="form-header">
-          <h3>Nuevo presupuesto</h3>
+          <h3>{{ editingId ? `Editar presupuesto #${editingNumero}` : "Nuevo presupuesto" }}</h3>
           <div class="next-number-inline">Numero sugerido: #{{ numeroSiguiente }}</div>
         </div>
 
@@ -309,18 +522,20 @@ onUnmounted(() => {
             <thead>
               <tr>
                 <th>Descripcion</th>
-                <th>Subtotal</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="row in form.items_mano_obra" :key="row.uid">
                 <td><input v-model="row.descripcion" type="text" placeholder="Detalle de tarea" /></td>
-                <td><input v-model.number="row.precio_unitario" type="number" min="0" step="0.01" /></td>
                 <td><button class="btn-link danger" @click="removeManoObraRow(row.uid)">Quitar</button></td>
               </tr>
             </tbody>
           </table>
+          <div class="subtotal-general-box">
+            <label>Subtotal general mano de obra</label>
+            <input v-model.number="form.subtotal_general_mano_obra" type="number" min="0" step="0.01" />
+          </div>
           </div>
 
           <div class="items-section section-materiales">
@@ -334,6 +549,8 @@ onUnmounted(() => {
                 <th>Descripcion</th>
                 <th>Cantidad</th>
                 <th>Precio unitario</th>
+                <th>Ganancia % (interno)</th>
+                <th>P. c/ganancia</th>
                 <th>Subtotal</th>
                 <th></th>
               </tr>
@@ -343,7 +560,9 @@ onUnmounted(() => {
                 <td><input v-model="row.descripcion" type="text" placeholder="Material" /></td>
                 <td><input v-model.number="row.cantidad" type="number" min="0" step="0.01" /></td>
                 <td><input v-model.number="row.precio_unitario" type="number" min="0" step="0.01" /></td>
-                <td>{{ formatMoney((Number(row.cantidad) || 0) * (Number(row.precio_unitario) || 0)) }}</td>
+                <td><input v-model.number="row.ganancia_porcentaje" type="number" min="0" step="0.01" /></td>
+                <td>{{ formatMoney(precioUnitarioConGanancia(row)) }}</td>
+                <td>{{ formatMoney(subtotalMaterialRowConGanancia(row)) }}</td>
                 <td><button class="btn-link danger" @click="removeMaterialRow(row.uid)">Quitar</button></td>
               </tr>
             </tbody>
@@ -366,48 +585,73 @@ onUnmounted(() => {
         <div class="actions">
           <button class="btn-secondary" @click="closeForm">Cancelar</button>
           <button class="btn-primary" :disabled="saving" @click="savePresupuesto">
-            {{ saving ? "Guardando..." : "Guardar presupuesto" }}
+            {{ saving ? "Guardando..." : editingId ? "Actualizar presupuesto" : "Guardar presupuesto" }}
           </button>
         </div>
       </div>
 
       <div class="table-card">
-        <table>
-          <thead>
-            <tr>
-              <th>Nro</th>
-              <th>Fecha</th>
-              <th>Cliente</th>
-              <th>Obra</th>
-              <th>Total</th>
-              <th>Estado</th>
-              <th>PDF</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="p in presupuestos" :key="p.id">
-              <td>{{ p.numero }}</td>
-              <td>{{ p.fecha ? new Date(p.fecha).toLocaleDateString("es-AR") : "-" }}</td>
-              <td>{{ p.cliente || getClienteNombre(p.cliente_id) }}</td>
-              <td>{{ p.obra || getObraNombre(p.obra_id) }}</td>
-              <td>{{ formatMoney(p.total) }}</td>
-              <td>
-                <select :value="p.estado" @change="(e) => cambiarEstado(p.id, e.target.value)">
-                  <option value="pendiente">Pendiente</option>
-                  <option value="enviado">Enviado</option>
-                  <option value="aceptado">Aceptado</option>
-                  <option value="rechazado">Rechazado</option>
-                </select>
-              </td>
-              <td>
-                <button class="btn-link" @click="descargarPdf(p.id, p.numero)">Descargar</button>
-              </td>
-            </tr>
-            <tr v-if="!loading && presupuestos.length === 0">
-              <td colspan="7" class="empty">No hay presupuestos cargados.</td>
-            </tr>
-          </tbody>
-        </table>
+        <div v-if="!loading && presupuestos.length === 0" class="empty">No hay presupuestos cargados.</div>
+
+        <div class="presupuesto-grid" v-else>
+          <article v-for="p in presupuestos" :key="p.id" class="presupuesto-card">
+            <header class="presupuesto-card-header">
+              <div class="presupuesto-card-id">
+                <span class="nro-pill">#{{ p.numero }}</span>
+                <span class="fecha-pill">{{ formatDate(p.fecha) }}</span>
+              </div>
+              <span :class="estadoClass(p.estado)">{{ estadoLabel(p.estado) }}</span>
+            </header>
+
+            <div class="presupuesto-card-main">
+              <div class="presupuesto-meta">
+                <div class="meta-line">
+                  <span class="meta-label">Cliente</span>
+                  <strong>{{ p.cliente || getClienteNombre(p.cliente_id) }}</strong>
+                </div>
+                <div class="meta-line">
+                  <span class="meta-label">Obra</span>
+                  <strong>{{ p.obra || getObraNombre(p.obra_id) }}</strong>
+                </div>
+                <div class="meta-line">
+                  <span class="meta-label">Forma de pago</span>
+                  <strong>{{ p.forma_pago || "-" }}</strong>
+                </div>
+                <div class="meta-line meta-line-certificados">
+                  <span class="meta-label">Certificados</span>
+                  <strong :class="certificadoStatusClass(p)">{{ certificadoStatusLabel(p) }}</strong>
+                </div>
+              </div>
+
+              <div class="presupuesto-total-block">
+                <span>Total</span>
+                <strong>{{ formatMoney(p.total) }}</strong>
+                <small v-if="Number(p.cantidad_certificados || 0) > 0">
+                  Certificado: {{ formatMoney(p.total_certificado_con_iva) }} · Pagado: {{ formatMoney(p.total_pagado_certificados) }}
+                </small>
+              </div>
+            </div>
+
+            <footer class="presupuesto-card-footer">
+              <select :value="p.estado" class="estado-select" @change="(e) => cambiarEstado(p.id, e.target.value)">
+                <option value="pendiente">Pendiente</option>
+                <option value="enviado">Enviado</option>
+                <option value="aceptado">Aceptado</option>
+                <option value="rechazado">Rechazado</option>
+              </select>
+
+              <div class="acciones-presupuesto">
+                <button class="btn-chip btn-chip-cert" @click="abrirCertificados(p)">
+                  {{ Number(p.cantidad_certificados || 0) > 0 ? "Ver avances" : "Generar certificado" }}
+                </button>
+                <button class="btn-chip btn-chip-edit" @click="editPresupuesto(p.id)">Editar</button>
+                <button class="btn-chip btn-chip-download" @click="descargarPdf(p.id, p.numero)">Descargar</button>
+                <button class="btn-chip btn-chip-whatsapp" @click="enviarWhatsapp(p)">WhatsApp</button>
+                <button class="btn-chip btn-chip-delete" @click="eliminarPresupuesto(p)">Eliminar</button>
+              </div>
+            </footer>
+          </article>
+        </div>
       </div>
     </div>
   </LayoutShell>
@@ -415,55 +659,68 @@ onUnmounted(() => {
 
 <style scoped>
 .presupuestos-page {
+  --paper: #f3f1ec;
+  --card: #ffffff;
+  --ink: #1f2937;
+  --muted: #6b7280;
+  --line: #d7d3cc;
+  --accent: #a16207;
+  --accent-soft: #fef3c7;
+
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  color: #0f172a;
+  gap: 16px;
+  color: var(--ink);
+  padding: 14px;
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at 94% -5%, rgba(161, 98, 7, 0.09), transparent 30%),
+    radial-gradient(circle at 2% 108%, rgba(55, 65, 81, 0.09), transparent 42%),
+    var(--paper);
+  border: 1px solid #cbc6be;
 }
 
 .hero-card {
   display: flex;
-  gap: 16px;
+  gap: 18px;
   justify-content: space-between;
   align-items: center;
   flex-wrap: wrap;
-  background:
-    radial-gradient(circle at 12% 20%, rgba(20, 184, 166, 0.18), transparent 40%),
-    linear-gradient(125deg, #0b1226 0%, #0f172a 48%, #102136 100%);
-  color: #f8fafc;
-  border-radius: 12px;
-  padding: 18px 18px 20px;
-  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: linear-gradient(140deg, #ffffff 0%, #faf9f6 100%);
+  color: var(--ink);
+  border-radius: 14px;
+  padding: 20px 20px 22px;
+  border: 1px solid var(--line);
   box-shadow:
-    0 14px 30px -18px rgba(2, 6, 23, 0.9),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    0 14px 26px -24px rgba(17, 24, 39, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7);
 }
 
 .hero-text {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 
 .hero-kicker {
-  font-size: 0.74rem;
+  font-size: 0.72rem;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: #5eead4;
+  color: var(--accent);
 }
 
 .hero-card h2 {
   margin: 0;
-  font-size: 2rem;
-  line-height: 1.06;
+  font-size: 2.1rem;
+  line-height: 1.02;
   text-wrap: balance;
 }
 
 .hero-card p {
-  margin: 3px 0 0;
-  color: #cbd5e1;
-  font-size: 1rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: 1.02rem;
   max-width: 680px;
 }
 
@@ -477,33 +734,89 @@ onUnmounted(() => {
 .next-number,
 .next-number-inline {
   font-weight: 700;
-  letter-spacing: 0.4px;
-  background: rgba(15, 23, 42, 0.62);
-  color: #f8fafc;
-  border: 1px solid rgba(148, 163, 184, 0.6);
+  letter-spacing: 0.2px;
+  background: #f6f5f2;
+  color: #111827;
+  border: 1px solid #d8d3c9;
   border-radius: 999px;
-  padding: 8px 14px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  padding: 9px 15px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
 }
 
 .next-number-inline {
-  color: #0f172a;
-  background: #e2e8f0;
-  border-color: #cbd5e1;
+  color: #3f3f46;
+  background: #f3f2ef;
+  border-color: #dfd9cf;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.stat-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 11px 12px;
+  display: grid;
+  gap: 5px;
+}
+
+.stat-card span {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #78716c;
+  font-weight: 700;
+}
+
+.stat-card strong {
+  font-size: 1.05rem;
+  color: var(--ink);
+}
+
+.meta-line-certificados strong {
+  font-size: 0.92rem;
+}
+
+.cert-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-weight: 700;
+}
+
+.cert-badge-empty {
+  background: #efe9df;
+  color: #92400e;
+}
+
+.cert-badge-pending {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.cert-badge-ok {
+  background: #dcfce7;
+  color: #166534;
 }
 
 .form-card,
 .table-card {
-  background: #fff;
-  border: 1px solid #dbe7f1;
-  border-radius: 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
   padding: 16px;
-  box-shadow: 0 12px 30px -25px rgba(15, 23, 42, 0.5);
+  box-shadow: 0 10px 24px -24px rgba(17, 24, 39, 0.6);
 }
 
 .form-card h3,
 .items-section h4 {
-  color: #0f172a;
+  color: var(--ink);
+  margin: 0;
 }
 
 .form-header {
@@ -512,30 +825,44 @@ onUnmounted(() => {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
 
 .grid-form {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 10px;
-  margin-bottom: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
 }
 
 label {
   display: block;
-  font-size: 12px;
-  color: #415a77;
-  margin-bottom: 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #78716c;
+  margin-bottom: 5px;
+  font-weight: 700;
 }
 
 input,
 select,
 textarea {
   width: 100%;
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  padding: 8px;
+  border: 1px solid #d6d3d1;
+  border-radius: 10px;
+  padding: 9px 10px;
+  background: #fff;
+  color: var(--ink);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: #a8a29e;
+  box-shadow: 0 0 0 3px rgba(168, 162, 158, 0.14);
 }
 
 .iva-box {
@@ -557,10 +884,10 @@ textarea {
 }
 
 .items-section {
-  margin-top: 12px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
+  margin-top: 8px;
+  background: #f9f8f5;
+  border: 1px solid #e4e0d8;
+  border-radius: 12px;
   padding: 10px;
 }
 
@@ -577,6 +904,12 @@ textarea {
   margin-bottom: 8px;
 }
 
+.subtotal-general-box {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #d6d3d1;
+}
+
 .section-mano-obra h4 {
   color: #0f172a;
 }
@@ -589,14 +922,14 @@ table {
   width: 100%;
   border-collapse: collapse;
   background: #fff;
-  border-radius: 8px;
+  border-radius: 10px;
   overflow: hidden;
 }
 
 th,
 td {
-  border-bottom: 1px solid #e2e8f0;
-  padding: 8px;
+  border-bottom: 1px solid #ece8e1;
+  padding: 9px 8px;
   text-align: left;
   vertical-align: middle;
 }
@@ -605,151 +938,352 @@ td {
   overflow-x: auto;
 }
 
-.table-card table {
-  min-width: 860px;
-  color: #0f172a;
-}
-
-.table-card thead th {
-  background: #f1f5f9;
-  color: #334155;
-  font-weight: 700;
-  border-bottom: 1px solid #cbd5e1;
-}
-
-.table-card tbody tr:nth-child(even) {
-  background: #f8fafc;
-}
-
-.table-card tbody tr:hover {
-  background: #eef6ff;
-}
-
-.table-card td {
-  color: #0f172a;
-}
-
-.table-card td:nth-child(5) {
-  font-weight: 700;
-  color: #0f766e;
-}
-
 .table-card select {
-  min-width: 150px;
+  min-width: 146px;
   background: #fff;
-  color: #0f172a;
-  border: 1px solid #94a3b8;
+  color: var(--ink);
+  border: 1px solid #d6d3d1;
 }
 
-.table-card .btn-link {
+.nro-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 46px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid #d6d0c2;
+  background: #f7f5ef;
+  font-weight: 700;
+  font-size: 0.84rem;
+}
+
+.fecha-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid #e3dfd7;
+  background: #fcfbf9;
+  color: #57534e;
+  font-size: 0.78rem;
   font-weight: 600;
 }
 
-.resumen-card {
-  margin-top: 12px;
-  background: linear-gradient(140deg, #f8fafc 0%, #eef2ff 100%);
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  padding: 12px;
+.presupuesto-grid {
   display: grid;
-  gap: 6px;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 10px;
+}
+
+.presupuesto-card {
+  border: 1px solid #dfd9cc;
+  border-radius: 12px;
+  background: linear-gradient(165deg, #ffffff 0%, #fbfaf7 100%);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+  box-shadow: 0 10px 20px -22px rgba(15, 23, 42, 0.45);
+}
+
+.presupuesto-card-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.presupuesto-card-id {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.presupuesto-card-main {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.presupuesto-meta {
+  display: grid;
+  gap: 5px;
+}
+
+.meta-line {
+  display: grid;
+  gap: 1px;
+}
+
+.meta-label {
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #78716c;
+  font-weight: 700;
+}
+
+.meta-line strong {
+  font-size: 0.87rem;
+  color: #1f2937;
+}
+
+.presupuesto-total-block {
+  min-width: 150px;
+  border-radius: 10px;
+  border: 1px solid #e2ddd0;
+  background: #f9f7f2;
+  padding: 8px 10px;
+  display: grid;
+  align-content: center;
+  gap: 2px;
+}
+
+.presupuesto-total-block span {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #78716c;
+  font-weight: 700;
+}
+
+.presupuesto-total-block strong {
+  font-size: 1.04rem;
+  color: #111827;
+}
+
+.presupuesto-card-footer {
+  padding-top: 6px;
+  border-top: 1px solid #ece8df;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.resumen-card {
+  margin-top: 14px;
+  background: linear-gradient(140deg, #ffffff 0%, #f8f7f4 100%);
+  border: 1px solid #ddd6c8;
+  border-radius: 10px;
+  padding: 14px;
+  display: grid;
+  gap: 7px;
 }
 
 .total {
-  font-size: 18px;
+  font-size: 1.15rem;
   font-weight: 700;
 }
 
 .actions {
-  margin-top: 12px;
+  margin-top: 14px;
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 10px;
 }
 
 .btn-primary,
 .btn-secondary {
   border: 1px solid transparent;
-  border-radius: 8px;
-  padding: 9px 13px;
+  border-radius: 10px;
+  padding: 10px 14px;
   cursor: pointer;
   font-weight: 600;
+  transition: transform 0.16s ease, box-shadow 0.2s ease;
 }
 
 .btn-primary {
-  background: linear-gradient(135deg, #0f766e 0%, #0e7490 100%);
+  background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
   color: #fff;
-  border-color: #0f766e;
-  box-shadow: 0 8px 18px -12px rgba(15, 118, 110, 0.6);
+  border-color: #1f2937;
+  box-shadow: 0 8px 18px -12px rgba(17, 24, 39, 0.45);
 }
 
 .hero-new-btn {
-  padding: 10px 15px;
+  padding: 11px 16px;
   font-size: 0.95rem;
   font-weight: 700;
   letter-spacing: 0;
-  border: 1px solid #0f766e;
-  background: linear-gradient(135deg, #0f766e 0%, #0e7490 100%);
-  box-shadow: 0 8px 16px -12px rgba(15, 118, 110, 0.55);
+  border: 1px solid #1f2937;
+  background: linear-gradient(135deg, #111827 0%, #1f2937 100%);
+  box-shadow: 0 8px 16px -12px rgba(17, 24, 39, 0.48);
 }
 
 .hero-new-btn:hover {
   transform: translateY(-1px);
-  box-shadow: 0 10px 18px -12px rgba(15, 118, 110, 0.65);
+  box-shadow: 0 10px 18px -12px rgba(17, 24, 39, 0.58);
 }
 
 .btn-secondary {
-  background: #f1f5f9;
-  color: #0f172a;
-  border-color: #cbd5e1;
+  background: #f8f7f4;
+  color: #374151;
+  border-color: #d6d3d1;
+}
+
+.btn-primary:hover,
+.btn-secondary:hover {
+  transform: translateY(-1px);
+}
+
+.btn-chip {
+  border: 1px solid #d8d3ca;
+  background: #fff;
+  color: #1f2937;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.btn-chip:hover {
+  background: #f7f6f3;
+}
+
+.btn-chip.whatsapp {
+  background: #ecfdf3;
+  border-color: #bbf7d0;
+  color: #166534;
+}
+
+.btn-chip-edit {
+  background: #eef2ff;
+  border-color: #c7d2fe;
+  color: #3730a3;
+}
+
+.btn-chip-download {
+  background: #fff7ed;
+  border-color: #fed7aa;
+  color: #9a3412;
+}
+
+.btn-chip-whatsapp {
+  background: #ecfdf3;
+  border-color: #86efac;
+  color: #166534;
+}
+
+.btn-chip-delete {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #991b1b;
+}
+
+.acciones-presupuesto {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .btn-link {
   border: none;
   background: transparent;
-  color: #0369a1;
+  color: #4b5563;
   cursor: pointer;
   padding: 0;
+  font-size: 0.82rem;
+  font-weight: 700;
 }
 
 .btn-link.danger {
   color: #b91c1c;
 }
 
+.estado-cell {
+  display: grid;
+  gap: 6px;
+}
+
+.estado-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 10px;
+  width: fit-content;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border: 1px solid #d6d3d1;
+}
+
+.estado-pendiente {
+  background: #fef3c7;
+  color: #92400e;
+  border-color: #fcd34d;
+}
+
+.estado-enviado {
+  background: #e0f2fe;
+  color: #075985;
+  border-color: #7dd3fc;
+}
+
+.estado-aceptado {
+  background: #dcfce7;
+  color: #166534;
+  border-color: #86efac;
+}
+
+.estado-rechazado {
+  background: #fee2e2;
+  color: #991b1b;
+  border-color: #fca5a5;
+}
+
+.estado-select {
+  max-width: 150px;
+}
+
 .ok-msg {
   color: #166534;
-  background: #dcfce7;
-  border: 1px solid #86efac;
-  border-radius: 8px;
-  padding: 8px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 10px;
+  padding: 9px 10px;
+  font-weight: 600;
 }
 
 .error-msg {
   color: #991b1b;
-  background: #fee2e2;
+  background: #fef2f2;
   border: 1px solid #fca5a5;
-  border-radius: 8px;
-  padding: 8px;
+  border-radius: 10px;
+  padding: 9px 10px;
+  font-weight: 600;
 }
 
 .loading,
 .empty {
-  color: #334155;
+  color: #57534e;
 }
 
 .empty {
   text-align: center;
   font-weight: 600;
+  padding: 18px;
 }
 
 @media (max-width: 700px) {
+  .presupuestos-page {
+    padding: 10px;
+  }
+
   .hero-card {
     flex-direction: column;
     align-items: flex-start;
+    padding: 16px;
   }
 
   .hero-card h2 {
-    font-size: 1.55rem;
+    font-size: 1.65rem;
   }
 
   .hero-card p {
@@ -763,6 +1297,22 @@ td {
   }
 
   .items-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .presupuesto-card-main {
+    grid-template-columns: 1fr;
+  }
+
+  .presupuesto-total-block {
+    min-width: 0;
+  }
+
+  .presupuesto-grid {
     grid-template-columns: 1fr;
   }
 }

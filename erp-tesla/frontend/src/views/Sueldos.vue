@@ -32,10 +32,13 @@ const formPago = ref({
 // Modal - Editar Conceptos
 const showFormConceptos = ref(false)
 const formConceptos = ref({
-  importe_horas_extra: 0,
+  presentismo: 0,
+  horas_extra_cantidad: 0,
   no_remunerativo: 0,
   aguinaldo: 0,
   vacaciones: 0,
+  feriados_cantidad: 0,
+  dias_no_trabajados: 0,
   adelantos: 0,
   observaciones: ""
 })
@@ -50,10 +53,16 @@ const normalizarLiquidacion = (liq = {}) => ({
   total_horas: toNumber(liq.total_horas),
   valor_hora: toNumber(liq.valor_hora),
   importe_horas: toNumber(liq.importe_horas),
+  presentismo: toNumber(liq.presentismo),
   importe_horas_extra: toNumber(liq.importe_horas_extra),
   no_remunerativo: toNumber(liq.no_remunerativo),
   aguinaldo: toNumber(liq.aguinaldo),
   vacaciones: toNumber(liq.vacaciones),
+  horas_extra_cantidad: toNumber(liq.horas_extra_cantidad),
+  feriados_cantidad: toNumber(liq.feriados_cantidad),
+  dias_no_trabajados: toNumber(liq.dias_no_trabajados),
+  importe_feriados: toNumber(liq.importe_feriados),
+  descuento_dias_no_trabajados: toNumber(liq.descuento_dias_no_trabajados),
   adelantos: toNumber(liq.adelantos),
   total: toNumber(liq.total),
   total_pagado: toNumber(liq.total_pagado),
@@ -65,6 +74,7 @@ const normalizarPago = (pago = {}) => ({
 })
 
 const formatearHoras = (valor) => toNumber(valor).toFixed(2)
+const formatearCantidad = (valor) => String(Math.round(toNumber(valor)))
 
 // Cargar liquidaciones
 const cargarLiquidaciones = async () => {
@@ -131,10 +141,13 @@ const verDetalle = async (liquidacion) => {
 
   // Cargar conceptos en el formulario
   formConceptos.value = {
-    importe_horas_extra: liquidacion.importe_horas_extra || 0,
+    presentismo: liquidacion.presentismo || 0,
+    horas_extra_cantidad: liquidacion.horas_extra_cantidad || 0,
     no_remunerativo: liquidacion.no_remunerativo || 0,
     aguinaldo: liquidacion.aguinaldo || 0,
     vacaciones: liquidacion.vacaciones || 0,
+    feriados_cantidad: liquidacion.feriados_cantidad || 0,
+    dias_no_trabajados: liquidacion.dias_no_trabajados || 0,
     adelantos: liquidacion.adelantos || 0,
     observaciones: liquidacion.observaciones || ""
   }
@@ -215,6 +228,31 @@ const eliminarPago = async (pagoId) => {
   }
 }
 
+const descargarPdfLiquidacion = async () => {
+  if (!liquidacionSeleccionada.value?.id) return
+
+  loading.value = true
+  error.value = ""
+  try {
+    const res = await api.getLiquidacionPdf(liquidacionSeleccionada.value.id)
+    const blob = new Blob([res.data], { type: "application/pdf" })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement("a")
+    const periodo = `${String(liquidacionSeleccionada.value.mes || "").padStart(2, "0")}-${liquidacionSeleccionada.value.anio || ""}`
+    link.href = url
+    link.download = `liquidacion_${liquidacionSeleccionada.value.id}_${periodo}.pdf`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
+  } catch (err) {
+    error.value = err?.response?.data?.error || "Error al generar PDF de liquidación"
+    console.error(err)
+  } finally {
+    loading.value = false
+  }
+}
+
 // Eliminar liquidación
 const eliminarLiquidacion = async (id) => {
   if (!confirm("¿Está seguro que desea eliminar esta liquidación? Se eliminarán también todos los pagos registrados.")) return
@@ -247,6 +285,26 @@ const totalPagado = computed(() => {
 
 const faltaPagar = computed(() => {
   return toNumber(liquidacionSeleccionada.value?.total) - totalPagado.value
+})
+
+const estaPagadaDetalle = computed(() => {
+  return totalPagado.value >= toNumber(liquidacionSeleccionada.value?.total)
+})
+
+const valorHoraDetalle = computed(() => {
+  return toNumber(liquidacionSeleccionada.value?.valor_hora)
+})
+
+const importeHorasExtraPreview = computed(() => {
+  return toNumber(formConceptos.value.horas_extra_cantidad) * valorHoraDetalle.value * 1.5
+})
+
+const importeFeriadosPreview = computed(() => {
+  return toNumber(formConceptos.value.feriados_cantidad) * 8 * valorHoraDetalle.value
+})
+
+const descuentoDiasNoTrabajadosPreview = computed(() => {
+  return toNumber(formConceptos.value.dias_no_trabajados) * 8 * valorHoraDetalle.value
 })
 
 // Obtener nombre empleado
@@ -431,6 +489,9 @@ onUnmounted(() => {
             ← Volver a la lista
           </button>
           <div class="detalle-acciones">
+            <button class="btn-pdf" @click="descargarPdfLiquidacion" :disabled="loading">
+              📄 Descargar PDF
+            </button>
             <button class="btn-edit" @click="showFormConceptos = true">
               ✏️ Editar conceptos
             </button>
@@ -454,8 +515,8 @@ onUnmounted(() => {
             </div>
             <div class="dato-item">
               <span class="dato-label">Estado:</span>
-              <span :class="['badge', totalPagado === liquidacionSeleccionada.total ? 'badge-pagada' : 'badge-pendiente']">
-                {{ totalPagado === liquidacionSeleccionada.total ? "Pagada" : "Pendiente" }}
+              <span :class="['badge', estaPagadaDetalle ? 'badge-pagada' : 'badge-pendiente']">
+                {{ estaPagadaDetalle ? "Pagada" : "Pendiente" }}
               </span>
             </div>
           </div>
@@ -481,29 +542,41 @@ onUnmounted(() => {
 
           <div class="conceptos-lista">
             <h4>Conceptos adicionales:</h4>
-            <div v-if="liquidacionSeleccionada.importe_horas_extra > 0" class="concepto">
-              <span>Importe horas extra:</span>
+            <div class="concepto">
+              <span>Presentismo:</span>
+              <span>{{ formatearMoneda(liquidacionSeleccionada.presentismo) }}</span>
+            </div>
+            <div class="concepto">
+              <span>Horas extra ({{ formatearCantidad(liquidacionSeleccionada.horas_extra_cantidad) }} hs):</span>
               <span>{{ formatearMoneda(liquidacionSeleccionada.importe_horas_extra) }}</span>
             </div>
-            <div v-if="liquidacionSeleccionada.no_remunerativo > 0" class="concepto">
+            <div class="concepto">
+              <span>Feriados ({{ formatearCantidad(liquidacionSeleccionada.feriados_cantidad) }} días):</span>
+              <span>{{ formatearMoneda(liquidacionSeleccionada.importe_feriados) }}</span>
+            </div>
+            <div class="concepto">
               <span>No remunerativo:</span>
               <span>{{ formatearMoneda(liquidacionSeleccionada.no_remunerativo) }}</span>
             </div>
-            <div v-if="liquidacionSeleccionada.aguinaldo > 0" class="concepto">
+            <div class="concepto">
               <span>Aguinaldo:</span>
               <span>{{ formatearMoneda(liquidacionSeleccionada.aguinaldo) }}</span>
             </div>
-            <div v-if="liquidacionSeleccionada.vacaciones > 0" class="concepto">
+            <div class="concepto">
               <span>Vacaciones:</span>
               <span>{{ formatearMoneda(liquidacionSeleccionada.vacaciones) }}</span>
             </div>
-            <div v-if="liquidacionSeleccionada.adelantos > 0" class="concepto">
+            <div class="concepto">
               <span>Adelantos:</span>
               <span class="concepto-negativo">-{{ formatearMoneda(liquidacionSeleccionada.adelantos) }}</span>
             </div>
-            <div v-if="liquidacionSeleccionada.observaciones" class="concepto-observacion">
+            <div class="concepto">
+              <span>Días no trabajados ({{ formatearCantidad(liquidacionSeleccionada.dias_no_trabajados) }}):</span>
+              <span class="concepto-negativo">-{{ formatearMoneda(liquidacionSeleccionada.descuento_dias_no_trabajados) }}</span>
+            </div>
+            <div class="concepto-observacion">
               <span>Observaciones:</span>
-              <p>{{ liquidacionSeleccionada.observaciones }}</p>
+              <p>{{ liquidacionSeleccionada.observaciones || "-" }}</p>
             </div>
           </div>
         </div>
@@ -655,36 +728,54 @@ onUnmounted(() => {
 
       <!-- Modal - Editar Conceptos -->
       <div v-if="showFormConceptos" class="modal-overlay" @click.self="showFormConceptos = false">
-        <div class="modal">
+        <div class="modal modal-conceptos">
           <div class="modal-header">
             <h3>Editar conceptos adicionales</h3>
             <button class="btn-close" @click="showFormConceptos = false">×</button>
           </div>
 
-          <form @submit.prevent="actualizarConceptos" class="modal-form">
+          <form @submit.prevent="actualizarConceptos" class="modal-form modal-form-conceptos">
             <label class="form-group">
-              <span>Importe horas extra ($)</span>
-              <input v-model.number="formConceptos.importe_horas_extra" type="number" min="0" step="100" />
+              <span>Presentismo ($)</span>
+              <input v-model.number="formConceptos.presentismo" type="number" min="0" step="0.01" />
+            </label>
+
+            <label class="form-group">
+              <span>Horas extra (cantidad)</span>
+              <input v-model.number="formConceptos.horas_extra_cantidad" type="number" min="0" step="0.5" />
+              <small class="form-help">Cada hora extra vale 50% más (x1.5). Importe calculado: {{ formatearMoneda(importeHorasExtraPreview) }}</small>
             </label>
 
             <label class="form-group">
               <span>No remunerativo ($)</span>
-              <input v-model.number="formConceptos.no_remunerativo" type="number" min="0" step="100" />
+              <input v-model.number="formConceptos.no_remunerativo" type="number" min="0" step="0.01" />
             </label>
 
             <label class="form-group">
               <span>Aguinaldo ($)</span>
-              <input v-model.number="formConceptos.aguinaldo" type="number" min="0" step="100" />
+              <input v-model.number="formConceptos.aguinaldo" type="number" min="0" step="0.01" />
             </label>
 
             <label class="form-group">
               <span>Vacaciones ($)</span>
-              <input v-model.number="formConceptos.vacaciones" type="number" min="0" step="100" />
+              <input v-model.number="formConceptos.vacaciones" type="number" min="0" step="0.01" />
+            </label>
+
+            <label class="form-group">
+              <span>Feriados (cantidad de días)</span>
+              <input v-model.number="formConceptos.feriados_cantidad" type="number" min="0" step="1" />
+              <small class="form-help">Cada feriado suma 8 horas al valor común. Importe calculado: {{ formatearMoneda(importeFeriadosPreview) }}</small>
+            </label>
+
+            <label class="form-group">
+              <span>Días no trabajados (cantidad)</span>
+              <input v-model.number="formConceptos.dias_no_trabajados" type="number" min="0" step="1" />
+              <small class="form-help">Se descuenta 8 horas por día faltado. Descuento calculado: -{{ formatearMoneda(descuentoDiasNoTrabajadosPreview) }}</small>
             </label>
 
             <label class="form-group">
               <span>Adelantos ($)</span>
-              <input v-model.number="formConceptos.adelantos" type="number" min="0" step="100" />
+              <input v-model.number="formConceptos.adelantos" type="number" min="0" step="0.01" />
             </label>
 
             <label class="form-group">
@@ -723,7 +814,7 @@ onUnmounted(() => {
                 v-model.number="formPago.monto"
                 type="number"
                 min="0"
-                step="100"
+                step="0.01"
                 :max="faltaPagar"
                 required
               />
@@ -967,13 +1058,23 @@ td {
 }
 
 .detalle-acciones .btn-edit,
-.detalle-acciones .btn-delete {
+.detalle-acciones .btn-delete,
+.detalle-acciones .btn-pdf {
   padding: 0.75rem 1.25rem;
   font-size: 0.875rem;
   border: none;
   border-radius: 0.375rem;
   cursor: pointer;
   transition: all 0.2s;
+}
+
+.detalle-acciones .btn-pdf {
+  background-color: rgba(99, 102, 241, 0.2);
+  color: #a5b4fc;
+}
+
+.detalle-acciones .btn-pdf:hover {
+  background-color: rgba(99, 102, 241, 0.32);
 }
 
 .detalle-acciones .btn-edit {
@@ -1285,6 +1386,21 @@ td {
   box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
 }
 
+.modal-conceptos {
+  max-width: 550px;
+  max-height: 98vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-conceptos .modal-header {
+  padding: 1rem 1.25rem;
+}
+
+.modal-conceptos .modal-header h3 {
+  font-size: 1.05rem;
+}
+
 .modal-header {
   display: flex;
   justify-content: space-between;
@@ -1320,10 +1436,23 @@ td {
   gap: 1rem;
 }
 
+.modal-form-conceptos {
+  padding: 1rem 1.2rem;
+  gap: 0.8rem;
+  max-height: calc(88vh - 74px);
+  overflow-y: auto;
+}
+
 .form-group {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+}
+
+.form-help {
+  color: #8ea2c7;
+  font-size: 0.82rem;
+  line-height: 1.35;
 }
 
 .form-group span {

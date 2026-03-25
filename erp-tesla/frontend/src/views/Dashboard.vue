@@ -1,6 +1,7 @@
 <script setup>
-import { ref, onMounted } from "vue"
+import { ref, onMounted, onUnmounted } from "vue"
 import api from "../api"
+import socket from "../socket.js"
 import LayoutShell from "../components/LayoutShell.vue"
 
 const resumen = ref({
@@ -8,10 +9,13 @@ const resumen = ref({
   horas_mes: 0,
   sueldos_mes: 0,
   ingresos_mes: 0,
-  egresos_mes: 0
+  egresos_mes: 0,
+  presupuestos_pendientes: []
 })
 
 const ultimosMovimientos = ref([])
+let intervaloCambioMes = null
+let claveMesActual = ""
 
 const cargando = ref(false)
 const error = ref("")
@@ -21,39 +25,125 @@ const toNumber = (valor) => {
   return Number.isFinite(num) ? num : 0
 }
 
-const cargarResumen = async () => {
-  cargando.value = true
-  error.value = ""
-  try {
-    const mesActual = new Date().getMonth() + 1
-    const anioActual = new Date().getFullYear()
+// Obtener mes y año actual
+const getMesAnio = () => ({
+  mes: new Date().getMonth() + 1,
+  anio: new Date().getFullYear()
+})
 
-    // Cargar obras activas
+const getClaveMesActual = () => {
+  const { mes, anio } = getMesAnio()
+  return `${anio}-${String(mes).padStart(2, "0")}`
+}
+
+const resetearResumenMensual = () => {
+  resumen.value.horas_mes = 0
+  resumen.value.sueldos_mes = 0
+  resumen.value.ingresos_mes = 0
+  resumen.value.egresos_mes = 0
+  ultimosMovimientos.value = []
+}
+
+const verificarCambioMes = async () => {
+  const claveActual = getClaveMesActual()
+  if (claveMesActual && claveMesActual !== claveActual) {
+    claveMesActual = claveActual
+    resetearResumenMensual()
+    await Promise.all([cargarHoras(), cargarCaja(), cargarSueldos()])
+    return
+  }
+  claveMesActual = claveActual
+}
+
+// Función para cargar solo las obras activas
+const cargarObras = async () => {
+  try {
     const obrasRes = await api.getObras()
     resumen.value.obras_activas = obrasRes.data?.length || 0
+  } catch (err) {
+    console.error("Error al cargar obras:", err)
+  }
+}
 
-    // Cargar horas del mes
-    const horasRes = await api.getHoras(mesActual, anioActual)
-    const totalHoras = (horasRes.data || []).reduce(
-      (sum, h) => sum + toNumber(h.cantidad_horas ?? h.horas_trabajadas ?? h.cantidad_hora ?? h.horas),
-      0
-    )
-    resumen.value.horas_mes = totalHoras
+// Función para cargar solo los sueldos PENDIENTES
+const cargarSueldos = async () => {
+  try {
+    const { mes, anio } = getMesAnio()
+    const liqRes = await api.getLiquidaciones(mes, anio)
+    resumen.value.sueldos_mes = (liqRes.data || [])
+      .filter(l => l.estado === 'pendiente')
+      .reduce((sum, l) => {
+        const saldoPendiente = toNumber(l.total) - toNumber(l.total_pagado)
+        return sum + Math.max(saldoPendiente, 0)
+      }, 0)
+  } catch (err) {
+    console.error("Error al cargar sueldos:", err)
+  }
+}
 
-    // Cargar caja del mes
-    const primerDia = `${anioActual}-${String(mesActual).padStart(2, '0')}-01`
-    const ultimoDia = new Date(anioActual, mesActual, 0).toISOString().slice(0, 10)
+// Función para cargar presupuestos pendientes
+const cargarPresupuestos = async () => {
+  try {
+    const presRes = await api.getPresupuestos()
+    resumen.value.presupuestos_pendientes = (presRes.data || [])
+      .filter(p => p.estado === 'pendiente')
+      .slice(0, 5)
+  } catch (err) {
+    console.error("Error al cargar presupuestos:", err)
+  }
+}
+
+// Función para cargar solo la caja
+const cargarCaja = async () => {
+  try {
+    const { mes, anio } = getMesAnio()
+    const primerDia = `${anio}-${String(mes).padStart(2, '0')}-01`
+    const ultimoDia = new Date(anio, mes, 0).toISOString().slice(0, 10)
     const cajaRes = await api.getMovimientosCaja(primerDia, ultimoDia)
     const { totales, movimientos } = cajaRes.data || {}
     resumen.value.ingresos_mes = toNumber(totales?.totalIngresos)
     resumen.value.egresos_mes = toNumber(totales?.totalEgresos)
     ultimosMovimientos.value = (movimientos || []).slice(0, 5)
+  } catch (err) {
+    console.error("Error al cargar caja:", err)
+  }
+}
 
-    // Cargar sueldos del mes
-    const liqRes = await api.getLiquidaciones(mesActual, anioActual)
-    resumen.value.sueldos_mes = (liqRes.data || []).reduce(
-      (sum, l) => sum + toNumber(l.total), 0
+// Función para cargar solo las horas
+const cargarHoras = async () => {
+  try {
+    const { mes, anio } = getMesAnio()
+    const horasRes = await api.getHoras(mes, anio)
+    const totalHoras = (horasRes.data || []).reduce(
+      (sum, h) => sum + toNumber(h.cantidad_horas ?? h.horas_trabajadas ?? h.cantidad_hora ?? h.horas),
+      0
     )
+    resumen.value.horas_mes = totalHoras
+  } catch (err) {
+    console.error("Error al cargar horas:", err)
+  }
+}
+
+const cargarResumen = async () => {
+  cargando.value = true
+  error.value = ""
+  try {
+    const { mes, anio } = getMesAnio()
+
+    // Cargar obras activas
+    await cargarObras()
+
+    // Cargar horas del mes
+    await cargarHoras()
+
+    // Cargar caja del mes
+    await cargarCaja()
+
+    // Cargar sueldos del mes (solo pendientes)
+    await cargarSueldos()
+
+    // Cargar presupuestos pendientes
+    await cargarPresupuestos()
 
   } catch (err) {
     console.error("Error al cargar resumen:", err)
@@ -64,7 +154,29 @@ const cargarResumen = async () => {
 }
 
 onMounted(async () => {
+  claveMesActual = getClaveMesActual()
   await cargarResumen()
+  intervaloCambioMes = setInterval(verificarCambioMes, 60 * 1000)
+
+  // Escuchar cambios en tiempo real
+  socket.on('obras:changed', cargarObras)
+  socket.on('liquidaciones:changed', cargarSueldos)
+  socket.on('horas:changed', cargarHoras)
+  socket.on('caja:changed', cargarCaja)
+  socket.on('presupuestos:changed', cargarPresupuestos)
+})
+
+onUnmounted(() => {
+  // Remover listeners cuando se desmonta el componente
+  socket.off('obras:changed', cargarObras)
+  socket.off('liquidaciones:changed', cargarSueldos)
+  socket.off('horas:changed', cargarHoras)
+  socket.off('caja:changed', cargarCaja)
+  socket.off('presupuestos:changed', cargarPresupuestos)
+  if (intervaloCambioMes) {
+    clearInterval(intervaloCambioMes)
+    intervaloCambioMes = null
+  }
 })
 </script>
 
@@ -124,9 +236,16 @@ onMounted(async () => {
 
         <div class="panel-col">
           <h3>Presupuestos pendientes</h3>
-          <p class="placeholder">
-            Próximamente se listarán los presupuestos en estado pendiente de respuesta.
-          </p>
+          <template v-if="resumen.presupuestos_pendientes.length">
+            <ul class="movimientos-list">
+              <li v-for="p in resumen.presupuestos_pendientes" :key="p.id" class="movimiento-item">
+                <span class="mov-fecha">{{ new Date(p.fecha).toLocaleDateString('es-AR') }}</span>
+                <span class="mov-detalle">#{{ p.numero }} - {{ p.cliente }}</span>
+                <span class="mov-monto">$ {{ toNumber(p.total).toLocaleString('es-AR', { minimumFractionDigits: 2 }) }}</span>
+              </li>
+            </ul>
+          </template>
+          <p v-else class="placeholder">Sin presupuestos pendientes.</p>
         </div>
       </section>
 
@@ -220,6 +339,7 @@ onMounted(async () => {
   font-size: 0.9rem;
   color: #9ca3af;
 }
+
 
 .movimientos-list {
   list-style: none;

@@ -5,6 +5,8 @@ import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
 
 const movimientos = ref([])
+const clientes = ref([])
+const presupuestos = ref([])
 const vistaActual = ref("lista") // "lista" o "detalle"
 const movimientoSeleccionado = ref(null)
 const totales = ref({})
@@ -26,6 +28,10 @@ const filtroTipo = ref("")
 const form = ref({
   fecha: new Date().toISOString().split('T')[0],
   tipo: "ingreso",
+  categoria: "mano_obra",
+  con_iva: true,
+  cliente_id: "",
+  presupuesto_id: "",
   detalle: "",
   monto_total: 0,
   desglose: {
@@ -70,6 +76,11 @@ const movimientosFiltrados = computed(() => {
   return resultado.sort((a, b) => new Date(b.fecha) - new Date(a.fecha))
 })
 
+const presupuestosDisponibles = computed(() => {
+  if (!form.value.cliente_id) return presupuestos.value
+  return presupuestos.value.filter((p) => String(p.cliente_id) === String(form.value.cliente_id))
+})
+
 const cargarDatos = async () => {
   loading.value = true
   try {
@@ -89,6 +100,19 @@ const cargarDatos = async () => {
     error.value = `Error al cargar: ${err.response?.data?.error || err.message}`
   } finally {
     loading.value = false
+  }
+}
+
+const cargarReferencias = async () => {
+  try {
+    const [resClientes, resPresupuestos] = await Promise.all([
+      api.getClientes(),
+      api.getPresupuestos(),
+    ])
+    clientes.value = resClientes.data || []
+    presupuestos.value = resPresupuestos.data || []
+  } catch (err) {
+    console.error("Error cargando clientes/presupuestos:", err)
   }
 }
 
@@ -174,6 +198,10 @@ const descargarMovimientoPdf = async () => {
 const crearFormularioVacio = () => ({
   fecha: new Date().toISOString().split('T')[0],
   tipo: "ingreso",
+  categoria: "mano_obra",
+  con_iva: true,
+  cliente_id: "",
+  presupuesto_id: "",
   detalle: "",
   monto_total: 0,
   desglose: {
@@ -221,6 +249,10 @@ const abrirEdicion = (movimiento) => {
   form.value = {
     fecha: String(movimiento.fecha || "").split("T")[0],
     tipo: movimiento.tipo || "ingreso",
+    categoria: movimiento.categoria || "mano_obra",
+    con_iva: movimiento.con_iva !== false,
+    cliente_id: movimiento.cliente_id || "",
+    presupuesto_id: movimiento.presupuesto_id || "",
     detalle: movimiento.detalle || "",
     monto_total: parseFloat(movimiento.monto_total) || 0,
     desglose: normalizarDesglose(movimiento.detalles_medio_pago || [])
@@ -233,6 +265,10 @@ const abrirEdicion = (movimiento) => {
 const payloadMovimiento = () => ({
   fecha: form.value.fecha,
   tipo: form.value.tipo,
+  categoria: form.value.categoria,
+  con_iva: form.value.con_iva,
+  cliente_id: form.value.cliente_id || null,
+  presupuesto_id: form.value.presupuesto_id || null,
   detalle: form.value.detalle,
   monto_total: parseFloat(form.value.monto_total),
   desglose: {
@@ -308,6 +344,18 @@ const obtenerLabelMedio = (codigo) => {
   return medio ? medio.label : codigo
 }
 
+const getNombreCliente = (clienteId) => {
+  if (!clienteId) return "-"
+  const cliente = clientes.value.find((c) => String(c.id) === String(clienteId))
+  return cliente?.razon_social || `Cliente ${clienteId}`
+}
+
+const getNumeroPresupuesto = (presupuestoId) => {
+  if (!presupuestoId) return "-"
+  const presupuesto = presupuestos.value.find((p) => String(p.id) === String(presupuestoId))
+  return presupuesto?.numero ? `#${presupuesto.numero}` : `Presupuesto ${presupuestoId}`
+}
+
 const formatoMoneda = (valor) => {
   return new Intl.NumberFormat('es-AR', {
     style: 'currency',
@@ -317,6 +365,7 @@ const formatoMoneda = (valor) => {
 
 onMounted(() => {
   cargarDatos()
+  cargarReferencias()
   socket.on('caja:changed', cargarDatos)
 })
 onUnmounted(() => {
@@ -467,6 +516,22 @@ onUnmounted(() => {
               <label>Fecha</label>
               <p>{{ new Date(movimientoSeleccionado.fecha).toLocaleDateString('es-AR') }}</p>
             </div>
+            <div class="info-item">
+              <label>Categoría</label>
+              <p>{{ movimientoSeleccionado.categoria === 'materiales' ? 'Materiales' : 'Mano de obra' }}</p>
+            </div>
+            <div class="info-item">
+              <label>Concepto IVA</label>
+              <p>{{ movimientoSeleccionado.con_iva ? 'Con IVA' : 'Sin IVA' }}</p>
+            </div>
+            <div class="info-item">
+              <label>Cliente asociado</label>
+              <p>{{ getNombreCliente(movimientoSeleccionado.cliente_id) }}</p>
+            </div>
+            <div class="info-item">
+              <label>Presupuesto asociado</label>
+              <p>{{ getNumeroPresupuesto(movimientoSeleccionado.presupuesto_id) }}</p>
+            </div>
           </div>
         </div>
 
@@ -509,6 +574,44 @@ onUnmounted(() => {
             <select v-model="form.tipo" required>
               <option value="ingreso">Ingreso</option>
               <option value="egreso">Egreso</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="form-row">
+          <label class="form-group">
+            <span>Categoría *</span>
+            <select v-model="form.categoria" required>
+              <option value="mano_obra">Mano de obra</option>
+              <option value="materiales">Materiales</option>
+            </select>
+          </label>
+          <label class="form-group">
+            <span>Concepto IVA *</span>
+            <select v-model="form.con_iva">
+              <option :value="true">Con IVA</option>
+              <option :value="false">Sin IVA</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="form-row">
+          <label class="form-group">
+            <span>Cliente (opcional)</span>
+            <select v-model="form.cliente_id">
+              <option value="">Sin cliente</option>
+              <option v-for="cliente in clientes" :key="cliente.id" :value="cliente.id">
+                {{ cliente.razon_social }}
+              </option>
+            </select>
+          </label>
+          <label class="form-group">
+            <span>Presupuesto (opcional)</span>
+            <select v-model="form.presupuesto_id">
+              <option value="">Sin presupuesto</option>
+              <option v-for="pres in presupuestosDisponibles" :key="pres.id" :value="pres.id">
+                #{{ pres.numero }}
+              </option>
             </select>
           </label>
         </div>

@@ -1,6 +1,5 @@
 import express from "express"
-import db from "../db.js"
-import { pool } from "../db.js"
+import db, { pool } from "../db.js"
 import { getIo } from '../socket.js'
 import PDFDocument from "pdfkit"
 import path from "path"
@@ -9,12 +8,17 @@ import { drawPremiumHeader, setupPremiumFooter, drawPremiumSectionTitle, PDF_COL
 
 const router = express.Router()
 const MEDIOS_PAGO = ["efectivo", "transferencia", "cheque", "echeq", "retencion"]
+const CATEGORIAS_CAJA = ["mano_obra", "materiales"]
 const LABEL_MEDIO = {
   efectivo: "Efectivo",
   transferencia: "Transferencia",
   cheque: "Cheque",
   echeq: "Echeq",
   retencion: "Retencion",
+}
+const LABEL_CATEGORIA = {
+  mano_obra: "Mano de obra",
+  materiales: "Materiales",
 }
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const LOGO_PATH = path.join(__dirname, "..", "assets", "logo.png")
@@ -74,8 +78,20 @@ function normalizarMovimiento(movimiento) {
   return {
     ...movimiento,
     detalle: movimiento.detalle ?? movimiento.concepto ?? movimiento.descripcion ?? "",
+    categoria: CATEGORIAS_CAJA.includes(String(movimiento.categoria || "")) ? movimiento.categoria : null,
+    con_iva: Boolean(movimiento.con_iva),
+    cliente_id: movimiento.cliente_id ?? null,
+    presupuesto_id: movimiento.presupuesto_id ?? null,
     detalles_medio_pago: detallesNormalizados,
   }
+}
+
+function normalizarBoolean(valor, defaultValue = false) {
+  if (valor === undefined || valor === null || valor === "") return defaultValue
+  if (typeof valor === "boolean") return valor
+  if (typeof valor === "number") return valor !== 0
+  const normalizado = String(valor).trim().toLowerCase()
+  return ["true", "1", "si", "sí", "con_iva", "con iva"].includes(normalizado)
 }
 
 async function getDetallesSchema() {
@@ -403,7 +419,13 @@ router.get("/:id/pdf", async (req, res) => {
     doc.font("Helvetica").fontSize(10).fillColor(PDF_COLORS.ink)
     doc.text(movimiento.detalle || "-", 58, infoY + 66, { width: pageWidth - 116 })
 
-    doc.y = infoY + 118
+    doc.font("Helvetica").fontSize(9).fillColor(PDF_COLORS.slate)
+    doc.text(`Categoria: ${LABEL_CATEGORIA[movimiento.categoria] || "-"}`, 58, infoY + 84, { width: 180 })
+    doc.text(`IVA: ${movimiento.con_iva ? "Con IVA" : "Sin IVA"}`, 250, infoY + 84, { width: 120 })
+    doc.text(`Cliente ID: ${movimiento.cliente_id || "-"}`, 360, infoY + 84, { width: 85 })
+    doc.text(`Presupuesto ID: ${movimiento.presupuesto_id || "-"}`, 448, infoY + 84, { width: 90, align: "right" })
+
+    doc.y = infoY + 132
     doc.moveDown(0.4)
     doc.font("Helvetica-Bold").fontSize(12).fillColor(PDF_COLORS.navy).text("Desglose por medio de pago")
     doc.moveDown(0.25)
@@ -464,7 +486,7 @@ router.get("/:id", async (req, res) => {
 // Crear movimiento de caja
 router.post("/", async (req, res) => {
   try {
-    const { fecha, tipo, detalle, monto_total, desglose } = req.body
+    const { fecha, tipo, detalle, monto_total, desglose, categoria, con_iva, cliente_id, presupuesto_id } = req.body
     const detalleColumn = await getDetalleColumn()
     const detallesSchema = await getDetallesSchema()
 
@@ -475,6 +497,10 @@ router.post("/", async (req, res) => {
 
     if (!["ingreso", "egreso"].includes(tipo)) {
       return res.status(400).json({ error: "Tipo debe ser 'ingreso' o 'egreso'" })
+    }
+
+    if (categoria && !CATEGORIAS_CAJA.includes(categoria)) {
+      return res.status(400).json({ error: "Categoria inválida. Debe ser 'mano_obra' o 'materiales'" })
     }
 
     if (monto_total <= 0) {
@@ -502,7 +528,11 @@ router.post("/", async (req, res) => {
           fecha: fecha,
           tipo: tipo,
           [detalleColumn]: detalle,
-          monto_total: parseFloat(monto_total)
+          monto_total: parseFloat(monto_total),
+          categoria: categoria || null,
+          con_iva: normalizarBoolean(con_iva, true),
+          cliente_id: cliente_id || null,
+          presupuesto_id: presupuesto_id || null,
         }
       ])
       .select()
@@ -570,7 +600,7 @@ router.post("/", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params
-    const { fecha, tipo, detalle, monto_total, desglose } = req.body
+    const { fecha, tipo, detalle, monto_total, desglose, categoria, con_iva, cliente_id, presupuesto_id } = req.body
     const detalleColumn = await getDetalleColumn()
     const detallesSchema = await getDetallesSchema()
 
@@ -583,12 +613,20 @@ router.put("/:id", async (req, res) => {
       return res.status(400).json({ error: "Monto total debe ser mayor a 0" })
     }
 
+    if (categoria !== undefined && categoria !== null && categoria !== "" && !CATEGORIAS_CAJA.includes(categoria)) {
+      return res.status(400).json({ error: "Categoria inválida. Debe ser 'mano_obra' o 'materiales'" })
+    }
+
     // Actualizar movimiento
     const actualizaciones = {}
     if (fecha !== undefined) actualizaciones.fecha = fecha
     if (tipo !== undefined) actualizaciones.tipo = tipo
     if (detalle !== undefined) actualizaciones[detalleColumn] = detalle
     if (monto_total !== undefined) actualizaciones.monto_total = monto_total
+    if (categoria !== undefined) actualizaciones.categoria = categoria || null
+    if (con_iva !== undefined) actualizaciones.con_iva = normalizarBoolean(con_iva, true)
+    if (cliente_id !== undefined) actualizaciones.cliente_id = cliente_id || null
+    if (presupuesto_id !== undefined) actualizaciones.presupuesto_id = presupuesto_id || null
 
     const { data: movimientoActualizado, error: errorActualizacion } = await db
       .from("movimientos_caja")

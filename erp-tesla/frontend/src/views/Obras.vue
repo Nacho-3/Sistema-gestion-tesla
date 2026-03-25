@@ -9,6 +9,7 @@ const obras = ref([])
 const clientes = ref([])
 const grupos = ref([])
 const horas = ref([])
+const presupuestos = ref([])
 const loading = ref(false)
 const error = ref("")
 const showForm = ref(false)
@@ -66,14 +67,19 @@ const verDetalle = async (obra) => {
   obraSeleccionada.value = obra
   vistaActual.value = "detalle"
   
-  // Cargar horas de la obra
+  // Cargar horas y presupuestos de la obra
   loading.value = true
   try {
-    const resHoras = await api.getHoras(undefined, undefined, undefined, obra.id)
+    const [resHoras, resPresupuestos] = await Promise.all([
+      api.getHoras(undefined, undefined, undefined, obra.id),
+      api.getPresupuestos(),
+    ])
     horas.value = resHoras.data || []
+    presupuestos.value = (resPresupuestos.data || []).filter((p) => String(p.obra_id) === String(obra.id))
   } catch (err) {
-    console.error("Error al cargar horas de la obra:", err)
+    console.error("Error al cargar detalle de la obra:", err)
     horas.value = []
+    presupuestos.value = []
   } finally {
     loading.value = false
   }
@@ -84,6 +90,7 @@ const volverALista = () => {
   vistaActual.value = "lista"
   obraSeleccionada.value = null
   horas.value = []
+  presupuestos.value = []
 }
 
 // Abrir formulario
@@ -195,10 +202,18 @@ const totalHorasObra = computed(() => {
   return horas.value.reduce((sum, h) => sum + (h.cantidad_horas || 0), 0)
 })
 
-// Obras filtradas por cliente
+// Obras filtradas por cliente (excluyendo obras administrativas)
+const ADMIN_REGEX = /admin/i
+
 const obrasFiltradas = computed(() => {
-  if (!filtroCliente.value) return obras.value
-  return obras.value.filter((o) => String(o.cliente_id) === String(filtroCliente.value))
+  const lista = filtroCliente.value
+    ? obras.value.filter((o) => String(o.cliente_id) === String(filtroCliente.value))
+    : obras.value
+  return lista.filter((o) => {
+    if (ADMIN_REGEX.test(String(o.nombre || ""))) return false
+    const grupo = grupos.value.find((g) => g.id === o.grupo_id)
+    return !ADMIN_REGEX.test(String(grupo?.nombre || ""))
+  })
 })
 
 const obrasActivas = computed(() => obrasFiltradas.value.filter((o) => o.estado === "activa"))
@@ -220,6 +235,11 @@ const getNombreGrupo = (grupoId) => {
 const formatearFecha = (fecha) => {
   if (!fecha) return "-"
   return new Date(fecha).toLocaleDateString("es-AR")
+}
+
+const formatearMonto = (valor) => {
+  const numero = Number(valor) || 0
+  return numero.toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 onMounted(async () => {
@@ -379,6 +399,21 @@ onUnmounted(() => {
           </div>
         </div>
 
+        <!-- Total acumulado de horas -->
+        <div class="detalle-seccion resumen-horas">
+          <h3>📊 Total acumulado de horas</h3>
+          <div class="total-horas">
+            <div class="horas-stat">
+              <span class="horas-label">Horas totales:</span>
+              <span class="horas-value">{{ totalHorasObra.toFixed(2) }}</span>
+            </div>
+            <div class="horas-stat">
+              <span class="horas-label">Registro de horas:</span>
+              <span class="horas-value">{{ horas.length }}</span>
+            </div>
+          </div>
+        </div>
+
         <!-- Horas trabajadas -->
         <div class="detalle-seccion">
           <h3>⏱️ Horas trabajadas</h3>
@@ -408,25 +443,33 @@ onUnmounted(() => {
           <p v-else class="sin-datos">No hay registros de horas para esta obra</p>
         </div>
 
-        <!-- Total acumulado de horas -->
-        <div class="detalle-seccion resumen-horas">
-          <h3>📊 Total acumulado de horas</h3>
-          <div class="total-horas">
-            <div class="horas-stat">
-              <span class="horas-label">Horas totales:</span>
-              <span class="horas-value">{{ totalHorasObra.toFixed(2) }}</span>
-            </div>
-            <div class="horas-stat">
-              <span class="horas-label">Registro de horas:</span>
-              <span class="horas-value">{{ horas.length }}</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Presupuesto asociado -->
         <div class="detalle-seccion">
-          <h3>💰 Presupuesto asociado</h3>
-          <p class="sin-datos">Funcionalidad disponible cuando se implemente el módulo de Presupuestos</p>
+          <h3>📄 Presupuestos asociados</h3>
+          <div v-if="presupuestos.length > 0" class="horas-lista">
+            <table>
+              <thead>
+                <tr>
+                  <th>Número</th>
+                  <th>Fecha</th>
+                  <th>Estado</th>
+                  <th>Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="presupuesto in presupuestos" :key="presupuesto.id">
+                  <td>#{{ presupuesto.numero }}</td>
+                  <td>{{ formatearFecha(presupuesto.fecha) }}</td>
+                  <td>
+                    <span :class="['badge', `badge-${String(presupuesto.estado || '').toLowerCase()}`]">
+                      {{ presupuesto.estado || '-' }}
+                    </span>
+                  </td>
+                  <td>$ {{ formatearMonto(presupuesto.total) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else class="sin-datos">No hay presupuestos asociados a esta obra</p>
         </div>
 
         <!-- Certificados emitidos -->
