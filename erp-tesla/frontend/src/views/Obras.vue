@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed } from "vue"
-import api from "../api"
+import api, { extractApiErrorMessage } from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
 
@@ -35,7 +35,7 @@ const loadObras = async () => {
     const res = await api.getObras()
     obras.value = res.data || []
   } catch (err) {
-    error.value = "Error al cargar obras"
+    error.value = extractApiErrorMessage(err, "Error al cargar obras")
     console.error(err)
   } finally {
     loading.value = false
@@ -154,7 +154,9 @@ const saveObra = async () => {
     
     closeForm()
   } catch (err) {
-    error.value = editingId.value ? "Error al actualizar obra" : "Error al crear obra"
+    error.value = editingId.value
+      ? extractApiErrorMessage(err, "Error al actualizar obra")
+      : extractApiErrorMessage(err, "Error al crear obra")
     console.error(err)
   } finally {
     loading.value = false
@@ -175,7 +177,7 @@ const deleteObra = async (id) => {
       volverALista()
     }
   } catch (err) {
-    error.value = "Error al eliminar obra"
+    error.value = extractApiErrorMessage(err, "Error al eliminar obra")
     console.error(err)
   } finally {
     loading.value = false
@@ -192,7 +194,7 @@ const cambiarEstado = async (id, nuevoEstado) => {
       obraSeleccionada.value.estado = nuevoEstado
     }
   } catch (err) {
-    error.value = "Error al cambiar estado de la obra"
+    error.value = extractApiErrorMessage(err, "Error al cambiar estado de la obra")
     console.error(err)
   }
 }

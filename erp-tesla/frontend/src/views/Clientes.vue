@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from "vue"
-import api from "../api"
+import api, { extractApiErrorMessage } from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
 
@@ -35,7 +35,7 @@ const loadClientes = async () => {
     const res = await api.getClientes()
     clientes.value = (res.data || []).filter(c => String(c.razon_social || "").toUpperCase() !== "ADMINISTRACION INTERNA")
   } catch (err) {
-    error.value = "Error al cargar clientes"
+    error.value = extractApiErrorMessage(err, "Error al cargar clientes")
     console.error(err)
   } finally {
     loading.value = false
@@ -143,7 +143,9 @@ const saveCliente = async () => {
     
     closeForm()
   } catch (err) {
-    error.value = editingId.value ? "Error al actualizar cliente" : "Error al crear cliente"
+    error.value = editingId.value
+      ? extractApiErrorMessage(err, "Error al actualizar cliente")
+      : extractApiErrorMessage(err, "Error al crear cliente")
     console.error(err)
   } finally {
     loading.value = false
@@ -164,7 +166,7 @@ const deleteCliente = async (id) => {
       volverALista()
     }
   } catch (err) {
-    error.value = "Error al eliminar cliente"
+    error.value = extractApiErrorMessage(err, "Error al eliminar cliente")
     console.error(err)
   } finally {
     loading.value = false
@@ -197,7 +199,7 @@ const descargarFichaPdf = async () => {
     link.remove()
     window.URL.revokeObjectURL(url)
   } catch (err) {
-    error.value = "Error al generar la ficha PDF"
+    error.value = extractApiErrorMessage(err, "Error al generar la ficha PDF")
     console.error(err)
   } finally {
     downloadingPdf.value = false

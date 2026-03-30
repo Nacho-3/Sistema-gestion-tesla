@@ -50,6 +50,36 @@ const parseObservacionesData = (observacionesRaw) => {
   return { nota: raw, meta: {} }
 }
 
+const buildObservacionesData = (nota = "", meta = {}) => JSON.stringify({
+  __liquidacion_meta: true,
+  nota: String(nota || ""),
+  meta,
+})
+
+const getLiquidacionMeta = (liq = {}) => parseObservacionesData(liq?.observaciones).meta || {}
+
+const getHorasComputadas = (registro = {}) => {
+  const valor =
+    registro.cantidad_horas ??
+    registro.horas_trabajadas ??
+    registro.cantidad_hora ??
+    registro.horas ??
+    0
+  const numero = Number(valor)
+  return Number.isFinite(numero) ? numero : 0
+}
+
+const getHorasTrabajadas = (registro = {}) => {
+  const valor =
+    registro.horas_trabajadas ??
+    registro.cantidad_horas ??
+    registro.cantidad_hora ??
+    registro.horas ??
+    0
+  const numero = Number(valor)
+  return Number.isFinite(numero) ? numero : 0
+}
+
 const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
   const { meta } = parseObservacionesData(liq?.observaciones)
 
@@ -79,10 +109,12 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
   const vacaciones = preferColumn(liq.vacaciones, meta.vacaciones)
   const adelantos = preferColumn(liq.adelantos, meta.adelantos, liq?.descuentos)
   const horasExtraCantidad = preferColumn(liq.horas_extra_cantidad, meta.horas_extra_cantidad)
+  const horasExtra100Cantidad = preferColumn(liq.horas_extra_100_cantidad, meta.horas_extra_100_cantidad)
   const feriadosCantidad = preferColumn(liq.feriados_cantidad, meta.feriados_cantidad)
   const diasNoTrabajados = preferColumn(liq.dias_no_trabajados, meta.dias_no_trabajados)
 
   const importeHorasExtra = roundMoney(horasExtraCantidad * valorHora * 1.5)
+  const importeHorasExtra100 = roundMoney(horasExtra100Cantidad * valorHora * 2)
   const importeFeriados = roundMoney(feriadosCantidad * 8 * valorHora)
   const descuentoDiasNoTrabajados = roundMoney(diasNoTrabajados * 8 * valorHora)
 
@@ -93,9 +125,11 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
     vacaciones,
     adelantos,
     horas_extra_cantidad: horasExtraCantidad,
+    horas_extra_100_cantidad: horasExtra100Cantidad,
     feriados_cantidad: feriadosCantidad,
     dias_no_trabajados: diasNoTrabajados,
     importe_horas_extra: importeHorasExtra,
+    importe_horas_extra_100: importeHorasExtra100,
     importe_feriados: importeFeriados,
     descuento_dias_no_trabajados: descuentoDiasNoTrabajados,
   }
@@ -105,10 +139,11 @@ const mapLiquidacion = (liq, totalPagado = 0) => {
   const periodo = liq?.periodo_inicio ? new Date(liq.periodo_inicio) : null
   const mes = periodo ? periodo.getMonth() + 1 : null
   const anio = periodo ? periodo.getFullYear() : null
-  const { nota } = parseObservacionesData(liq?.observaciones)
+  const { nota, meta } = parseObservacionesData(liq?.observaciones)
   const importeHoras = Number(liq?.monto_bruto ?? 0)
   const totalHoras = Number(liq?.total_horas ?? 0)
   const valorHora = totalHoras > 0 ? importeHoras / totalHoras : 0
+  const horasTrabajadasReales = roundMoney(meta?.horas_trabajadas_reales ?? totalHoras)
   const conceptos = getConceptosFromLiquidacion(liq, valorHora)
   const totalCalculado =
     importeHoras +
@@ -117,6 +152,7 @@ const mapLiquidacion = (liq, totalPagado = 0) => {
     conceptos.aguinaldo +
     conceptos.vacaciones +
     conceptos.importe_horas_extra +
+    conceptos.importe_horas_extra_100 +
     conceptos.importe_feriados -
     conceptos.adelantos -
     conceptos.descuento_dias_no_trabajados
@@ -127,15 +163,20 @@ const mapLiquidacion = (liq, totalPagado = 0) => {
     ...liq,
     mes,
     anio,
+    horas_computadas: totalHoras,
+    horas_trabajadas_reales: horasTrabajadasReales,
+    base_manual: meta?.base_manual === true,
     valor_hora: valorHora,
     importe_horas: importeHoras,
     presentismo: conceptos.presentismo,
     importe_horas_extra: conceptos.importe_horas_extra,
+    importe_horas_extra_100: conceptos.importe_horas_extra_100,
     no_remunerativo: conceptos.no_remunerativo,
     aguinaldo: conceptos.aguinaldo,
     vacaciones: conceptos.vacaciones,
     adelantos: conceptos.adelantos,
     horas_extra_cantidad: conceptos.horas_extra_cantidad,
+    horas_extra_100_cantidad: conceptos.horas_extra_100_cantidad,
     feriados_cantidad: conceptos.feriados_cantidad,
     dias_no_trabajados: conceptos.dias_no_trabajados,
     importe_feriados: conceptos.importe_feriados,
@@ -186,10 +227,21 @@ const syncLiquidacionesPeriodo = async (mes, anio) => {
     const horasData = horasPeriodo || []
     const liquidaciones = [...(existentes || [])]
 
-    const horasPorEmpleado = {}
+    const horasTrabajadasPorEmpleado = {}
+    const horasExtra50PorEmpleado = {}
+    const horasExtra100PorEmpleado = {}
     for (const h of horasData) {
-      if (!horasPorEmpleado[h.empleado_id]) horasPorEmpleado[h.empleado_id] = 0
-      horasPorEmpleado[h.empleado_id] += getCantidadHoras(h)
+      if (!horasTrabajadasPorEmpleado[h.empleado_id]) horasTrabajadasPorEmpleado[h.empleado_id] = 0
+      if (!horasExtra50PorEmpleado[h.empleado_id]) horasExtra50PorEmpleado[h.empleado_id] = 0
+      if (!horasExtra100PorEmpleado[h.empleado_id]) horasExtra100PorEmpleado[h.empleado_id] = 0
+      horasTrabajadasPorEmpleado[h.empleado_id] += getHorasTrabajadas(h)
+      if (h.es_hora_extra === true) {
+        if (String(h.tipo_hora_extra || "") === "100" || String(h.tipo || "") === "extra_100") {
+          horasExtra100PorEmpleado[h.empleado_id] += getHorasTrabajadas(h)
+        } else {
+          horasExtra50PorEmpleado[h.empleado_id] += getHorasTrabajadas(h)
+        }
+      }
     }
 
     const byEmpleado = new Map(liquidaciones.map((l) => [l.empleado_id, l]))
@@ -208,6 +260,8 @@ const syncLiquidacionesPeriodo = async (mes, anio) => {
               presentismo: 0,
               horas_extra_cantidad: 0,
               importe_horas_extra: 0,
+              horas_extra_100_cantidad: 0,
+              importe_horas_extra_100: 0,
               no_remunerativo: 0,
               aguinaldo: 0,
               vacaciones: 0,
@@ -249,44 +303,65 @@ const syncLiquidacionesPeriodo = async (mes, anio) => {
       const liq = byEmpleado.get(emp.id)
       if (!liq) continue
 
-      const totalHoras = Number(horasPorEmpleado[emp.id] || 0)
+      const metaActual = getLiquidacionMeta(liq)
+      const horasTrabajadas = roundMoney(horasTrabajadasPorEmpleado[emp.id] || 0)
+      const horasExtra50Automaticas = roundMoney(horasExtra50PorEmpleado[emp.id] || 0)
+      const horasExtra100Automaticas = roundMoney(horasExtra100PorEmpleado[emp.id] || 0)
       const valorHora = Number(emp.valor_hora || 0)
-      const montoBruto = totalHoras * valorHora
+      const totalHoras = roundMoney(liq.total_horas || 0)
+      const montoBruto = roundMoney(liq.monto_bruto || 0)
       const conceptos = getConceptosFromLiquidacion(liq, valorHora)
+      const conceptosActualizados = {
+        ...conceptos,
+        horas_extra_cantidad: horasExtra50Automaticas,
+        importe_horas_extra: roundMoney(horasExtra50Automaticas * valorHora * 1.5),
+        horas_extra_100_cantidad: horasExtra100Automaticas,
+        importe_horas_extra_100: roundMoney(horasExtra100Automaticas * valorHora * 2),
+      }
       const montoNeto = roundMoney(Math.max(
         0,
         montoBruto +
-          conceptos.presentismo +
-          conceptos.no_remunerativo +
-          conceptos.aguinaldo +
-          conceptos.vacaciones +
-          conceptos.importe_horas_extra +
-          conceptos.importe_feriados -
-          conceptos.adelantos -
-          conceptos.descuento_dias_no_trabajados
+          conceptosActualizados.presentismo +
+          conceptosActualizados.no_remunerativo +
+          conceptosActualizados.aguinaldo +
+          conceptosActualizados.vacaciones +
+          conceptosActualizados.importe_horas_extra +
+          conceptosActualizados.importe_horas_extra_100 +
+          conceptosActualizados.importe_feriados -
+          conceptosActualizados.adelantos -
+          conceptosActualizados.descuento_dias_no_trabajados
       ))
       const totalPagado = Number(pagosPorLiquidacion[liq.id] || 0)
       const estado = totalPagado >= montoNeto ? "pagada" : "pendiente"
+
+      const { nota } = parseObservacionesData(liq.observaciones)
+      const observacionesActualizadas = buildObservacionesData(nota, {
+        ...metaActual,
+        horas_trabajadas_reales: horasTrabajadas,
+      })
 
       await db
         .from("liquidaciones")
         .update({
           total_horas: totalHoras,
           monto_bruto: roundMoney(montoBruto),
-          presentismo: conceptos.presentismo,
-          horas_extra_cantidad: conceptos.horas_extra_cantidad,
-          importe_horas_extra: conceptos.importe_horas_extra,
-          no_remunerativo: conceptos.no_remunerativo,
-          aguinaldo: conceptos.aguinaldo,
-          vacaciones: conceptos.vacaciones,
-          feriados_cantidad: conceptos.feriados_cantidad,
-          importe_feriados: conceptos.importe_feriados,
-          dias_no_trabajados: conceptos.dias_no_trabajados,
-          descuento_dias_no_trabajados: conceptos.descuento_dias_no_trabajados,
-          adelantos: conceptos.adelantos,
-          descuentos: conceptos.adelantos,
+          presentismo: conceptosActualizados.presentismo,
+          horas_extra_cantidad: conceptosActualizados.horas_extra_cantidad,
+          importe_horas_extra: conceptosActualizados.importe_horas_extra,
+          horas_extra_100_cantidad: conceptosActualizados.horas_extra_100_cantidad,
+          importe_horas_extra_100: conceptosActualizados.importe_horas_extra_100,
+          no_remunerativo: conceptosActualizados.no_remunerativo,
+          aguinaldo: conceptosActualizados.aguinaldo,
+          vacaciones: conceptosActualizados.vacaciones,
+          feriados_cantidad: conceptosActualizados.feriados_cantidad,
+          importe_feriados: conceptosActualizados.importe_feriados,
+          dias_no_trabajados: conceptosActualizados.dias_no_trabajados,
+          descuento_dias_no_trabajados: conceptosActualizados.descuento_dias_no_trabajados,
+          adelantos: conceptosActualizados.adelantos,
+          descuentos: conceptosActualizados.adelantos,
           monto_neto: montoNeto,
           estado,
+          observaciones: observacionesActualizadas,
         })
         .eq("id", liq.id)
     }
@@ -483,7 +558,8 @@ router.get("/:id/pdf", async (req, res) => {
 
       const rows = [
         ["Presentismo", formatoMoneda(liquidacion.presentismo)],
-        [`Horas extra (${formatoCantidad(liquidacion.horas_extra_cantidad)} hs)`, formatoMoneda(liquidacion.importe_horas_extra)],
+        [`Horas extra 50% (${formatoCantidad(liquidacion.horas_extra_cantidad)} hs)`, formatoMoneda(liquidacion.importe_horas_extra)],
+        [`Horas extra 100% (${formatoCantidad(liquidacion.horas_extra_100_cantidad)} hs)`, formatoMoneda(liquidacion.importe_horas_extra_100)],
         [`Feriados (${formatoCantidad(liquidacion.feriados_cantidad)} dias)`, formatoMoneda(liquidacion.importe_feriados)],
         ["No remunerativo", formatoMoneda(liquidacion.no_remunerativo)],
         ["Aguinaldo", formatoMoneda(liquidacion.aguinaldo)],
@@ -609,17 +685,13 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: `Empleado con ID ${empleado_id} no encontrado` })
     }
     
-    if (!empleado.valor_hora || empleado.valor_hora <= 0) {
-      return res.status(400).json({ error: `El empleado ${empleado.nombre} ${empleado.apellido} no tiene tarifa configurada` })
-    }
-
     // Calcular total de horas del mes (incluye horas prestadas)
     const fechaInicio = inicioISO
     const fechaFin = finISO
 
     const { data: horas, error: horasError } = await db
       .from("horas")
-      .select("cantidad_horas")
+      .select("*")
       .eq("empleado_id", empleado_id)
       .gte("fecha", fechaInicio)
       .lte("fecha", fechaFin)
@@ -628,8 +700,23 @@ router.post("/", async (req, res) => {
       console.error("❌ Error al obtener horas:", horasError)
     }
 
-    const total_horas = horas ? horas.reduce((sum, h) => sum + Number(h.cantidad_horas || 0), 0) : 0
-    const importe_horas = total_horas * empleado.valor_hora
+    const total_horas = 0
+    const horas_trabajadas_reales = horas ? horas.reduce((sum, h) => sum + getHorasTrabajadas(h), 0) : 0
+    const horas_extra_cantidad = horas
+      ? horas.reduce((sum, h) => sum + (
+        h.es_hora_extra === true && String(h.tipo_hora_extra || "") !== "100" && String(h.tipo || "") !== "extra_100"
+          ? getHorasTrabajadas(h)
+          : 0
+      ), 0)
+      : 0
+    const horas_extra_100_cantidad = horas
+      ? horas.reduce((sum, h) => sum + (
+        h.es_hora_extra === true && (String(h.tipo_hora_extra || "") === "100" || String(h.tipo || "") === "extra_100")
+          ? getHorasTrabajadas(h)
+          : 0
+      ), 0)
+      : 0
+    const importe_horas = 0
 
     // Crear liquidación
     const { data, error } = await db.from("liquidaciones").insert([
@@ -640,8 +727,10 @@ router.post("/", async (req, res) => {
         total_horas,
         monto_bruto: importe_horas,
         presentismo: 0,
-        horas_extra_cantidad: 0,
-        importe_horas_extra: 0,
+        horas_extra_cantidad: roundMoney(horas_extra_cantidad),
+        importe_horas_extra: roundMoney(horas_extra_cantidad * Number(empleado.valor_hora || 0) * 1.5),
+        horas_extra_100_cantidad: roundMoney(horas_extra_100_cantidad),
+        importe_horas_extra_100: roundMoney(horas_extra_100_cantidad * Number(empleado.valor_hora || 0) * 2),
         no_remunerativo: 0,
         aguinaldo: 0,
         vacaciones: 0,
@@ -652,7 +741,10 @@ router.post("/", async (req, res) => {
         adelantos: 0,
         descuentos: 0,
         monto_neto: importe_horas,
-        estado: "pendiente"
+        estado: "pendiente",
+        observaciones: buildObservacionesData("", {
+          horas_trabajadas_reales: roundMoney(horas_trabajadas_reales),
+        })
       }
     ]).select()
 
@@ -674,8 +766,11 @@ router.post("/", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const {
+      total_horas,
+      monto_bruto,
       presentismo,
       horas_extra_cantidad,
+      horas_extra_100_cantidad,
       no_remunerativo,
       aguinaldo,
       vacaciones,
@@ -688,7 +783,7 @@ router.put("/:id", async (req, res) => {
     // Obtener liquidación actual para recalcular total
     const { data: liquidacion } = await db
       .from("liquidaciones")
-      .select("empleado_id, total_horas, monto_bruto, observaciones, presentismo, horas_extra_cantidad, no_remunerativo, aguinaldo, vacaciones, feriados_cantidad, dias_no_trabajados, adelantos")
+      .select("empleado_id, total_horas, monto_bruto, observaciones, presentismo, horas_extra_cantidad, horas_extra_100_cantidad, no_remunerativo, aguinaldo, vacaciones, feriados_cantidad, dias_no_trabajados, adelantos")
       .eq("id", req.params.id)
       .single()
 
@@ -700,8 +795,15 @@ router.put("/:id", async (req, res) => {
       .eq("id", liquidacion.empleado_id)
       .single()
 
-    const valorHoraCalculado = Number(liquidacion.total_horas || 0) > 0
-      ? Number(liquidacion.monto_bruto || 0) / Number(liquidacion.total_horas || 1)
+    const totalHorasFinal = total_horas !== undefined
+      ? roundMoney(total_horas)
+      : roundMoney(liquidacion.total_horas || 0)
+    const montoBrutoFinal = monto_bruto !== undefined
+      ? roundMoney(monto_bruto)
+      : roundMoney(liquidacion.monto_bruto || 0)
+
+    const valorHoraCalculado = Number(totalHorasFinal || 0) > 0
+      ? Number(montoBrutoFinal || 0) / Number(totalHorasFinal || 1)
       : Number(empleado?.valor_hora || 0)
 
     const conceptosActuales = getConceptosFromLiquidacion(liquidacion, valorHoraCalculado)
@@ -709,6 +811,7 @@ router.put("/:id", async (req, res) => {
     const conceptos = {
       presentismo: roundMoney(presentismo ?? conceptosActuales.presentismo),
       horas_extra_cantidad: roundMoney(horas_extra_cantidad ?? conceptosActuales.horas_extra_cantidad),
+      horas_extra_100_cantidad: roundMoney(horas_extra_100_cantidad ?? conceptosActuales.horas_extra_100_cantidad),
       no_remunerativo: roundMoney(no_remunerativo ?? conceptosActuales.no_remunerativo),
       aguinaldo: roundMoney(aguinaldo ?? conceptosActuales.aguinaldo),
       vacaciones: roundMoney(vacaciones ?? conceptosActuales.vacaciones),
@@ -718,24 +821,33 @@ router.put("/:id", async (req, res) => {
     }
 
     const importeHorasExtra = roundMoney(conceptos.horas_extra_cantidad * valorHoraCalculado * 1.5)
+    const importeHorasExtra100 = roundMoney(conceptos.horas_extra_100_cantidad * valorHoraCalculado * 2)
     const importeFeriados = roundMoney(conceptos.feriados_cantidad * 8 * valorHoraCalculado)
     const descuentoDiasNoTrabajados = roundMoney(conceptos.dias_no_trabajados * 8 * valorHoraCalculado)
 
     // Calcular total
     const total = roundMoney(
-      Number(liquidacion.monto_bruto || 0) +
+      montoBrutoFinal +
       conceptos.presentismo +
       conceptos.no_remunerativo +
       conceptos.aguinaldo +
       conceptos.vacaciones +
       importeHorasExtra +
+      importeHorasExtra100 +
       importeFeriados -
       conceptos.adelantos -
       descuentoDiasNoTrabajados
     )
 
-    const { nota: notaActual } = parseObservacionesData(liquidacion.observaciones)
+    const { nota: notaActual, meta: metaActual } = parseObservacionesData(liquidacion.observaciones)
     const observacionesFinal = String(observaciones ?? notaActual ?? "")
+    const observacionesPayload = buildObservacionesData(observacionesFinal, {
+      ...metaActual,
+      base_manual: total_horas !== undefined || monto_bruto !== undefined
+        ? true
+        : metaActual?.base_manual === true,
+      horas_trabajadas_reales: roundMoney(metaActual?.horas_trabajadas_reales ?? liquidacion.total_horas ?? 0),
+    })
 
     const { data: pagosExistentes } = await db
       .from("pagos_sueldo")
@@ -748,9 +860,13 @@ router.put("/:id", async (req, res) => {
     const { data: updatedRows, error } = await db
       .from("liquidaciones")
       .update({
+        total_horas: totalHorasFinal,
+        monto_bruto: montoBrutoFinal,
         presentismo: conceptos.presentismo,
         horas_extra_cantidad: conceptos.horas_extra_cantidad,
         importe_horas_extra: importeHorasExtra,
+        horas_extra_100_cantidad: conceptos.horas_extra_100_cantidad,
+        importe_horas_extra_100: importeHorasExtra100,
         no_remunerativo: conceptos.no_remunerativo,
         aguinaldo: conceptos.aguinaldo,
         vacaciones: conceptos.vacaciones,
@@ -762,7 +878,7 @@ router.put("/:id", async (req, res) => {
         descuentos: conceptos.adelantos,
         monto_neto: Math.max(0, total),
         estado: estadoActualizado,
-        observaciones: observacionesFinal
+        observaciones: observacionesPayload
       })
       .eq("id", req.params.id)
       .select()

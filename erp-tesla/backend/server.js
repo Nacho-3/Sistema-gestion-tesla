@@ -1,10 +1,14 @@
 import { createServer } from "http"
+import fs from "fs"
+import path from "path"
 import express from "express"
 import cors from "cors"
 import dotenv from "dotenv"
 import helmet from "helmet"
 import rateLimit from "express-rate-limit"
 import { Server as SocketIO } from "socket.io"
+import { fileURLToPath } from "url"
+import { pool } from "./db.js"
 import { setIo } from "./socket.js"
 import authRoutes from "./auth.js"
 import clientesRoutes from "./routes/clientes.js"
@@ -21,6 +25,13 @@ import certificadosRoutes from "./routes/certificados.js"
 dotenv.config()
 
 const app = express()
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const schemaPath = path.join(__dirname, "database", "schema.sql")
+
+const ensureDatabaseSchema = async () => {
+  const sql = fs.readFileSync(schemaPath, "utf8")
+  await pool.query(sql)
+}
 
 const parseAllowedOrigins = () => {
   const raw = String(process.env.ALLOWED_ORIGINS || "").trim()
@@ -90,6 +101,24 @@ app.use(helmet({ crossOriginResourcePolicy: false }))
 app.use(cors({ origin: corsOriginValidator }))
 app.use(express.json({ limit: "1mb" }))
 app.use(apiLimiter)
+app.get("/health", async (_req, res) => {
+  try {
+    await pool.query("SELECT 1")
+    res.json({
+      status: "ok",
+      db: "ok",
+      uptime_seconds: Math.round(process.uptime()),
+      timestamp: new Date().toISOString(),
+    })
+  } catch (err) {
+    res.status(503).json({
+      status: "degraded",
+      db: "error",
+      error: err?.message || "DB unavailable",
+      timestamp: new Date().toISOString(),
+    })
+  }
+})
 app.use("/auth", authLimiter, authRoutes)
 app.use("/clientes", clientesRoutes)
 app.use("/obras", obrasRoutes)
@@ -117,6 +146,16 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => console.log("Cliente desconectado:", socket.id))
 })
 
-httpServer.listen(3000, "0.0.0.0", () => {
-  console.log("Servidor corriendo en puerto 3000")
-})
+const startServer = async () => {
+  try {
+    await ensureDatabaseSchema()
+    httpServer.listen(3000, "0.0.0.0", () => {
+      console.log("Servidor corriendo en puerto 3000")
+    })
+  } catch (error) {
+    console.error("Error aplicando schema al iniciar:", error)
+    process.exit(1)
+  }
+}
+
+startServer()

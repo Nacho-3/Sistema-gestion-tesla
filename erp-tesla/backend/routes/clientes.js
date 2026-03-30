@@ -1,5 +1,6 @@
 ﻿import express from "express"
 import db from "../db.js"
+import { pool } from "../db.js"
 import { getIo } from '../socket.js'
 import PDFDocument from "pdfkit"
 import path from "path"
@@ -10,6 +11,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const LOGO_PATH = path.join(__dirname, "..", "assets", "logo.png")
 
 const router = express.Router()
+
+const handleInternalError = (res, err, context) => {
+  console.error(`[clientes] ${context}:`, err)
+  return res.status(500).json({
+    error: "Error interno del servidor",
+    context,
+  })
+}
 
 const normalizeEstado = (estado = "") => {
   if (estado === "activa") return "Activa"
@@ -33,7 +42,7 @@ router.get("/", async (req, res) => {
     )
     res.json(clientesVisibles)
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    return handleInternalError(res, err, "listar_clientes")
   }
 })
 
@@ -51,7 +60,7 @@ router.get("/:id", async (req, res) => {
     if (error) return res.status(404).json({ error: "Cliente no encontrado" })
     res.json(data)
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    return handleInternalError(res, err, "obtener_cliente")
   }
 })
 
@@ -178,7 +187,7 @@ router.get("/:id/ficha-pdf", async (req, res) => {
 
     doc.end()
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    return handleInternalError(res, err, "ficha_pdf_cliente")
   }
 })
 
@@ -187,13 +196,11 @@ router.post("/", async (req, res) => {
   try {
     const { razon_social, cuit, direccion, telefono, email, iva } = req.body
 
-    if (!razon_social) {
-      return res.status(400).json({ error: "La razon social es obligatoria" })
-    }
+    const razonSocialFinal = String(razon_social || "").trim() || "Sin razon social"
 
     const { data, error } = await db
       .from("clientes")
-      .insert([{ razon_social, cuit, direccion, telefono, email, iva: iva || "Responsable Inscripto", activo: true }])
+      .insert([{ razon_social: razonSocialFinal, cuit, direccion, telefono, email, iva: iva || "Responsable Inscripto", activo: true }])
       .select()
       .single()
 
@@ -201,7 +208,7 @@ router.post("/", async (req, res) => {
     getIo()?.emit('clientes:changed')
     res.status(201).json(data)
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    return handleInternalError(res, err, "crear_cliente")
   }
 })
 
@@ -222,27 +229,61 @@ router.put("/:id", async (req, res) => {
     getIo()?.emit('clientes:changed')
     res.json(data)
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    return handleInternalError(res, err, "actualizar_cliente")
   }
 })
 
-// Borrado logico (desactivar cliente)
+// Eliminar cliente (borrado fisico con validacion de dependencias)
 router.delete("/:id", async (req, res) => {
   try {
-    const { id } = req.params
+    const clienteId = Number(req.params.id)
+    if (!Number.isInteger(clienteId) || clienteId <= 0) {
+      return res.status(400).json({ error: "ID de cliente invalido" })
+    }
+
+    const clienteRes = await pool.query(
+      `SELECT id, razon_social FROM clientes WHERE id = $1 LIMIT 1`,
+      [clienteId]
+    )
+
+    if (clienteRes.rowCount === 0) {
+      return res.status(404).json({ error: "Cliente no encontrado" })
+    }
+
+    const [obrasRes, presupuestosRes, cajaRes] = await Promise.all([
+      pool.query(`SELECT COUNT(*)::int AS c FROM obras WHERE cliente_id = $1`, [clienteId]),
+      pool.query(`SELECT COUNT(*)::int AS c FROM presupuestos WHERE cliente_id = $1`, [clienteId]),
+      pool.query(`SELECT COUNT(*)::int AS c FROM movimientos_caja WHERE cliente_id = $1`, [clienteId]),
+    ])
+
+    const obrasCount = Number(obrasRes.rows[0]?.c || 0)
+    const presupuestosCount = Number(presupuestosRes.rows[0]?.c || 0)
+    const cajaCount = Number(cajaRes.rows[0]?.c || 0)
+
+    if (obrasCount > 0 || presupuestosCount > 0 || cajaCount > 0) {
+      return res.status(409).json({
+        error: "No se puede eliminar el cliente porque tiene datos asociados.",
+        detalle: {
+          obras: obrasCount,
+          presupuestos: presupuestosCount,
+          movimientos_caja: cajaCount,
+        },
+      })
+    }
 
     const { data, error } = await db
       .from("clientes")
-      .update({ activo: false })
-      .eq("id", id)
-      .select()
+      .delete()
+      .eq("id", clienteId)
+      .select("id, razon_social")
       .single()
 
     if (error) return res.status(400).json({ error: error.message })
+
     getIo()?.emit('clientes:changed')
     res.json(data)
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    return handleInternalError(res, err, "eliminar_cliente")
   }
 })
 

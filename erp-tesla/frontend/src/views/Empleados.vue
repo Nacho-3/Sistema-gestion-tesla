@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed } from "vue"
-import api from "../api"
+import api, { extractApiErrorMessage } from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
 
@@ -25,7 +25,13 @@ const filtroGrupo = ref("")
 
 const TIPOS_CONTRATO = [
   { value: "monotributista", label: "Monotributista" },
-  { value: "empleado_dependiente", label: "Empleado dependiente" }
+  { value: "empleado_dependiente", label: "Empleado dependiente" },
+  { value: "no_corresponde", label: "No corresponde" }
+]
+
+const OPCIONES_VALOR_HORA = [
+  { value: "con_valor", label: "Con valor hora" },
+  { value: "sin_valor", label: "No tiene" }
 ]
 
 // Formulario
@@ -40,7 +46,8 @@ const form = ref({
   tipo: "",
   alias: "",
   grupo_id: "",
-  valor_hora: 0
+  valor_hora: 0,
+  modo_valor_hora: "con_valor"
 })
 
 const getEmptyForm = () => ({
@@ -54,8 +61,24 @@ const getEmptyForm = () => ({
   tipo: "",
   alias: "",
   grupo_id: "",
-  valor_hora: 0
+  valor_hora: 0,
+  modo_valor_hora: "con_valor"
 })
+
+const getTipoLabel = (tipo) => {
+  const option = TIPOS_CONTRATO.find((item) => item.value === tipo)
+  return option ? option.label : "-"
+}
+
+const formatValorHora = (valorHora) => {
+  const valor = Number(valorHora || 0)
+  return valor > 0 ? `$${valor.toFixed(2)}/h` : "No tiene"
+}
+
+const formatFechaNacimiento = (fecha) => {
+  if (!fecha) return "-"
+  return String(fecha).split("T")[0]
+}
 
 const esFormularioValido = computed(() => {
   return form.value.nombre && 
@@ -67,8 +90,8 @@ const esFormularioValido = computed(() => {
       form.value.telefono && 
       form.value.tipo && 
       form.value.alias && 
-         form.value.grupo_id && 
-         form.value.valor_hora > 0
+         form.value.grupo_id &&
+         (form.value.modo_valor_hora === "sin_valor" || form.value.valor_hora > 0)
 })
 
 const empleadosFiltrados = computed(() => {
@@ -133,7 +156,7 @@ const cargarDatos = async () => {
     empleados.value = resEmpleados.data || []
     grupos.value = resGrupos.data || []
   } catch (err) {
-    error.value = `Error al cargar: ${err.response?.data?.error || err.message}`
+    error.value = extractApiErrorMessage(err, "Error al cargar empleados y grupos")
   } finally {
     loading.value = false
   }
@@ -147,6 +170,7 @@ const abrirFormulario = (empleado = null) => {
       ...empleado,
       grupo_id: empleado.grupo_id ?? "",
       valor_hora: Number(empleado.valor_hora || 0),
+      modo_valor_hora: Number(empleado.valor_hora || 0) > 0 ? "con_valor" : "sin_valor",
       fecha_nacimiento: empleado.fecha_nacimiento
         ? String(empleado.fecha_nacimiento).split("T")[0]
         : "",
@@ -183,7 +207,9 @@ const guardarEmpleado = async () => {
       tipo: form.value.tipo,
       alias: form.value.alias,
       grupo_id: form.value.grupo_id,
-      valor_hora: parseFloat(form.value.valor_hora)
+      valor_hora: form.value.modo_valor_hora === "sin_valor"
+        ? 0
+        : parseFloat(form.value.valor_hora)
     }
 
     if (editingId.value) {
@@ -204,8 +230,8 @@ const guardarEmpleado = async () => {
     error.value = ""
   } catch (err) {
     error.value = editingId.value
-      ? `Error al modificar: ${err.response?.data?.error || err.message}`
-      : `Error al crear: ${err.response?.data?.error || err.message}`
+      ? extractApiErrorMessage(err, "Error al modificar empleado")
+      : extractApiErrorMessage(err, "Error al crear empleado")
   }
 }
 
@@ -254,7 +280,7 @@ const eliminarEmpleado = async () => {
     empleadoAEliminar.value = null
     error.value = ""
   } catch (err) {
-    error.value = `Error al eliminar: ${err.response?.data?.error || err.message}`
+    error.value = extractApiErrorMessage(err, "Error al eliminar empleado")
     showConfirm.value = false
   }
 }
@@ -308,7 +334,7 @@ onUnmounted(() => {
             <span class="emp-nombre">{{ emp.apellido }}, {{ emp.nombre }}</span>
             <span class="emp-grupo">{{ obtenerNombreGrupo(emp.grupo_id) }}</span>
             <span class="emp-dni">DNI {{ emp.dni }}</span>
-            <span class="emp-hora">${{ Number(emp.valor_hora).toFixed(2) }}/h</span>
+            <span class="emp-hora">{{ formatValorHora(emp.valor_hora) }}</span>
           </div>
           
           <!-- Botones dentro del recuadro -->
@@ -349,7 +375,7 @@ onUnmounted(() => {
             </div>
             <div class="info-item">
               <label>Fecha Nacimiento</label>
-              <p>{{ empleadoSeleccionado.fecha_nacimiento || "-" }}</p>
+              <p>{{ formatFechaNacimiento(empleadoSeleccionado.fecha_nacimiento) }}</p>
             </div>
             <div class="info-item">
               <label>Dirección</label>
@@ -361,7 +387,7 @@ onUnmounted(() => {
             </div>
             <div class="info-item">
               <label>Tipo</label>
-              <p>{{ empleadoSeleccionado.tipo === "monotributista" ? "Monotributista" : (empleadoSeleccionado.tipo === "empleado_dependiente" ? "Empleado dependiente" : "-") }}</p>
+              <p>{{ getTipoLabel(empleadoSeleccionado.tipo) }}</p>
             </div>
             <div class="info-item">
               <label>Alias</label>
@@ -369,7 +395,7 @@ onUnmounted(() => {
             </div>
             <div class="info-item">
               <label>Valor Hora</label>
-              <p>${{ empleadoSeleccionado.valor_hora.toFixed(2) }}</p>
+              <p>{{ formatValorHora(empleadoSeleccionado.valor_hora) }}</p>
             </div>
             <div class="info-item">
               <label>Grupo</label>
@@ -477,7 +503,16 @@ onUnmounted(() => {
 
         <label class="form-group">
           <span>Valor Hora *</span>
-          <input v-model.number="form.valor_hora" type="number" placeholder="0.00" step="0.01" required />
+          <select v-model="form.modo_valor_hora">
+            <option v-for="opcion in OPCIONES_VALOR_HORA" :key="opcion.value" :value="opcion.value">
+              {{ opcion.label }}
+            </option>
+          </select>
+        </label>
+
+        <label v-if="form.modo_valor_hora === 'con_valor'" class="form-group">
+          <span>Monto por hora *</span>
+          <input v-model.number="form.valor_hora" type="number" placeholder="0.00" step="0.01" min="0.01" required />
         </label>
 
         <div class="modal-actions">

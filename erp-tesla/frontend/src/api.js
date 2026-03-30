@@ -11,6 +11,35 @@ const api = axios.create({
   timeout: 10000 // 10 segundos
 })
 
+export const extractApiErrorMessage = (err, fallback = "Ocurrio un error inesperado") => {
+  const responseData = err?.response?.data
+  const detail = responseData?.detalle
+  const context = responseData?.context
+
+  if (typeof responseData?.error === "string" && responseData.error.trim()) {
+    if (detail && typeof detail === "object") {
+      const detailText = Object.entries(detail)
+        .map(([key, value]) => `${key}: ${value}`)
+        .join(" | ")
+      if (detailText) return `${responseData.error} (${detailText})`
+    }
+    if (context) return `${responseData.error} [${context}]`
+    return responseData.error
+  }
+
+  if (typeof err?.message === "string" && err.message.trim()) {
+    return err.message
+  }
+
+  return fallback
+}
+
+export const withApiErrorMessage = (err, fallback) => ({
+  ok: false,
+  message: extractApiErrorMessage(err, fallback),
+  raw: err,
+})
+
 export default {
   // Auth
   login(email, password) {
@@ -61,6 +90,10 @@ export default {
 
   updateObraEstado(id, estado) {
     return api.patch(`/obras/${id}/estado`, { estado })
+  },
+
+  deleteObra(id) {
+    return api.delete(`/obras/${id}`)
   },
 
   // Grupos

@@ -39,6 +39,9 @@ const formDiaria = ref({
   hora_inicio: "",
   hora_fin: "",
   cantidad_horas: "",
+  es_hora_extra: false,
+  tipo_hora_extra: "",
+  observaciones: "",
   es_prestada: false,
   grupo_origen_id: "",
   grupo_destino_id: ""
@@ -53,6 +56,9 @@ const formRango = ref({
   horas_por_dia: "",
   hora_inicio: "",
   hora_fin: "",
+  es_hora_extra: false,
+  tipo_hora_extra: "",
+  observaciones: "",
   es_prestada: false,
   grupo_origen_id: "",
   grupo_destino_id: ""
@@ -101,6 +107,15 @@ const loadDatos = async () => {
 }
 
 const getEmpleadoById = (empleadoId) => empleados.value.find((e) => String(e.id) === String(empleadoId))
+const getEtiquetaTipoHora = (hora) => {
+  if (hora?.es_hora_extra) {
+    return String(hora?.tipo_hora_extra || "") === "100" || String(hora?.tipo || "") === "extra_100"
+      ? "Extra 100%"
+      : "Extra 50%"
+  }
+  if (hora?.es_prestada) return "Prestada"
+  return "Normal"
+}
 
 const isGrupoAdministrativo = (grupoId) => {
   const grupo = grupos.value.find((g) => String(g.id) === String(grupoId))
@@ -152,6 +167,12 @@ const syncObraRangoPorEmpleado = () => {
 
 watch(() => formDiaria.value.empleado_id, syncObraDiariaPorEmpleado)
 watch(() => formRango.value.empleado_id, syncObraRangoPorEmpleado)
+watch(() => formDiaria.value.tipo_hora_extra, (value) => {
+  formDiaria.value.es_hora_extra = Boolean(value)
+})
+watch(() => formRango.value.tipo_hora_extra, (value) => {
+  formRango.value.es_hora_extra = Boolean(value)
+})
 
 // Cargar resúmenes
 const loadResumenes = async () => {
@@ -189,7 +210,10 @@ const loadResumenes = async () => {
 const openModalDiaria = (hora = null) => {
   if (hora) {
     editingId.value = hora.id
-    formDiaria.value = { ...hora }
+    formDiaria.value = {
+      ...hora,
+      tipo_hora_extra: hora.es_hora_extra ? (hora.tipo_hora_extra || (hora.tipo === "extra_100" ? "100" : "50")) : "",
+    }
     modoDiaria.value = (hora.hora_inicio && hora.hora_fin) ? "horario" : "cantidad"
   } else {
     editingId.value = null
@@ -201,6 +225,9 @@ const openModalDiaria = (hora = null) => {
       hora_inicio: "",
       hora_fin: "",
       cantidad_horas: "",
+      es_hora_extra: false,
+      tipo_hora_extra: "",
+      observaciones: "",
       es_prestada: false,
       grupo_origen_id: "",
       grupo_destino_id: ""
@@ -228,6 +255,9 @@ const closeModalRango = () => {
     horas_por_dia: "",
     hora_inicio: "",
     hora_fin: "",
+    es_hora_extra: false,
+    tipo_hora_extra: "",
+    observaciones: "",
     es_prestada: false,
     grupo_origen_id: "",
     grupo_destino_id: ""
@@ -275,6 +305,9 @@ const saveHoraDiaria = async () => {
       cantidad_horas: modoDiaria.value === "cantidad" ? formDiaria.value.cantidad_horas : null,
       hora_inicio: modoDiaria.value === "horario" ? formDiaria.value.hora_inicio || null : null,
       hora_fin: modoDiaria.value === "horario" ? formDiaria.value.hora_fin || null : null,
+      es_hora_extra: formDiaria.value.es_hora_extra,
+      tipo_hora_extra: formDiaria.value.es_hora_extra ? formDiaria.value.tipo_hora_extra || "50" : null,
+      observaciones: formDiaria.value.observaciones || "",
       es_prestada: formDiaria.value.es_prestada,
       grupo_origen_id: formDiaria.value.es_prestada ? formDiaria.value.grupo_origen_id : null,
       grupo_destino_id: formDiaria.value.es_prestada ? formDiaria.value.grupo_destino_id : null
@@ -353,6 +386,8 @@ const saveHoraRango = async () => {
           cantidad_horas: modoRango.value === "cantidad" ? parseFloat(formRango.value.horas_por_dia) : null,
           hora_inicio: modoRango.value === "horario" ? formRango.value.hora_inicio || null : null,
           hora_fin: modoRango.value === "horario" ? formRango.value.hora_fin || null : null,
+          es_hora_extra: formRango.value.es_hora_extra,
+          tipo_hora_extra: formRango.value.es_hora_extra ? formRango.value.tipo_hora_extra || "50" : null,
           es_prestada: formRango.value.es_prestada,
           grupo_origen_id: formRango.value.es_prestada ? formRango.value.grupo_origen_id : null,
           grupo_destino_id: formRango.value.es_prestada ? formRango.value.grupo_destino_id : null
@@ -686,7 +721,13 @@ onUnmounted(() => {
                         <td>{{ formatearFecha(hora.fecha) }}</td>
                         <td>{{ getCantidadHoras(hora).toFixed(2) }}</td>
                         <td>
-                          <span v-if="hora.es_prestada" class="badge badge-prestada">
+                          <span
+                            v-if="hora.es_hora_extra"
+                            :class="['badge', String(hora.tipo_hora_extra || '') === '100' || String(hora.tipo || '') === 'extra_100' ? 'badge-extra-100' : 'badge-extra']"
+                          >
+                            {{ getEtiquetaTipoHora(hora) }}
+                          </span>
+                          <span v-else-if="hora.es_prestada" class="badge badge-prestada">
                             Prestada
                           </span>
                           <span v-else class="badge badge-normal">Normal</span>
@@ -965,9 +1006,27 @@ onUnmounted(() => {
               </label>
             </div>
 
+            <label class="form-group">
+              <span>Tipo de horas extra</span>
+              <select v-model="formDiaria.tipo_hora_extra">
+                <option value="">No corresponde</option>
+                <option value="50">Hora extra al 50%</option>
+                <option value="100">Hora extra al 100%</option>
+              </select>
+            </label>
+
             <label class="form-group checkbox">
               <input v-model="formDiaria.es_prestada" type="checkbox" />
               <span>Es hora prestada (entre grupos)</span>
+            </label>
+
+            <label class="form-group">
+              <span>Observación</span>
+              <textarea
+                v-model="formDiaria.observaciones"
+                rows="3"
+                placeholder="Aclaración opcional sobre este registro..."
+              ></textarea>
             </label>
 
             <template v-if="formDiaria.es_prestada">
@@ -1080,6 +1139,15 @@ onUnmounted(() => {
                 <input v-model="formRango.hora_fin" type="time" />
               </label>
             </div>
+
+            <label class="form-group">
+              <span>Tipo de horas extra</span>
+              <select v-model="formRango.tipo_hora_extra">
+                <option value="">No corresponde</option>
+                <option value="50">Hora extra al 50%</option>
+                <option value="100">Hora extra al 100%</option>
+              </select>
+            </label>
 
             <label class="form-group checkbox">
               <input v-model="formRango.es_prestada" type="checkbox" />
@@ -1418,6 +1486,16 @@ td {
 .badge-prestada {
   background-color: rgba(59, 130, 246, 0.2);
   color: #60a5fa;
+}
+
+.badge-extra {
+  background-color: rgba(245, 158, 11, 0.18);
+  color: #fbbf24;
+}
+
+.badge-extra-100 {
+  background-color: rgba(239, 68, 68, 0.18);
+  color: #fca5a5;
 }
 
 .acciones {

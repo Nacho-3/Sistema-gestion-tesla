@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed } from "vue"
+import { ref, onMounted, onUnmounted, computed, watch } from "vue"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
@@ -32,8 +32,11 @@ const formPago = ref({
 // Modal - Editar Conceptos
 const showFormConceptos = ref(false)
 const formConceptos = ref({
+  total_horas: 0,
+  monto_bruto: 0,
   presentismo: 0,
   horas_extra_cantidad: 0,
+  horas_extra_100_cantidad: 0,
   no_remunerativo: 0,
   aguinaldo: 0,
   vacaciones: 0,
@@ -50,15 +53,20 @@ const toNumber = (valor) => {
 
 const normalizarLiquidacion = (liq = {}) => ({
   ...liq,
+  horas_computadas: toNumber(liq.horas_computadas ?? liq.total_horas),
+  horas_trabajadas_reales: toNumber(liq.horas_trabajadas_reales ?? liq.total_horas),
   total_horas: toNumber(liq.total_horas),
+  monto_bruto: toNumber(liq.monto_bruto ?? liq.importe_horas),
   valor_hora: toNumber(liq.valor_hora),
   importe_horas: toNumber(liq.importe_horas),
   presentismo: toNumber(liq.presentismo),
   importe_horas_extra: toNumber(liq.importe_horas_extra),
+  importe_horas_extra_100: toNumber(liq.importe_horas_extra_100),
   no_remunerativo: toNumber(liq.no_remunerativo),
   aguinaldo: toNumber(liq.aguinaldo),
   vacaciones: toNumber(liq.vacaciones),
   horas_extra_cantidad: toNumber(liq.horas_extra_cantidad),
+  horas_extra_100_cantidad: toNumber(liq.horas_extra_100_cantidad),
   feriados_cantidad: toNumber(liq.feriados_cantidad),
   dias_no_trabajados: toNumber(liq.dias_no_trabajados),
   importe_feriados: toNumber(liq.importe_feriados),
@@ -141,8 +149,11 @@ const verDetalle = async (liquidacion) => {
 
   // Cargar conceptos en el formulario
   formConceptos.value = {
+    total_horas: liquidacion.total_horas || 0,
+    monto_bruto: liquidacion.monto_bruto || liquidacion.importe_horas || 0,
     presentismo: liquidacion.presentismo || 0,
     horas_extra_cantidad: liquidacion.horas_extra_cantidad || 0,
+    horas_extra_100_cantidad: liquidacion.horas_extra_100_cantidad || 0,
     no_remunerativo: liquidacion.no_remunerativo || 0,
     aguinaldo: liquidacion.aguinaldo || 0,
     vacaciones: liquidacion.vacaciones || 0,
@@ -152,6 +163,39 @@ const verDetalle = async (liquidacion) => {
     observaciones: liquidacion.observaciones || ""
   }
 }
+
+const abrirEdicionLiquidacion = (liquidacion) => {
+  liquidacionSeleccionada.value = liquidacion
+  formConceptos.value = {
+    total_horas: liquidacion.total_horas || 0,
+    monto_bruto: liquidacion.monto_bruto || liquidacion.importe_horas || 0,
+    presentismo: liquidacion.presentismo || 0,
+    horas_extra_cantidad: liquidacion.horas_extra_cantidad || 0,
+    horas_extra_100_cantidad: liquidacion.horas_extra_100_cantidad || 0,
+    no_remunerativo: liquidacion.no_remunerativo || 0,
+    aguinaldo: liquidacion.aguinaldo || 0,
+    vacaciones: liquidacion.vacaciones || 0,
+    feriados_cantidad: liquidacion.feriados_cantidad || 0,
+    dias_no_trabajados: liquidacion.dias_no_trabajados || 0,
+    adelantos: liquidacion.adelantos || 0,
+    observaciones: liquidacion.observaciones || ""
+  }
+  showFormConceptos.value = true
+}
+
+const autocompletarSueldoBaseDesdeHoras = () => {
+  const horas = toNumber(formConceptos.value.total_horas)
+  const valorHora = getValorHoraEmpleado(liquidacionSeleccionada.value?.empleado_id) || toNumber(liquidacionSeleccionada.value?.valor_hora)
+  formConceptos.value.monto_bruto = Math.round(horas * valorHora * 100) / 100
+}
+
+watch(
+  () => formConceptos.value.total_horas,
+  () => {
+    if (!showFormConceptos.value || !liquidacionSeleccionada.value) return
+    autocompletarSueldoBaseDesdeHoras()
+  }
+)
 
 // Volver a la lista
 const volverALista = async () => {
@@ -292,11 +336,22 @@ const estaPagadaDetalle = computed(() => {
 })
 
 const valorHoraDetalle = computed(() => {
-  return toNumber(liquidacionSeleccionada.value?.valor_hora)
+  const valorHoraEmpleado = getValorHoraEmpleado(liquidacionSeleccionada.value?.empleado_id)
+  return valorHoraEmpleado || toNumber(liquidacionSeleccionada.value?.valor_hora)
+})
+
+const sueldoBaseCalculadoPreview = computed(() => {
+  const horas = toNumber(formConceptos.value.total_horas)
+  const valorHora = getValorHoraEmpleado(liquidacionSeleccionada.value?.empleado_id) || toNumber(liquidacionSeleccionada.value?.valor_hora)
+  return Math.round(horas * valorHora * 100) / 100
 })
 
 const importeHorasExtraPreview = computed(() => {
   return toNumber(formConceptos.value.horas_extra_cantidad) * valorHoraDetalle.value * 1.5
+})
+
+const importeHorasExtra100Preview = computed(() => {
+  return toNumber(formConceptos.value.horas_extra_100_cantidad) * valorHoraDetalle.value * 2
 })
 
 const importeFeriadosPreview = computed(() => {
@@ -311,6 +366,11 @@ const descuentoDiasNoTrabajadosPreview = computed(() => {
 const getNombreEmpleado = (empleadoId) => {
   const empleado = empleados.value.find((e) => e.id === empleadoId)
   return empleado ? `${empleado.nombre} ${empleado.apellido}` : "-"
+}
+
+const getValorHoraEmpleado = (empleadoId) => {
+  const empleado = empleados.value.find((e) => e.id === empleadoId)
+  return toNumber(empleado?.valor_hora)
 }
 
 // Calcular total pagos (simplificado para la lista)
@@ -436,8 +496,8 @@ onUnmounted(() => {
               <tr>
                 <th>Empleado</th>
                 <th>Período</th>
-                <th>Horas</th>
-                <th>Importe Base</th>
+                <th>Horas Pagas</th>
+                <th>Sueldo Base</th>
                 <th>Total</th>
                 <th>Estado</th>
                 <th>Acciones</th>
@@ -447,8 +507,8 @@ onUnmounted(() => {
               <tr v-for="liq in liquidaciones" :key="liq.id">
                 <td><strong>{{ getNombreEmpleado(liq.empleado_id) }}</strong></td>
                 <td>{{ liq.mes }}/{{ liq.anio }}</td>
-                <td>{{ formatearHoras(liq.total_horas) }}</td>
-                <td>{{ formatearMoneda(liq.importe_horas) }}</td>
+                <td>{{ formatearHoras(liq.horas_computadas) }}</td>
+                <td>{{ formatearMoneda(liq.monto_bruto) }}</td>
                 <td><strong>{{ formatearMoneda(liq.total) }}</strong></td>
                 <td>
                   <span :class="['badge', liq.estado === 'pagada' ? 'badge-pagada' : 'badge-pendiente']">
@@ -459,6 +519,9 @@ onUnmounted(() => {
                   <div class="acciones">
                     <button class="btn-detalle" @click="verDetalle(liq)">
                       👁️ Ver detalle
+                    </button>
+                    <button class="btn-edit-inline" @click="abrirEdicionLiquidacion(liq)">
+                      ✏️ Editar
                     </button>
                   </div>
                 </td>
@@ -492,7 +555,7 @@ onUnmounted(() => {
             <button class="btn-pdf" @click="descargarPdfLiquidacion" :disabled="loading">
               📄 Descargar PDF
             </button>
-            <button class="btn-edit" @click="showFormConceptos = true">
+            <button class="btn-edit" @click="abrirEdicionLiquidacion(liquidacionSeleccionada)">
               ✏️ Editar conceptos
             </button>
             <button class="btn-delete" @click="eliminarLiquidacion(liquidacionSeleccionada.id)">
@@ -527,16 +590,21 @@ onUnmounted(() => {
           <h3>📋 Detalle de cálculo</h3>
           <div class="desglose-grid">
             <div class="desglose-item">
-              <span class="desglose-label">Horas trabajadas:</span>
-              <span class="desglose-valor">{{ formatearHoras(liquidacionSeleccionada.total_horas) }} hs</span>
+              <span class="desglose-label">Horas computadas / pagadas:</span>
+              <span class="desglose-valor">{{ formatearHoras(liquidacionSeleccionada.horas_computadas) }} hs</span>
+            </div>
+            <div class="desglose-item">
+              <span class="desglose-label">Horas trabajadas reales:</span>
+              <span class="desglose-help">No afectan en el sueldo base.</span>
+              <span class="desglose-valor">{{ formatearHoras(liquidacionSeleccionada.horas_trabajadas_reales) }} hs</span>
             </div>
             <div class="desglose-item">
               <span class="desglose-label">Valor hora:</span>
-              <span class="desglose-valor">{{ formatearMoneda(liquidacionSeleccionada.valor_hora) }}</span>
+              <span class="desglose-valor">{{ formatearMoneda(valorHoraDetalle) }}</span>
             </div>
             <div class="desglose-item">
-              <span class="desglose-label">Importe horas:</span>
-              <span class="desglose-valor">{{ formatearMoneda(liquidacionSeleccionada.importe_horas) }}</span>
+              <span class="desglose-label">Sueldo base:</span>
+              <span class="desglose-valor">{{ formatearMoneda(liquidacionSeleccionada.monto_bruto) }}</span>
             </div>
           </div>
 
@@ -547,8 +615,12 @@ onUnmounted(() => {
               <span>{{ formatearMoneda(liquidacionSeleccionada.presentismo) }}</span>
             </div>
             <div class="concepto">
-              <span>Horas extra ({{ formatearCantidad(liquidacionSeleccionada.horas_extra_cantidad) }} hs):</span>
+              <span>Horas extra 50% ({{ formatearCantidad(liquidacionSeleccionada.horas_extra_cantidad) }} hs):</span>
               <span>{{ formatearMoneda(liquidacionSeleccionada.importe_horas_extra) }}</span>
+            </div>
+            <div class="concepto">
+              <span>Horas extra 100% ({{ formatearCantidad(liquidacionSeleccionada.horas_extra_100_cantidad) }} hs):</span>
+              <span>{{ formatearMoneda(liquidacionSeleccionada.importe_horas_extra_100) }}</span>
             </div>
             <div class="concepto">
               <span>Feriados ({{ formatearCantidad(liquidacionSeleccionada.feriados_cantidad) }} días):</span>
@@ -736,15 +808,36 @@ onUnmounted(() => {
 
           <form @submit.prevent="actualizarConceptos" class="modal-form modal-form-conceptos">
             <label class="form-group">
+              <span>Horas computadas / pagadas</span>
+              <input v-model.number="formConceptos.total_horas" type="number" min="0" step="0.5" />
+              <small class="form-help">Al cambiar este valor, se autocalcula el sueldo base con el valor hora del empleado. Después podés retocarlo manualmente.</small>
+            </label>
+
+            <label class="form-group">
+              <span>Sueldo base ($)</span>
+              <input v-model.number="formConceptos.monto_bruto" type="number" min="0" step="0.01" />
+              <small class="form-help">Administración puede ajustarlo manualmente sin depender de las horas cargadas.</small>
+              <small class="form-help">
+                Cálculo automático: {{ formatearHoras(formConceptos.total_horas) }} hs × {{ formatearMoneda(getValorHoraEmpleado(liquidacionSeleccionada?.empleado_id) || liquidacionSeleccionada?.valor_hora) }} = {{ formatearMoneda(sueldoBaseCalculadoPreview) }}
+              </small>
+            </label>
+
+            <label class="form-group">
               <span>Presentismo ($)</span>
               <input v-model.number="formConceptos.presentismo" type="number" min="0" step="0.01" />
             </label>
 
-            <label class="form-group">
-              <span>Horas extra (cantidad)</span>
-              <input v-model.number="formConceptos.horas_extra_cantidad" type="number" min="0" step="0.5" />
-              <small class="form-help">Cada hora extra vale 50% más (x1.5). Importe calculado: {{ formatearMoneda(importeHorasExtraPreview) }}</small>
-            </label>
+            <div class="form-group form-group-readonly">
+              <span>Horas extra al 50%</span>
+              <strong>{{ formatearHoras(formConceptos.horas_extra_cantidad) }} hs</strong>
+              <small class="form-help">Se toma automáticamente desde la ventana de horas. Importe calculado: {{ formatearMoneda(importeHorasExtraPreview) }}</small>
+            </div>
+
+            <div class="form-group form-group-readonly">
+              <span>Horas extra al 100%</span>
+              <strong>{{ formatearHoras(formConceptos.horas_extra_100_cantidad) }} hs</strong>
+              <small class="form-help">Se toma automáticamente desde la ventana de horas. Importe calculado: {{ formatearMoneda(importeHorasExtra100Preview) }}</small>
+            </div>
 
             <label class="form-group">
               <span>No remunerativo ($)</span>
@@ -994,6 +1087,26 @@ td {
   background-color: rgba(34, 197, 94, 0.3);
 }
 
+.btn-edit-inline {
+  padding: 0.4rem 1rem;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.24), rgba(37, 99, 235, 0.3));
+  color: #bfdbfe;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  border-radius: 0.55rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 6px 16px -10px rgba(59, 130, 246, 0.9);
+}
+
+.btn-edit-inline:hover {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.34), rgba(37, 99, 235, 0.42));
+  border-color: rgba(147, 197, 253, 0.6);
+  color: #eff6ff;
+  transform: translateY(-1px);
+}
+
 .empty-state {
   text-align: center;
   padding: 3rem 2rem;
@@ -1181,6 +1294,11 @@ td {
   font-size: 0.875rem;
   font-weight: 500;
   color: #94a3b8;
+}
+
+.desglose-help {
+  font-size: 0.78rem;
+  color: #7c93b6;
 }
 
 .desglose-valor {
@@ -1459,6 +1577,15 @@ td {
   font-size: 0.875rem;
   font-weight: 500;
   color: #cbd5e1;
+}
+
+.form-group-readonly strong {
+  padding: 0.75rem;
+  background-color: rgba(30, 41, 59, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 0.375rem;
+  color: #e2e8f0;
+  font-size: 0.95rem;
 }
 
 .form-group input,

@@ -23,6 +23,21 @@ const getCantidadHoras = (registro = {}) => {
   return Number.isFinite(numero) ? numero : 0
 }
 
+const normalizeTipoHoraExtra = (tipoHoraExtra) => {
+  const normalizado = String(tipoHoraExtra || "").trim()
+  if (normalizado === "100") return "100"
+  if (normalizado === "50") return "50"
+  return null
+}
+
+const getTipoHora = ({ es_hora_extra, tipo_hora_extra, es_prestada }) => {
+  if (es_hora_extra === true) {
+    return normalizeTipoHoraExtra(tipo_hora_extra) === "100" ? "extra_100" : "extra_50"
+  }
+  if (es_prestada === true) return "prestada"
+  return "normal"
+}
+
 const getRangoMes = (mes, anio) => {
   if (!mes || !anio) return null
   const mesInt = parseInt(mes)
@@ -341,6 +356,10 @@ router.post("/", async (req, res) => {
       hora_inicio,
       hora_fin,
       cantidad_horas,
+      horas_trabajadas,
+      es_hora_extra = false,
+      tipo_hora_extra,
+      observaciones,
       es_prestada = false,
       grupo_origen_id,
       grupo_destino_id
@@ -368,16 +387,24 @@ router.post("/", async (req, res) => {
       })
     }
 
-    let horas = tieneCantidadValida ? cantidadNumerica : null
-    if (!horas && hora_inicio && hora_fin) {
+    let horasComputadas = tieneCantidadValida ? cantidadNumerica : null
+    if (!horasComputadas && hora_inicio && hora_fin) {
       const inicio = new Date(`2000-01-01 ${hora_inicio}`)
       const fin = new Date(`2000-01-01 ${hora_fin}`)
-      horas = (fin - inicio) / (1000 * 60 * 60)
+      horasComputadas = (fin - inicio) / (1000 * 60 * 60)
     }
 
-    if (!Number.isFinite(horas) || horas <= 0) {
+    const horasTrabajadasNumericas = Number(horas_trabajadas)
+    const horasTrabajadasFinal = Number.isFinite(horasTrabajadasNumericas) && horasTrabajadasNumericas > 0
+      ? horasTrabajadasNumericas
+      : horasComputadas
+
+    if (!Number.isFinite(horasComputadas) || horasComputadas <= 0) {
       return res.status(400).json({ error: "La cantidad de horas debe ser mayor a 0" })
     }
+
+    const esHoraExtraFinal = es_hora_extra === true || normalizeTipoHoraExtra(tipo_hora_extra) !== null
+    const tipoHoraExtraFinal = esHoraExtraFinal ? (normalizeTipoHoraExtra(tipo_hora_extra) || "50") : null
 
     const { data, error } = await db
       .from("horas")
@@ -388,10 +415,13 @@ router.post("/", async (req, res) => {
           fecha,
           hora_inicio,
           hora_fin,
-          horas_trabajadas: parseFloat(horas),
-          cantidad_horas: parseFloat(horas),
+          horas_trabajadas: parseFloat(horasTrabajadasFinal),
+          cantidad_horas: parseFloat(horasComputadas),
+          es_hora_extra: esHoraExtraFinal,
+          tipo_hora_extra: tipoHoraExtraFinal,
+          observaciones: String(observaciones || "").trim(),
           es_prestada,
-          tipo: es_prestada ? "prestada" : "normal",
+          tipo: getTipoHora({ es_hora_extra: esHoraExtraFinal, tipo_hora_extra: tipoHoraExtraFinal, es_prestada }),
           grupo_origen_id: es_prestada ? grupo_origen_id : null,
           grupo_destino_id: es_prestada ? grupo_destino_id : null
         }
@@ -418,6 +448,10 @@ router.put("/:id", async (req, res) => {
       hora_inicio,
       hora_fin,
       cantidad_horas,
+      horas_trabajadas,
+      es_hora_extra,
+      tipo_hora_extra,
+      observaciones,
       es_prestada,
       grupo_origen_id,
       grupo_destino_id
@@ -443,17 +477,25 @@ router.put("/:id", async (req, res) => {
 
     const cantidadNumerica = Number(cantidad_horas)
     const tieneCantidadValida = Number.isFinite(cantidadNumerica) && cantidadNumerica > 0
-    let horas = tieneCantidadValida ? cantidadNumerica : null
+    let horasComputadas = tieneCantidadValida ? cantidadNumerica : null
 
-    if (!horas && hora_inicio && hora_fin) {
+    if (!horasComputadas && hora_inicio && hora_fin) {
       const inicio = new Date(`2000-01-01 ${hora_inicio}`)
       const fin = new Date(`2000-01-01 ${hora_fin}`)
-      horas = (fin - inicio) / (1000 * 60 * 60)
+      horasComputadas = (fin - inicio) / (1000 * 60 * 60)
     }
 
-    if (!Number.isFinite(horas) || horas <= 0) {
+    const horasTrabajadasNumericas = Number(horas_trabajadas)
+    const horasTrabajadasFinal = Number.isFinite(horasTrabajadasNumericas) && horasTrabajadasNumericas > 0
+      ? horasTrabajadasNumericas
+      : horasComputadas
+
+    if (!Number.isFinite(horasComputadas) || horasComputadas <= 0) {
       return res.status(400).json({ error: "Debe proveer cantidad_horas válida o ambas horas (inicio/fin)" })
     }
+
+    const esHoraExtraFinal = es_hora_extra === true || normalizeTipoHoraExtra(tipo_hora_extra) !== null
+    const tipoHoraExtraFinal = esHoraExtraFinal ? (normalizeTipoHoraExtra(tipo_hora_extra) || "50") : null
 
     const { data, error } = await db
       .from("horas")
@@ -463,10 +505,13 @@ router.put("/:id", async (req, res) => {
         fecha,
         hora_inicio,
         hora_fin,
-        horas_trabajadas: parseFloat(horas),
-        cantidad_horas: parseFloat(horas),
+        horas_trabajadas: parseFloat(horasTrabajadasFinal),
+        cantidad_horas: parseFloat(horasComputadas),
+        es_hora_extra: esHoraExtraFinal,
+        tipo_hora_extra: tipoHoraExtraFinal,
+        observaciones: observaciones !== undefined ? String(observaciones || "").trim() : undefined,
         es_prestada,
-        tipo: es_prestada ? "prestada" : "normal",
+        tipo: getTipoHora({ es_hora_extra: esHoraExtraFinal, tipo_hora_extra: tipoHoraExtraFinal, es_prestada }),
         grupo_origen_id: es_prestada ? grupo_origen_id : null,
         grupo_destino_id: es_prestada ? grupo_destino_id : null
       })

@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS empleados (
   fecha_nacimiento DATE,
   direccion TEXT,
   telefono VARCHAR(50),
-  tipo VARCHAR(30) CONSTRAINT chk_empleados_tipo CHECK (tipo IS NULL OR tipo IN ('monotributista', 'empleado_dependiente')),
+  tipo VARCHAR(30) CONSTRAINT chk_empleados_tipo CHECK (tipo IS NULL OR tipo IN ('monotributista', 'empleado_dependiente', 'no_corresponde')),
   alias VARCHAR(120),
   grupo_id INTEGER REFERENCES grupos(id),
   valor_hora NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -89,6 +89,9 @@ CREATE TABLE IF NOT EXISTS horas (
   hora_fin TIME,
   cantidad_horas NUMERIC(8,2) NOT NULL,
   horas_trabajadas NUMERIC(8,2),
+  es_hora_extra BOOLEAN DEFAULT FALSE,
+  tipo_hora_extra VARCHAR(10),
+  observaciones TEXT DEFAULT '',
   es_prestada BOOLEAN DEFAULT FALSE,
   tipo VARCHAR(20) DEFAULT 'normal',
   grupo_origen_id INTEGER REFERENCES grupos(id),
@@ -110,6 +113,8 @@ CREATE TABLE IF NOT EXISTS liquidaciones (
   presentismo NUMERIC(12,2) DEFAULT 0,
   horas_extra_cantidad NUMERIC(12,2) DEFAULT 0,
   importe_horas_extra NUMERIC(12,2) DEFAULT 0,
+  horas_extra_100_cantidad NUMERIC(12,2) DEFAULT 0,
+  importe_horas_extra_100 NUMERIC(12,2) DEFAULT 0,
   no_remunerativo NUMERIC(12,2) DEFAULT 0,
   aguinaldo NUMERIC(12,2) DEFAULT 0,
   vacaciones NUMERIC(12,2) DEFAULT 0,
@@ -148,6 +153,8 @@ ALTER TABLE IF EXISTS liquidaciones
   ADD COLUMN IF NOT EXISTS presentismo NUMERIC(12,2) DEFAULT 0,
   ADD COLUMN IF NOT EXISTS horas_extra_cantidad NUMERIC(12,2) DEFAULT 0,
   ADD COLUMN IF NOT EXISTS importe_horas_extra NUMERIC(12,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS horas_extra_100_cantidad NUMERIC(12,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS importe_horas_extra_100 NUMERIC(12,2) DEFAULT 0,
   ADD COLUMN IF NOT EXISTS no_remunerativo NUMERIC(12,2) DEFAULT 0,
   ADD COLUMN IF NOT EXISTS aguinaldo NUMERIC(12,2) DEFAULT 0,
   ADD COLUMN IF NOT EXISTS vacaciones NUMERIC(12,2) DEFAULT 0,
@@ -166,6 +173,9 @@ ALTER TABLE IF EXISTS pagos_sueldo
 
 ALTER TABLE IF EXISTS horas
   ADD COLUMN IF NOT EXISTS horas_trabajadas NUMERIC(8,2),
+  ADD COLUMN IF NOT EXISTS es_hora_extra BOOLEAN DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS tipo_hora_extra VARCHAR(10),
+  ADD COLUMN IF NOT EXISTS observaciones TEXT DEFAULT '',
   ADD COLUMN IF NOT EXISTS tipo VARCHAR(20) DEFAULT 'normal';
 
 ALTER TABLE IF EXISTS empleados
@@ -181,11 +191,31 @@ SET horas_trabajadas = COALESCE(horas_trabajadas, cantidad_horas)
 WHERE horas_trabajadas IS NULL;
 
 UPDATE horas
-SET tipo = COALESCE(
-  NULLIF(tipo, ''),
-  CASE WHEN es_prestada THEN 'prestada' ELSE 'normal' END
-)
-WHERE tipo IS NULL OR tipo = '';
+SET tipo = CASE
+  WHEN es_hora_extra = TRUE AND tipo_hora_extra = '100' THEN 'extra_100'
+  WHEN es_hora_extra = TRUE THEN 'extra_50'
+  WHEN es_prestada = TRUE THEN 'prestada'
+  ELSE 'normal'
+END
+WHERE
+  tipo IS DISTINCT FROM CASE
+    WHEN es_hora_extra = TRUE AND tipo_hora_extra = '100' THEN 'extra_100'
+    WHEN es_hora_extra = TRUE THEN 'extra_50'
+    WHEN es_prestada = TRUE THEN 'prestada'
+    ELSE 'normal'
+  END;
+
+UPDATE horas
+SET tipo_hora_extra = CASE
+  WHEN es_hora_extra = TRUE AND tipo = 'extra_100' THEN '100'
+  WHEN es_hora_extra = TRUE AND tipo IN ('extra', 'extra_50') THEN '50'
+  ELSE NULL
+END
+WHERE es_hora_extra = TRUE
+  AND (
+    tipo_hora_extra IS NULL
+    OR tipo_hora_extra NOT IN ('50', '100')
+  );
 
 DO $$
 BEGIN
@@ -283,11 +313,29 @@ BEGIN
   ) THEN
     UPDATE empleados
     SET tipo = NULL
-    WHERE tipo IS NOT NULL AND tipo NOT IN ('monotributista', 'empleado_dependiente');
+    WHERE tipo IS NOT NULL AND tipo NOT IN ('monotributista', 'empleado_dependiente', 'no_corresponde');
 
     ALTER TABLE empleados ADD CONSTRAINT chk_empleados_tipo
-      CHECK (tipo IS NULL OR tipo IN ('monotributista', 'empleado_dependiente'));
+      CHECK (tipo IS NULL OR tipo IN ('monotributista', 'empleado_dependiente', 'no_corresponde'));
   END IF;
+END $$;
+
+DO $$
+BEGIN
+  UPDATE empleados
+  SET tipo = NULL
+  WHERE tipo IS NOT NULL AND tipo NOT IN ('monotributista', 'empleado_dependiente', 'no_corresponde');
+
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'chk_empleados_tipo'
+      AND conrelid = 'empleados'::regclass
+  ) THEN
+    ALTER TABLE empleados DROP CONSTRAINT chk_empleados_tipo;
+  END IF;
+
+  ALTER TABLE empleados ADD CONSTRAINT chk_empleados_tipo
+    CHECK (tipo IS NULL OR tipo IN ('monotributista', 'empleado_dependiente', 'no_corresponde'));
 END $$;
 
 -- Empleados: reemplazar UNIQUE global en DNI por índice parcial (solo activos)
@@ -327,6 +375,41 @@ ALTER TABLE IF EXISTS movimientos_caja
   ADD COLUMN IF NOT EXISTS con_iva BOOLEAN NOT NULL DEFAULT true,
   ADD COLUMN IF NOT EXISTS cliente_id INTEGER,
   ADD COLUMN IF NOT EXISTS presupuesto_id INTEGER;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'fk_movimientos_presupuesto'
+      AND conrelid = 'movimientos_caja'::regclass
+  ) THEN
+    UPDATE movimientos_caja mc
+    SET presupuesto_id = NULL
+    WHERE presupuesto_id IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM presupuestos p WHERE p.id = mc.presupuesto_id
+      );
+
+    ALTER TABLE movimientos_caja
+      ADD CONSTRAINT fk_movimientos_presupuesto
+      FOREIGN KEY (presupuesto_id)
+      REFERENCES presupuestos(id)
+      ON DELETE SET NULL;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'chk_movimientos_monto_total_no_negativo'
+      AND conrelid = 'movimientos_caja'::regclass
+  ) THEN
+    ALTER TABLE movimientos_caja
+      ADD CONSTRAINT chk_movimientos_monto_total_no_negativo
+      CHECK (monto_total >= 0);
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS detalles_medio_pago (
   id SERIAL PRIMARY KEY,
@@ -449,6 +532,76 @@ SET
 FROM numerados n
 WHERE c.id = n.id;
 
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'chk_horas_cantidad_pos'
+      AND conrelid = 'horas'::regclass
+  ) THEN
+    ALTER TABLE horas
+      ADD CONSTRAINT chk_horas_cantidad_pos
+      CHECK (cantidad_horas > 0);
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'chk_horas_trabajadas_pos'
+      AND conrelid = 'horas'::regclass
+  ) THEN
+    ALTER TABLE horas
+      ADD CONSTRAINT chk_horas_trabajadas_pos
+      CHECK (horas_trabajadas IS NULL OR horas_trabajadas > 0);
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'chk_presupuestos_totales_no_negativos'
+      AND conrelid = 'presupuestos'::regclass
+  ) THEN
+    ALTER TABLE presupuestos
+      ADD CONSTRAINT chk_presupuestos_totales_no_negativos
+      CHECK (
+        subtotal_materiales >= 0
+        AND subtotal_mano_obra >= 0
+        AND iva_monto >= 0
+        AND total >= 0
+      );
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'chk_certificados_valores_no_negativos'
+      AND conrelid = 'certificados'::regclass
+  ) THEN
+    ALTER TABLE certificados
+      ADD CONSTRAINT chk_certificados_valores_no_negativos
+      CHECK (
+        porcentaje_avance >= 0
+        AND certificado >= 0
+        AND monto_base >= 0
+        AND indice_cac >= 0
+        AND actualizacion >= 0
+        AND iva >= 0
+        AND total_cert_sin_iva >= 0
+        AND total_cert_con_iva >= 0
+        AND acumulado_certificado >= 0
+        AND saldo_pre_original >= 0
+        AND pagos >= 0
+        AND saldo_pendiente >= 0
+      );
+  END IF;
+END $$;
+
 -- =========================
 -- ÍNDICES
 -- =========================
@@ -458,13 +611,17 @@ CREATE INDEX IF NOT EXISTS idx_obras_estado ON obras(estado);
 CREATE INDEX IF NOT EXISTS idx_empleados_activo ON empleados(activo);
 CREATE INDEX IF NOT EXISTS idx_horas_fecha ON horas(fecha);
 CREATE INDEX IF NOT EXISTS idx_horas_empleado ON horas(empleado_id);
+CREATE INDEX IF NOT EXISTS idx_horas_fecha_empleado ON horas(fecha, empleado_id);
+CREATE INDEX IF NOT EXISTS idx_horas_fecha_obra ON horas(fecha, obra_id);
 CREATE INDEX IF NOT EXISTS idx_certificados_presupuesto ON certificados(presupuesto_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_certificados_presupuesto_secuencia ON certificados(presupuesto_id, secuencia);
 CREATE INDEX IF NOT EXISTS idx_certificados_estado ON certificados(estado);
+CREATE INDEX IF NOT EXISTS idx_certificados_presupuesto_estado ON certificados(presupuesto_id, estado);
 CREATE INDEX IF NOT EXISTS idx_liquidaciones_periodo ON liquidaciones(periodo_inicio, periodo_fin);
 CREATE INDEX IF NOT EXISTS idx_pagos_liquidacion ON pagos_sueldo(liquidacion_id);
 CREATE INDEX IF NOT EXISTS idx_pagos_fecha_pago ON pagos_sueldo(fecha_pago);
 CREATE INDEX IF NOT EXISTS idx_movimientos_fecha ON movimientos_caja(fecha);
+CREATE INDEX IF NOT EXISTS idx_movimientos_fecha_tipo ON movimientos_caja(fecha, tipo);
 CREATE INDEX IF NOT EXISTS idx_movimientos_cliente ON movimientos_caja(cliente_id);
 CREATE INDEX IF NOT EXISTS idx_movimientos_presupuesto ON movimientos_caja(presupuesto_id);
 CREATE INDEX IF NOT EXISTS idx_detalles_movimiento ON detalles_medio_pago(movimiento_id);
