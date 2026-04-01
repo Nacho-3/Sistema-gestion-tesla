@@ -5,7 +5,6 @@ import { getIo } from '../socket.js'
 import PDFDocument from "pdfkit"
 import path from "path"
 import { fileURLToPath } from "url"
-import { sanitizeFileText } from "../pdf/premiumTheme.js"
 
 const router = express.Router()
 const __dirname = path.dirname(fileURLToPath(import.meta.url))

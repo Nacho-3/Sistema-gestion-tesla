@@ -89,8 +89,9 @@ const cerrarSesion = () => {
 
 <style scoped>
 .layout {
-  min-height: 100vh;
+  height: 100vh;
   display: flex;
+  overflow: hidden;
   background: radial-gradient(circle at top, #020617 0%, #000 60%);
   color: #e5e7eb;
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -104,6 +105,7 @@ const cerrarSesion = () => {
   box-shadow: 12px 0 35px rgba(15, 23, 42, 0.9);
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
 }
 
 .sidebar-header {
@@ -165,6 +167,9 @@ const cerrarSesion = () => {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .header {
@@ -237,6 +242,10 @@ const cerrarSesion = () => {
 
 .main {
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
   padding: 2rem 3rem 3rem;
   display: flex;
   flex-direction: column;

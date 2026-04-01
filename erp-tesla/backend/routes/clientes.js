@@ -6,6 +6,7 @@ import PDFDocument from "pdfkit"
 import path from "path"
 import { fileURLToPath } from "url"
 import { drawPremiumHeader, setupPremiumFooter, sanitizeFileText, PDF_COLORS } from "../pdf/premiumTheme.js"
+import fs from "fs/promises";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const LOGO_PATH = path.join(__dirname, "..", "assets", "logo.png")
@@ -51,14 +52,17 @@ router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params
 
-    const { data, error } = await db
+    const { data: cliente, error: clienteError } = await db
       .from("clientes")
-      .select("*")
+      .select("razon_social, cuit, direccion, telefono, email, iva") // Aseguramos que 'iva' esté incluido
       .eq("id", id)
       .single()
 
-    if (error) return res.status(404).json({ error: "Cliente no encontrado" })
-    res.json(data)
+    if (clienteError || !cliente) {
+      return res.status(404).json({ error: "Cliente no encontrado" })
+    }
+
+    res.json(cliente)
   } catch (err) {
     return handleInternalError(res, err, "obtener_cliente")
   }
@@ -71,7 +75,7 @@ router.get("/:id/ficha-pdf", async (req, res) => {
 
     const { data: cliente, error: clienteError } = await db
       .from("clientes")
-      .select("*")
+      .select("razon_social, empresa, cuit, direccion, telefono, email, iva")
       .eq("id", id)
       .single()
 
@@ -79,27 +83,22 @@ router.get("/:id/ficha-pdf", async (req, res) => {
       return res.status(404).json({ error: "Cliente no encontrado" })
     }
 
-    const { data: obras, error: obrasError } = await db
-      .from("obras")
-      .select("*")
-      .eq("cliente_id", id)
-      .order("created_at", { ascending: false })
-
-    if (obrasError) {
-      return res.status(400).json({ error: obrasError.message })
-    }
-
     const ahora = new Date()
     const fechaTexto = ahora.toLocaleDateString("es-AR")
     const fechaArchivo = ahora.toISOString().slice(0, 10)
+    const nombreEmpresa = sanitizeFileText(cliente.empresa || "-")
     const nombreCliente = sanitizeFileText(cliente.razon_social || "Cliente")
-    const nombreArchivo = `Ficha ${nombreCliente} actualizada ${fechaArchivo}.pdf`
+    const nombreArchivo = `Ficha ${nombreCliente} ${fechaArchivo}.pdf`
 
     const doc = new PDFDocument({ size: "A4", margin: 45 })
     const chunks = []
     doc.on("data", (chunk) => chunks.push(chunk))
-    doc.on("end", () => {
+    doc.on("end", async () => {
       const pdfBuffer = Buffer.concat(chunks)
+
+      // Guardar el archivo PDF y el archivo de datos del cliente
+      await saveFileToClientFolder(nombreCliente, nombreArchivo, pdfBuffer, cliente)
+
       res.setHeader("Content-Type", "application/pdf")
       res.setHeader("Content-Disposition", `attachment; filename="${nombreArchivo}"`)
       res.send(pdfBuffer)
@@ -108,8 +107,9 @@ router.get("/:id/ficha-pdf", async (req, res) => {
     const pageWidth = doc.page.width
     setupPremiumFooter(doc, { leftText: "Tesla Montajes Electricos - Documento interno" })
 
+    // Mostrar la empresa como título principal
     const headerBottom = drawPremiumHeader(doc, {
-      title: "TESLA MONTAJES ELECTRICOS",
+      title: cliente.empresa || "-",
       subtitle: "Ficha de cliente",
       accentText: cliente.razon_social || "",
       logoPath: LOGO_PATH,
@@ -123,19 +123,32 @@ router.get("/:id/ficha-pdf", async (req, res) => {
     doc.moveTo(45, headerBottom + 28).lineTo(pageWidth - 45, headerBottom + 28).strokeColor(PDF_COLORS.line).lineWidth(0.8).stroke()
     doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(12).text("DATOS DEL CLIENTE", 45, headerBottom + 36)
 
-    doc.fillColor(PDF_COLORS.ink).font("Helvetica-Bold").fontSize(13).text(`Cliente: ${cliente.razon_social || "-"}`, 45, headerBottom + 54)
+    // Mostrar razón social como subtítulo destacado
+    doc.fillColor(PDF_COLORS.ink).font("Helvetica-Bold").fontSize(13).text(`Razón social: ${cliente.razon_social || "-"}`, 45, headerBottom + 54)
     doc.font("Helvetica").fontSize(10)
-    doc.text(`CUIT: ${cliente.cuit || "-"}`, 45, headerBottom + 76)
+    doc.text(`CUIT: ${cliente.cuit || "-"}`, 45, headerBottom + 74)
     doc.text(`Email: ${cliente.email || "-"}`, 45, headerBottom + 94)
-    doc.text(`Direccion: ${cliente.direccion || "-"}`, 45, headerBottom + 112)
-    doc.text(`Telefono: ${cliente.telefono || "-"}`, 45, headerBottom + 130)
+    doc.text(`Dirección: ${cliente.direccion || "-"}`, 45, headerBottom + 114)
+    doc.text(`Teléfono: ${cliente.telefono || "-"}`, 45, headerBottom + 134)
+    doc.text(`IVA: ${cliente.iva || "-"}`, 45, headerBottom + 154)
 
     // Resumen
+    const { data: obras, error: obrasError } = await db
+      .from("obras")
+      .select("*")
+      .eq("cliente_id", id)
+      .order("created_at", { ascending: false });
+
+    if (obrasError) {
+      console.error("Error al obtener obras:", obrasError);
+      return res.status(500).json({ error: "Error al obtener las obras del cliente." });
+    }
+
     const totalObras = obras?.length || 0
     const obrasActivas = (obras || []).filter((obra) => obra.estado === "activa").length
     const obrasFinalizadas = (obras || []).filter((obra) => obra.estado !== "activa").length
 
-    const resumenY = headerBottom + 154
+    const resumenY = headerBottom + 176
     doc.roundedRect(45, resumenY, pageWidth - 90, 48, 6).fill(PDF_COLORS.card)
     doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(10)
     doc.text(`Total obras: ${totalObras}`, 60, resumenY + 18)
@@ -191,100 +204,167 @@ router.get("/:id/ficha-pdf", async (req, res) => {
   }
 })
 
-// Crear cliente
+// Crear nuevo cliente
 router.post("/", async (req, res) => {
   try {
-    const { razon_social, cuit, direccion, telefono, email, iva } = req.body
+    const {
+      razon_social,
+      empresa,
+      cuit,
+      direccion,
+      telefono,
+      email,
+      iva,
+    } = req.body;
 
-    const razonSocialFinal = String(razon_social || "").trim() || "Sin razon social"
+    const razonSocialFinal = razon_social?.trim() || "-";
+    const empresaFinal = empresa?.trim() || "-";
+    const cuitFinal = cuit?.trim() || "-";
+    const direccionFinal = direccion?.trim() || "-";
+    const telefonoFinal = telefono?.trim() || "-";
+    const emailFinal = email?.trim() || "-";
+    const ivaFinal = iva?.trim() || "-";
 
     const { data, error } = await db
       .from("clientes")
-      .insert([{ razon_social: razonSocialFinal, cuit, direccion, telefono, email, iva: iva || "Responsable Inscripto", activo: true }])
-      .select()
-      .single()
+      .insert([
+        {
+          razon_social: razonSocialFinal,
+          empresa: empresaFinal,
+          cuit: cuitFinal,
+          direccion: direccionFinal,
+          telefono: telefonoFinal,
+          email: emailFinal,
+          iva: ivaFinal,
+          activo: true,
+        },
+      ])
+      .select();
 
-    if (error) return res.status(400).json({ error: error.message })
-    getIo()?.emit('clientes:changed')
-    res.status(201).json(data)
+    if (error) return res.status(400).json({ error: error.message });
+
+    getIo()?.emit("clientes:changed");
+    res.status(201).json(data[0]);
   } catch (err) {
-    return handleInternalError(res, err, "crear_cliente")
+    return handleInternalError(res, err, "crear_cliente");
   }
-})
+});
 
 // Actualizar cliente
 router.put("/:id", async (req, res) => {
   try {
-    const { id } = req.params
-    const { razon_social, cuit, direccion, telefono, email, iva } = req.body
+    const { id } = req.params;
+    const {
+      razon_social,
+      empresa,
+      cuit,
+      direccion,
+      telefono,
+      email,
+      iva,
+    } = req.body;
+
+    const actualizaciones = {};
+    if (razon_social !== undefined) actualizaciones.razon_social = (razon_social ?? "").trim() || "-";
+    if (empresa !== undefined) actualizaciones.empresa = (empresa ?? "").trim() || "-";
+    if (cuit !== undefined) actualizaciones.cuit = (cuit ?? "").trim() || "-";
+    if (direccion !== undefined) actualizaciones.direccion = (direccion ?? "").trim() || "-";
+    if (telefono !== undefined) actualizaciones.telefono = (telefono ?? "").trim() || "-";
+    if (email !== undefined) actualizaciones.email = (email ?? "").trim() || "-";
+    if (iva !== undefined) actualizaciones.iva = (iva ?? "").trim() || "-";
 
     const { data, error } = await db
       .from("clientes")
-      .update({ razon_social, cuit, direccion, telefono, email, iva })
+      .update(actualizaciones)
       .eq("id", id)
-      .select()
-      .single()
+      .select();
 
-    if (error) return res.status(400).json({ error: error.message })
-    getIo()?.emit('clientes:changed')
-    res.json(data)
+    if (error) return res.status(400).json({ error: error.message });
+    if (data.length === 0) return res.status(404).json({ error: "Cliente no encontrado" });
+
+    getIo()?.emit("clientes:changed");
+    res.json(data[0]);
   } catch (err) {
-    return handleInternalError(res, err, "actualizar_cliente")
+    return handleInternalError(res, err, "actualizar_cliente");
   }
-})
+});
 
 // Eliminar cliente (borrado fisico con validacion de dependencias)
 router.delete("/:id", async (req, res) => {
   try {
-    const clienteId = Number(req.params.id)
-    if (!Number.isInteger(clienteId) || clienteId <= 0) {
-      return res.status(400).json({ error: "ID de cliente invalido" })
-    }
+    const { id } = req.params;
 
-    const clienteRes = await pool.query(
-      `SELECT id, razon_social FROM clientes WHERE id = $1 LIMIT 1`,
-      [clienteId]
-    )
-
-    if (clienteRes.rowCount === 0) {
-      return res.status(404).json({ error: "Cliente no encontrado" })
-    }
-
-    const [obrasRes, presupuestosRes, cajaRes] = await Promise.all([
-      pool.query(`SELECT COUNT(*)::int AS c FROM obras WHERE cliente_id = $1`, [clienteId]),
-      pool.query(`SELECT COUNT(*)::int AS c FROM presupuestos WHERE cliente_id = $1`, [clienteId]),
-      pool.query(`SELECT COUNT(*)::int AS c FROM movimientos_caja WHERE cliente_id = $1`, [clienteId]),
-    ])
-
-    const obrasCount = Number(obrasRes.rows[0]?.c || 0)
-    const presupuestosCount = Number(presupuestosRes.rows[0]?.c || 0)
-    const cajaCount = Number(cajaRes.rows[0]?.c || 0)
-
-    if (obrasCount > 0 || presupuestosCount > 0 || cajaCount > 0) {
-      return res.status(409).json({
-        error: "No se puede eliminar el cliente porque tiene datos asociados.",
-        detalle: {
-          obras: obrasCount,
-          presupuestos: presupuestosCount,
-          movimientos_caja: cajaCount,
-        },
-      })
-    }
-
-    const { data, error } = await db
+    const { data: cliente, error: clienteError } = await db
       .from("clientes")
-      .delete()
-      .eq("id", clienteId)
-      .select("id, razon_social")
-      .single()
+      .select("razon_social")
+      .eq("id", id)
+      .single();
 
-    if (error) return res.status(400).json({ error: error.message })
+    if (clienteError || !cliente) {
+      return res.status(404).json({ error: "Cliente no encontrado" });
+    }
 
-    getIo()?.emit('clientes:changed')
-    res.json(data)
+    const { error } = await db.from("clientes").delete().eq("id", id);
+
+    if (error) {
+      return res.status(500).json({ error: "Error al eliminar el cliente." });
+    }
+
+    // Eliminar la carpeta del cliente
+    await deleteClientFolder(cliente.razon_social);
+
+    res.json({ message: "Cliente eliminado correctamente." });
   } catch (err) {
-    return handleInternalError(res, err, "eliminar_cliente")
+    console.error("Error al eliminar el cliente:", err);
+    res.status(500).send("Error al eliminar el cliente.");
   }
-})
+});
+
+// Función para eliminar la carpeta de un cliente
+const deleteClientFolder = async (clientName) => {
+  try {
+    const mainFolderPath = path.join("C:\\Users\\usuario\\Desktop\\GESTION TESLA", "clientes");
+    const clientFolderPath = path.join(mainFolderPath, clientName);
+
+    // Verificar si la carpeta del cliente existe
+    const folderExists = await fs.access(clientFolderPath).then(() => true).catch(() => false);
+
+    if (folderExists) {
+      await fs.rm(clientFolderPath, { recursive: true, force: true });
+      console.log(`Carpeta del cliente eliminada: ${clientFolderPath}`);
+    }
+  } catch (error) {
+    console.error("Error al eliminar la carpeta del cliente:", error);
+    throw error;
+  }
+};
+
+const saveFileToClientFolder = async (clientName, fileName, buffer, clientData) => {
+  try {
+    const mainFolderPath = path.join("C:\\Users\\usuario\\Desktop\\GESTION TESLA", "clientes");
+    const clientFolderPath = path.join(mainFolderPath, clientName);
+
+    // Crear la carpeta principal si no existe
+    await fs.mkdir(mainFolderPath, { recursive: true });
+
+    // Crear la carpeta del cliente si no existe
+    await fs.mkdir(clientFolderPath, { recursive: true });
+
+    // Guardar el archivo PDF en la carpeta del cliente
+    const filePath = path.join(clientFolderPath, fileName);
+    await fs.writeFile(filePath, buffer);
+
+    // Generar un archivo .txt con los datos del cliente
+    const clientDataFileName = `Datos (${clientName}).txt`;
+    const clientDataFilePath = path.join(clientFolderPath, clientDataFileName);
+    const clientDataContent = `Datos del Cliente:\n\nNombre: ${clientData.razon_social || "-"}\nCUIT: ${clientData.cuit || "-"}\nEmail: ${clientData.email || "-"}\nDirección: ${clientData.direccion || "-"}\nTeléfono: ${clientData.telefono || "-"}\nIVA: ${clientData.iva || "-"}`;
+    await fs.writeFile(clientDataFilePath, clientDataContent);
+
+    console.log(`Archivos guardados en: ${clientFolderPath}`);
+  } catch (error) {
+    console.error("Error al guardar los archivos:", error);
+    throw error;
+  }
+}
 
 export default router

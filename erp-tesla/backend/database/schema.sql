@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS clientes (
   telefono VARCHAR(50),
   email VARCHAR(120),
   iva VARCHAR(100) DEFAULT 'Responsable Inscripto',
+  empresa VARCHAR(255) DEFAULT '-',
   activo BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -83,7 +84,8 @@ CREATE TABLE IF NOT EXISTS empleados (
 CREATE TABLE IF NOT EXISTS horas (
   id SERIAL PRIMARY KEY,
   empleado_id INTEGER NOT NULL REFERENCES empleados(id),
-  obra_id INTEGER NOT NULL REFERENCES obras(id),
+  cliente_id INTEGER REFERENCES clientes(id) ON DELETE SET NULL,
+  obra_id INTEGER REFERENCES obras(id) ON DELETE SET NULL,
   fecha DATE NOT NULL,
   hora_inicio TIME,
   hora_fin TIME,
@@ -99,6 +101,25 @@ CREATE TABLE IF NOT EXISTS horas (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE IF EXISTS horas
+  ADD COLUMN IF NOT EXISTS cliente_id INTEGER;
+
+ALTER TABLE IF EXISTS horas
+  ALTER COLUMN obra_id DROP NOT NULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'horas_cliente_id_fkey'
+      AND conrelid = 'horas'::regclass
+  ) THEN
+    ALTER TABLE horas
+      ADD CONSTRAINT horas_cliente_id_fkey
+      FOREIGN KEY (cliente_id) REFERENCES clientes(id) ON DELETE SET NULL;
+  END IF;
+END $$;
 
 -- =========================
 -- LIQUIDACIONES Y PAGOS

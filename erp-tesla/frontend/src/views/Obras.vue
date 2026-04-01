@@ -201,7 +201,10 @@ const cambiarEstado = async (id, nuevoEstado) => {
 
 // Calculado: total de horas de la obra
 const totalHorasObra = computed(() => {
-  return horas.value.reduce((sum, h) => sum + (h.cantidad_horas || 0), 0)
+  return horas.value.reduce((sum, h) => {
+    const horasNum = Number(h?.cantidad_horas ?? h?.horas_trabajadas ?? 0)
+    return sum + (Number.isFinite(horasNum) ? horasNum : 0)
+  }, 0)
 })
 
 // Obras filtradas por cliente (excluyendo obras administrativas)
@@ -224,7 +227,7 @@ const obrasFinalizadas = computed(() => obrasFiltradas.value.filter((o) => o.est
 // Obtener nombre del cliente
 const getNombreCliente = (clienteId) => {
   const cliente = clientes.value.find((c) => c.id === clienteId)
-  return cliente ? cliente.razon_social : "-"
+  return cliente ? (cliente.empresa || cliente.razon_social) : "-"
 }
 
 // Obtener nombre del grupo
@@ -242,6 +245,11 @@ const formatearFecha = (fecha) => {
 const formatearMonto = (valor) => {
   const numero = Number(valor) || 0
   return numero.toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+const formatearHoras = (valor) => {
+  const numero = Number(valor)
+  return Number.isFinite(numero) ? numero.toFixed(2) : "0.00"
 }
 
 onMounted(async () => {
@@ -271,7 +279,7 @@ onUnmounted(() => {
           <select v-model="filtroCliente" class="filtro-cliente">
             <option value="">Todos los clientes</option>
             <option v-for="c in clientes" :key="c.id" :value="c.id">
-              {{ c.razon_social }}
+              {{ c.empresa || c.razon_social }}
             </option>
           </select>
         </div>
@@ -431,7 +439,7 @@ onUnmounted(() => {
               <tbody>
                 <tr v-for="hora in horas" :key="hora.id">
                   <td>{{ formatearFecha(hora.fecha) }}</td>
-                  <td>{{ hora.cantidad_horas?.toFixed(2) }}</td>
+                  <td>{{ formatearHoras(hora.cantidad_horas ?? hora.horas_trabajadas) }}</td>
                   <td>
                     <span v-if="hora.es_prestada" class="badge badge-prestada">
                       Prestada
@@ -516,7 +524,7 @@ onUnmounted(() => {
               <select v-model="form.cliente_id" required>
                 <option value="">Seleccionar cliente...</option>
                 <option v-for="cliente in clientes" :key="cliente.id" :value="cliente.id">
-                  {{ cliente.razon_social }}
+                  {{ cliente.empresa || cliente.razon_social }}
                 </option>
               </select>
             </label>

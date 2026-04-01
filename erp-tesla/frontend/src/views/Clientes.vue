@@ -19,6 +19,7 @@ const downloadingPdf = ref(false)
 
 // Formulario
 const form = ref({
+  empresa: "",
   razon_social: "",
   cuit: "",
   direccion: "",
@@ -95,11 +96,13 @@ const openForm = (cliente = null) => {
   } else {
     editingId.value = null
     form.value = {
+      empresa: "",
       razon_social: "",
       cuit: "",
       direccion: "",
       telefono: "",
-      email: ""
+      email: "",
+      iva: "Responsable Inscripto"
     }
   }
   showForm.value = true
@@ -110,6 +113,7 @@ const closeForm = () => {
   showForm.value = false
   editingId.value = null
   form.value = {
+    empresa: "",
     razon_social: "",
     cuit: "",
     direccion: "",
@@ -126,21 +130,14 @@ const saveCliente = async () => {
     error.value = "La razón social es obligatoria"
     return
   }
-
   loading.value = true
   try {
     if (editingId.value) {
-      await api.updateCliente(editingId.value, form.value)
+      await api.updateCliente(editingId.value, { ...form.value })
     } else {
-      await api.createCliente(form.value)
+      await api.createCliente({ ...form.value })
     }
     await loadClientes()
-    
-    // Si estamos editando el cliente seleccionado, actualizarlo
-    if (clienteSeleccionado.value && editingId.value === clienteSeleccionado.value.id) {
-      clienteSeleccionado.value = { ...clienteSeleccionado.value, ...form.value }
-    }
-    
     closeForm()
   } catch (err) {
     error.value = editingId.value
@@ -242,6 +239,7 @@ onUnmounted(() => {
           <table>
             <thead>
               <tr>
+                <th>Empresa</th>
                 <th>Razón Social</th>
                 <th>CUIT</th>
                 <th>Teléfono</th>
@@ -251,6 +249,7 @@ onUnmounted(() => {
             </thead>
             <tbody>
               <tr v-for="cliente in clientes" :key="cliente.id">
+                <td>{{ cliente.empresa || "-" }}</td>
                 <td>{{ cliente.razon_social }}</td>
                 <td>{{ cliente.cuit || "-" }}</td>
                 <td>{{ cliente.telefono || "-" }}</td>
@@ -303,7 +302,8 @@ onUnmounted(() => {
 
         <!-- Datos generales -->
         <div class="ficha-seccion datos-principales">
-          <h2>{{ clienteSeleccionado.razon_social }}</h2>
+          <h2>{{ clienteSeleccionado.empresa || '-' }}</h2>
+          <h3 style="margin-top: 0; color: #444; font-weight: 500;">Razón social: {{ clienteSeleccionado.razon_social || '-' }}</h3>
           <div class="datos-grid">
             <div class="dato-item">
               <span class="dato-label">CUIT:</span>
@@ -420,13 +420,22 @@ onUnmounted(() => {
             <button class="btn-close" @click="closeForm">×</button>
           </div>
 
+
           <form @submit.prevent="saveCliente" class="modal-form">
+            <label class="form-group">
+              <span>Empresa</span>
+              <input
+                v-model="form.empresa"
+                type="text"
+                placeholder="Nombre comercial (opcional)"
+              />
+            </label>
             <label class="form-group">
               <span>Razón Social *</span>
               <input
                 v-model="form.razon_social"
                 type="text"
-                placeholder="Nombre de la empresa"
+                placeholder="Razón social registrada"
                 required
               />
             </label>
@@ -447,9 +456,10 @@ onUnmounted(() => {
                 required
               >
                 <option value="Responsable Inscripto">Responsable Inscripto</option>
+                <option value="Monotributista">Monotributista</option>
                 <option value="Exento">Exento</option>
                 <option value="Consumidor Final">Consumidor Final</option>
-                <option value="Monotributo">Monotributo</option>
+                <option value="No corresponde">No corresponde</option>
               </select>
             </label>
 
@@ -475,8 +485,9 @@ onUnmounted(() => {
               <span>Email</span>
               <input
                 v-model="form.email"
-                type="email"
-                placeholder="contacto@empresa.com"
+                type="text"
+                id="email"
+                placeholder="Ingrese el email o '-' si no aplica"
               />
             </label>
 

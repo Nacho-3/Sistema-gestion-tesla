@@ -43,7 +43,8 @@ const formConceptos = ref({
   feriados_cantidad: 0,
   dias_no_trabajados: 0,
   adelantos: 0,
-  observaciones: ""
+  observaciones: "",
+  adicional: 0
 })
 
 const toNumber = (valor) => {
@@ -74,6 +75,7 @@ const normalizarLiquidacion = (liq = {}) => ({
   adelantos: toNumber(liq.adelantos),
   total: toNumber(liq.total),
   total_pagado: toNumber(liq.total_pagado),
+  adicional: toNumber(liq.adicional),
 })
 
 const normalizarPago = (pago = {}) => ({
@@ -132,35 +134,43 @@ const cargarEmpleados = async () => {
 
 // Ver detalle de liquidación
 const verDetalle = async (liquidacion) => {
-  liquidacionSeleccionada.value = liquidacion
+  liquidacionSeleccionada.value = normalizarLiquidacion(liquidacion)
   vistaActual.value = "detalle"
+  pagos.value = []
   
-  // Cargar pagos
   loading.value = true
   try {
-    const resPagos = await api.getPagos(liquidacion.id)
+    const [resLiquidacion, resPagos] = await Promise.all([
+      api.getLiquidacion(liquidacion.id),
+      api.getPagos(liquidacion.id),
+    ])
+
+    const liquidacionActualizada = normalizarLiquidacion(resLiquidacion.data || liquidacion)
+    liquidacionSeleccionada.value = liquidacionActualizada
     pagos.value = (resPagos.data || []).map(normalizarPago)
+
+    // Cargar conceptos en el formulario usando el dato más fresco posible
+    formConceptos.value = {
+      total_horas: liquidacionActualizada.total_horas || 0,
+      monto_bruto: liquidacionActualizada.monto_bruto || liquidacionActualizada.importe_horas || 0,
+      presentismo: liquidacionActualizada.presentismo || 0,
+      horas_extra_cantidad: liquidacionActualizada.horas_extra_cantidad || 0,
+      horas_extra_100_cantidad: liquidacionActualizada.horas_extra_100_cantidad || 0,
+      no_remunerativo: liquidacionActualizada.no_remunerativo || 0,
+      aguinaldo: liquidacionActualizada.aguinaldo || 0,
+      vacaciones: liquidacionActualizada.vacaciones || 0,
+      feriados_cantidad: liquidacionActualizada.feriados_cantidad || 0,
+      dias_no_trabajados: liquidacionActualizada.dias_no_trabajados || 0,
+      adelantos: liquidacionActualizada.adelantos || 0,
+      observaciones: liquidacionActualizada.observaciones || "",
+      adicional: liquidacionActualizada.adicional || 0
+    }
   } catch (err) {
-    console.error("Error al cargar pagos:", err)
+    console.error("Error al cargar detalle/pagos:", err)
     pagos.value = []
+    error.value = err.response?.data?.error || "Error al cargar el detalle de la liquidación"
   } finally {
     loading.value = false
-  }
-
-  // Cargar conceptos en el formulario
-  formConceptos.value = {
-    total_horas: liquidacion.total_horas || 0,
-    monto_bruto: liquidacion.monto_bruto || liquidacion.importe_horas || 0,
-    presentismo: liquidacion.presentismo || 0,
-    horas_extra_cantidad: liquidacion.horas_extra_cantidad || 0,
-    horas_extra_100_cantidad: liquidacion.horas_extra_100_cantidad || 0,
-    no_remunerativo: liquidacion.no_remunerativo || 0,
-    aguinaldo: liquidacion.aguinaldo || 0,
-    vacaciones: liquidacion.vacaciones || 0,
-    feriados_cantidad: liquidacion.feriados_cantidad || 0,
-    dias_no_trabajados: liquidacion.dias_no_trabajados || 0,
-    adelantos: liquidacion.adelantos || 0,
-    observaciones: liquidacion.observaciones || ""
   }
 }
 
@@ -178,7 +188,8 @@ const abrirEdicionLiquidacion = (liquidacion) => {
     feriados_cantidad: liquidacion.feriados_cantidad || 0,
     dias_no_trabajados: liquidacion.dias_no_trabajados || 0,
     adelantos: liquidacion.adelantos || 0,
-    observaciones: liquidacion.observaciones || ""
+    observaciones: liquidacion.observaciones || "",
+    adicional: liquidacion.adicional || 0
   }
   showFormConceptos.value = true
 }
@@ -327,12 +338,17 @@ const totalPagado = computed(() => {
   return pagos.value.reduce((sum, p) => sum + toNumber(p.monto), 0)
 })
 
+const totalLiquidacionDetalle = computed(() => {
+  return toNumber(liquidacionSeleccionada.value?.total ?? liquidacionSeleccionada.value?.monto_neto)
+})
+
 const faltaPagar = computed(() => {
-  return toNumber(liquidacionSeleccionada.value?.total) - totalPagado.value
+  const restante = totalLiquidacionDetalle.value - totalPagado.value
+  return Math.max(0, Math.round(restante * 100) / 100)
 })
 
 const estaPagadaDetalle = computed(() => {
-  return totalPagado.value >= toNumber(liquidacionSeleccionada.value?.total)
+  return faltaPagar.value <= 0.01
 })
 
 const valorHoraDetalle = computed(() => {
@@ -508,7 +524,7 @@ onUnmounted(() => {
                 <td><strong>{{ getNombreEmpleado(liq.empleado_id) }}</strong></td>
                 <td>{{ liq.mes }}/{{ liq.anio }}</td>
                 <td>{{ formatearHoras(liq.horas_computadas) }}</td>
-                <td>{{ formatearMoneda(liq.monto_bruto) }}</td>
+                <td>{{ formatearMoneda(liq.monto_bruto || 0) }}</td>
                 <td><strong>{{ formatearMoneda(liq.total) }}</strong></td>
                 <td>
                   <span :class="['badge', liq.estado === 'pagada' ? 'badge-pagada' : 'badge-pendiente']">
@@ -602,9 +618,9 @@ onUnmounted(() => {
               <span class="desglose-label">Valor hora:</span>
               <span class="desglose-valor">{{ formatearMoneda(valorHoraDetalle) }}</span>
             </div>
-            <div class="desglose-item">
+          <div class="desglose-item">
               <span class="desglose-label">Sueldo base:</span>
-              <span class="desglose-valor">{{ formatearMoneda(liquidacionSeleccionada.monto_bruto) }}</span>
+              <span class="desglose-valor">{{ formatearMoneda(liquidacionSeleccionada.monto_bruto || 0) }}</span>
             </div>
           </div>
 
@@ -646,6 +662,10 @@ onUnmounted(() => {
               <span>Días no trabajados ({{ formatearCantidad(liquidacionSeleccionada.dias_no_trabajados) }}):</span>
               <span class="concepto-negativo">-{{ formatearMoneda(liquidacionSeleccionada.descuento_dias_no_trabajados) }}</span>
             </div>
+            <div class="concepto">
+              <span>Adicional:</span>
+              <span>{{ formatearMoneda(liquidacionSeleccionada.adicional) }}</span>
+            </div>
             <div class="concepto-observacion">
               <span>Observaciones:</span>
               <p>{{ liquidacionSeleccionada.observaciones || "-" }}</p>
@@ -659,7 +679,7 @@ onUnmounted(() => {
           <div class="resumen-grid">
             <div class="resumen-item">
               <span class="resumen-label">Total liquidación:</span>
-              <span class="resumen-valor">{{ formatearMoneda(liquidacionSeleccionada.total) }}</span>
+              <span class="resumen-valor">{{ formatearMoneda(totalLiquidacionDetalle) }}</span>
             </div>
             <div class="resumen-item">
               <span class="resumen-label">Total pagado:</span>
@@ -869,6 +889,12 @@ onUnmounted(() => {
             <label class="form-group">
               <span>Adelantos ($)</span>
               <input v-model.number="formConceptos.adelantos" type="number" min="0" step="0.01" />
+            </label>
+
+            <label class="form-group">
+              <span>Adicional ($)</span>
+              <input v-model.number="formConceptos.adicional" type="number" min="0" step="0.01" />
+              <small class="form-help">Monto adicional a sumar a la liquidación (bonos, premios, etc).</small>
             </label>
 
             <label class="form-group">

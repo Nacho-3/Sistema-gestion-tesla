@@ -2,6 +2,8 @@ import express from "express"
 import db from "../db.js"
 import { pool } from "../db.js"
 import { getIo } from '../socket.js'
+import path from "path";
+import fs from "fs/promises";
 
 const router = express.Router()
 
@@ -14,6 +16,70 @@ const handleInternalError = (res, err, context) => {
 }
 
 const ADMIN_REGEX = /admin/i
+
+const OBRAS_FOLDER = path.join("C:\\Users\\usuario\\Desktop\\GESTION TESLA", "obras");
+const ACTIVE_OBRAS_FOLDER = path.join(OBRAS_FOLDER, "obras_activas");
+const FINISHED_OBRAS_FOLDER = path.join(OBRAS_FOLDER, "obras_finalizadas");
+
+const ensureObrasFoldersExist = async () => {
+  await fs.mkdir(ACTIVE_OBRAS_FOLDER, { recursive: true });
+  await fs.mkdir(FINISHED_OBRAS_FOLDER, { recursive: true });
+};
+
+const saveObraFile = async (obra, folder) => {
+  try {
+    const { data: clienteData } = await db
+      .from("clientes")
+      .select("razon_social")
+      .eq("id", obra.cliente_id)
+      .single();
+
+    const { data: grupoData } = await db
+      .from("grupos")
+      .select("nombre")
+      .eq("id", obra.grupo_id)
+      .single();
+
+    const clienteNombre = clienteData?.razon_social || "-";
+    const grupoNombre = grupoData?.nombre || "-";
+
+    const formattedFechaInicio = obra.fecha_inicio
+      ? new Date(obra.fecha_inicio).toLocaleDateString("es-AR")
+      : "-";
+
+    const obraContent = `Nombre: ${obra.nombre || "-"}\nCliente: ${clienteNombre}\nGrupo: ${grupoNombre}\nFecha Inicio: ${formattedFechaInicio}\nEstado: ${obra.estado || "-"}`;
+
+    const filePath = path.join(folder, `${obra.nombre}.txt`);
+    await fs.writeFile(filePath, obraContent);
+  } catch (error) {
+    console.error("Error al guardar los datos de la obra:", error);
+    throw error;
+  }
+};
+
+const deleteObraFile = async (obra) => {
+  const folder = obra.estado === "finalizada" ? FINISHED_OBRAS_FOLDER : ACTIVE_OBRAS_FOLDER;
+  const obraFilePath = path.join(folder, `${obra.nombre}.txt`);
+  try {
+    await fs.unlink(obraFilePath);
+  } catch (err) {
+    console.error(`Error al eliminar el archivo de la obra: ${obraFilePath}`, err);
+  }
+};
+
+const moveObraFile = async (obra, newEstado) => {
+  const oldFolder = obra.estado === "finalizada" ? FINISHED_OBRAS_FOLDER : ACTIVE_OBRAS_FOLDER;
+  const newFolder = newEstado === "finalizada" ? FINISHED_OBRAS_FOLDER : ACTIVE_OBRAS_FOLDER;
+  const oldFilePath = path.join(oldFolder, `${obra.nombre}.txt`);
+  const newFilePath = path.join(newFolder, `${obra.nombre}.txt`);
+
+  try {
+    await fs.rename(oldFilePath, newFilePath);
+    console.log(`Archivo de la obra movido de ${oldFolder} a ${newFolder}`);
+  } catch (err) {
+    console.error(`Error al mover el archivo de la obra: ${oldFilePath} a ${newFilePath}`, err);
+  }
+};
 
 // Listar todas las obras (opcionalmente filtrar por estado)
 router.get("/", async (req, res) => {
@@ -84,6 +150,10 @@ router.post("/", async (req, res) => {
       .single()
 
     if (error) return res.status(400).json({ error: error.message })
+
+    await ensureObrasFoldersExist();
+    await saveObraFile(data, ACTIVE_OBRAS_FOLDER);
+
     getIo()?.emit('obras:changed')
     res.status(201).json(data)
   } catch (err) {
@@ -97,14 +167,32 @@ router.put("/:id", async (req, res) => {
     const { id } = req.params
     const { nombre, cliente_id, grupo_id, estado, fecha_inicio } = req.body
 
+    const { data: oldObra, error: fetchError } = await db
+      .from("obras")
+      .select("*")
+      .eq("id", id)
+      .single();
+
+    if (fetchError || !oldObra) {
+      return res.status(404).json({ error: "Obra no encontrada" });
+    }
+
     const { data, error } = await db
       .from("obras")
       .update({ nombre, cliente_id, grupo_id, estado, fecha_inicio })
       .eq("id", id)
       .select("*")
-      .single()
+      .single();
 
-    if (error) return res.status(400).json({ error: error.message })
+    if (error) return res.status(400).json({ error: error.message });
+
+    if (oldObra.estado !== estado) {
+      await moveObraFile(oldObra, estado);
+    } else {
+      const folder = estado === "finalizada" ? FINISHED_OBRAS_FOLDER : ACTIVE_OBRAS_FOLDER;
+      await saveObraFile(data, folder);
+    }
+
     getIo()?.emit('obras:changed')
     res.json(data)
   } catch (err) {
@@ -124,73 +212,104 @@ router.patch("/:id/estado", async (req, res) => {
       })
     }
 
+    const { data: obra, error: obraError } = await db
+      .from("obras")
+      .select("*")
+      .eq("id", id)
+      .single();
+
+    if (obraError || !obra) {
+      return res.status(404).json({ error: "Obra no encontrada" });
+    }
+
     const { data, error } = await db
       .from("obras")
       .update({ estado })
       .eq("id", id)
       .select()
-      .single()
+      .single();
 
-    if (error) return res.status(400).json({ error: error.message })
-    getIo()?.emit('obras:changed')
-    res.json(data)
+    if (error) return res.status(400).json({ error: error.message });
+
+    if (obra.estado !== estado) {
+      await moveObraFile(obra, estado);
+    }
+
+    getIo()?.emit("obras:changed");
+    res.json(data);
   } catch (err) {
-    return handleInternalError(res, err, "actualizar_estado_obra")
+    return handleInternalError(res, err, "actualizar_estado_obra");
   }
 })
 
 // Eliminar obra (solo si no tiene movimientos asociados)
 router.delete("/:id", async (req, res) => {
   try {
-    const obraId = Number(req.params.id)
-    if (!Number.isInteger(obraId) || obraId <= 0) {
-      return res.status(400).json({ error: "ID de obra invalido" })
-    }
+    const { id } = req.params
 
-    const obraResult = await pool.query(
-      `SELECT id, nombre FROM obras WHERE id = $1 LIMIT 1`,
-      [obraId]
-    )
-
-    if (obraResult.rowCount === 0) {
-      return res.status(404).json({ error: "Obra no encontrada" })
-    }
-
-    const [horasRes, presupuestosRes, cajaRes] = await Promise.all([
-      pool.query(`SELECT COUNT(*)::int AS c FROM horas WHERE obra_id = $1`, [obraId]),
-      pool.query(`SELECT COUNT(*)::int AS c FROM presupuestos WHERE obra_id = $1`, [obraId]),
-      pool.query(`SELECT COUNT(*)::int AS c FROM movimientos_caja WHERE presupuesto_id IN (SELECT id FROM presupuestos WHERE obra_id = $1)`, [obraId]),
-    ])
-
-    const horasCount = Number(horasRes.rows[0]?.c || 0)
-    const presupuestosCount = Number(presupuestosRes.rows[0]?.c || 0)
-    const cajaCount = Number(cajaRes.rows[0]?.c || 0)
-
-    if (horasCount > 0 || presupuestosCount > 0 || cajaCount > 0) {
-      return res.status(409).json({
-        error: "No se puede eliminar la obra porque tiene datos asociados (horas, presupuestos o caja).",
-        detalle: {
-          horas: horasCount,
-          presupuestos: presupuestosCount,
-          movimientos_caja_relacionados: cajaCount,
-        },
-      })
-    }
-
-    const { data, error } = await db
+    const { data: obra, error: obraError } = await db
       .from("obras")
-      .delete()
-      .eq("id", obraId)
-      .select("id, nombre")
-      .single()
+      .select("*")
+      .eq("id", id)
+      .single();
 
-    if (error) return res.status(400).json({ error: error.message })
+    if (obraError || !obra) {
+      return res.status(404).json({ error: "Obra no encontrada" });
+    }
+
+    const { error } = await db.from("obras").delete().eq("id", id);
+
+    if (error) {
+      return res.status(500).json({ error: "Error al eliminar la obra." });
+    }
+
+    await deleteObraFile(obra);
 
     getIo()?.emit('obras:changed')
-    res.json({ mensaje: "Obra eliminada", data })
+    res.json({ mensaje: "Obra eliminada correctamente." });
   } catch (err) {
     return handleInternalError(res, err, "eliminar_obra")
   }
 })
+
+// Obtener nombres de cliente y grupo
+const getClienteGrupo = async (obra) => {
+  const { data: clienteData, error: clienteError } = await db
+    .from("clientes")
+    .select("razon_social")
+    .eq("id", obra.cliente_id)
+    .single();
+
+  const { data: grupoData, error: grupoError } = await db
+    .from("grupos")
+    .select("nombre")
+    .eq("id", obra.grupo_id)
+    .single();
+
+  const clienteNombre = clienteData?.razon_social || "-";
+  const grupoNombre = grupoData?.nombre || "-";
+
+  // Formatear la fecha de inicio a formato día/mes/año
+  const formattedFechaInicio = obra.fecha_inicio
+    ? new Date(obra.fecha_inicio).toLocaleDateString("es-AR")
+    : "-";
+
+  // Generar contenido del archivo .txt
+  const obraDataContent = `Nombre: ${obra.nombre || "-"}\nCliente: ${clienteNombre}\nGrupo: ${grupoNombre}\nFecha Inicio: ${formattedFechaInicio}\nEstado: ${obra.estado || "-"}`;
+
+  // Mover archivo de obra al cambiar estado a finalizada
+  if (obra.estado === "finalizada") {
+    const oldFilePath = path.join(ACTIVE_OBRAS_FOLDER, `${obra.nombre}.txt`);
+    const newFilePath = path.join(FINISHED_OBRAS_FOLDER, `${obra.nombre}.txt`);
+    try {
+      await fs.rename(oldFilePath, newFilePath);
+      console.log(`Archivo de la obra movido a la carpeta de obras finalizadas: ${newFilePath}`);
+    } catch (err) {
+      console.error(`Error al mover el archivo de la obra: ${oldFilePath} a ${newFilePath}`, err);
+    }
+  }
+
+  return { clienteNombre, grupoNombre, obraDataContent };
+};
 
 export default router

@@ -1,4 +1,6 @@
 import express from "express"
+import fs from "fs/promises"
+// import path from "path" (duplicado eliminado)
 import db from "../db.js"
 import { getIo } from '../socket.js'
 import PDFDocument from "pdfkit"
@@ -7,6 +9,77 @@ import { fileURLToPath } from "url"
 import { drawPremiumHeader, setupPremiumFooter, sanitizeFileText, PDF_COLORS } from "../pdf/premiumTheme.js"
 
 const router = express.Router()
+
+// === SUELDOS TXT EXPORT ===
+const SUELDOS_BASE_FOLDER = path.join("C:\\Users\\usuario\\Desktop\\GESTION TESLA", "Sueldos")
+async function saveSueldoTxtPorEmpleadoMes(mes, anio) {
+  try {
+    await fs.mkdir(SUELDOS_BASE_FOLDER, { recursive: true })
+    const { inicioISO, finISO } = getPeriodo(mes, anio)
+    // Obtener liquidaciones y empleados
+    const [{ data: liquidaciones }, { data: empleados }, { data: pagos }] = await Promise.all([
+      db.from("liquidaciones").select("*",).gte("periodo_inicio", inicioISO).lte("periodo_fin", finISO),
+      db.from("empleados").select("id, nombre, apellido"),
+      db.from("pagos_sueldo").select("*"),
+    ])
+    if (!liquidaciones || !empleados) return
+    // Agrupar pagos por liquidacion
+    const pagosPorLiq = {}
+    for (const p of pagos || []) {
+      if (!pagosPorLiq[p.liquidacion_id]) pagosPorLiq[p.liquidacion_id] = []
+      pagosPorLiq[p.liquidacion_id].push(p)
+    }
+    // Por cada empleado, generar archivo
+    for (const emp of empleados) {
+      const liq = (liquidaciones || []).find(l => l.empleado_id === emp.id)
+      if (!liq) continue
+      const pagosEmp = pagosPorLiq[liq.id] || []
+      const nombreEmp = `${emp.nombre || ''} ${emp.apellido || ''}`.trim() || `Empleado_${emp.id}`
+      const nombreArchivo = `${nombreEmp.replace(/[^a-zA-Z0-9_\- ]/g, "_")}.txt`
+      const subfolder = path.join(SUELDOS_BASE_FOLDER, `${anio}_${String(mes).padStart(2, "0")}`)
+      await fs.mkdir(subfolder, { recursive: true })
+      let content = `Liquidación de sueldo - ${nombreEmp}\nMes: ${mes}/${anio}\n\n`
+      content += `Total neto: $${liq.monto_neto}\nEstado: ${liq.estado}\n\n`
+      content += `--- Pagos ---\n`
+      if (pagosEmp.length === 0) {
+        content += `  Sin pagos registrados\n`
+      } else {
+        for (const p of pagosEmp) {
+          content += `  - ${p.fecha_pago || p.created_at || ""}: $${p.monto} (${p.medio_pago || "-"})\n`
+        }
+      }
+      content += `\n--- Detalle ---\n`
+      content += `  Horas: ${liq.total_horas}\n  Valor hora: $${liq.valor_hora}\n  Importe horas: $${liq.importe_horas}\n  Presentismo: $${liq.presentismo}\n  Horas extra 50%: $${liq.importe_horas_extra}\n  Horas extra 100%: $${liq.importe_horas_extra_100}\n  No remunerativo: $${liq.no_remunerativo}\n  Aguinaldo: $${liq.aguinaldo}\n  Vacaciones: $${liq.vacaciones}\n  Feriados: $${liq.importe_feriados}\n  Adelantos: $${liq.adelantos}\n  Días no trabajados: $${liq.dias_no_trabajados}\n  Descuento días no trabajados: $${liq.descuento_dias_no_trabajados}\n  Adicional: $${liq.adicional}\n\n  Observaciones: ${liq.observaciones || ""}\n`
+      const filePath = path.join(subfolder, nombreArchivo)
+      await fs.writeFile(filePath, content)
+    }
+  } catch (err) {
+    console.error("[SUELDOS TXT] Error exportando sueldos:", err.message)
+  }
+}
+
+const triggerSueldoTxtExport = (mes, anio) => {
+  const mesNum = Number(mes)
+  const anioNum = Number(anio)
+
+  if (!Number.isInteger(mesNum) || !Number.isInteger(anioNum) || mesNum < 1 || mesNum > 12) return
+
+  setTimeout(() => {
+    saveSueldoTxtPorEmpleadoMes(mesNum, anioNum).catch((err) => {
+      console.error(`[SUELDOS TXT] Error exportando ${mesNum}/${anioNum}:`, err.message)
+    })
+  }, 0)
+}
+
+const triggerSueldoTxtExportFromPeriodo = (periodoInicio) => {
+  if (!periodoInicio) return
+
+  const periodo = new Date(periodoInicio)
+  if (Number.isNaN(periodo.getTime())) return
+
+  triggerSueldoTxtExport(periodo.getMonth() + 1, periodo.getFullYear())
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const LOGO_PRESUPUESTO_PATH = path.join(__dirname, "..", "assets", "logo_presupuesto.png")
 const LOGO_PATH = path.join(__dirname, "..", "assets", "logo.png")
@@ -112,6 +185,8 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
   const horasExtra100Cantidad = preferColumn(liq.horas_extra_100_cantidad, meta.horas_extra_100_cantidad)
   const feriadosCantidad = preferColumn(liq.feriados_cantidad, meta.feriados_cantidad)
   const diasNoTrabajados = preferColumn(liq.dias_no_trabajados, meta.dias_no_trabajados)
+  // Treat `adicional` as a standard column (fallback to 0). Do not prefer legacy meta.
+  const adicional = roundMoney(liq.adicional ?? 0)
 
   const importeHorasExtra = roundMoney(horasExtraCantidad * valorHora * 1.5)
   const importeHorasExtra100 = roundMoney(horasExtra100Cantidad * valorHora * 2)
@@ -132,6 +207,7 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
     importe_horas_extra_100: importeHorasExtra100,
     importe_feriados: importeFeriados,
     descuento_dias_no_trabajados: descuentoDiasNoTrabajados,
+    adicional,
   }
 }
 
@@ -153,7 +229,8 @@ const mapLiquidacion = (liq, totalPagado = 0) => {
     conceptos.vacaciones +
     conceptos.importe_horas_extra +
     conceptos.importe_horas_extra_100 +
-    conceptos.importe_feriados -
+    conceptos.importe_feriados +
+    conceptos.adicional -
     conceptos.adelantos -
     conceptos.descuento_dias_no_trabajados
   const total = Number(liq?.monto_neto ?? totalCalculado)
@@ -185,6 +262,7 @@ const mapLiquidacion = (liq, totalPagado = 0) => {
     total_pagado: totalPagado,
     estado,
     observaciones: nota,
+    adicional: conceptos.adicional,
   }
 }
 
@@ -270,6 +348,7 @@ const syncLiquidacionesPeriodo = async (mes, anio) => {
               dias_no_trabajados: 0,
               descuento_dias_no_trabajados: 0,
               adelantos: 0,
+              adicional: 0,
               descuentos: 0,
               monto_neto: 0,
               estado: "pendiente",
@@ -327,6 +406,7 @@ const syncLiquidacionesPeriodo = async (mes, anio) => {
           conceptosActualizados.vacaciones +
           conceptosActualizados.importe_horas_extra +
           conceptosActualizados.importe_horas_extra_100 +
+          conceptosActualizados.adicional +
           conceptosActualizados.importe_feriados -
           conceptosActualizados.adelantos -
           conceptosActualizados.descuento_dias_no_trabajados
@@ -358,6 +438,7 @@ const syncLiquidacionesPeriodo = async (mes, anio) => {
           dias_no_trabajados: conceptosActualizados.dias_no_trabajados,
           descuento_dias_no_trabajados: conceptosActualizados.descuento_dias_no_trabajados,
           adelantos: conceptosActualizados.adelantos,
+          adicional: conceptosActualizados.adicional,
           descuentos: conceptosActualizados.adelantos,
           monto_neto: montoNeto,
           estado,
@@ -558,14 +639,27 @@ router.get("/:id/pdf", async (req, res) => {
 
       const rows = [
         ["Presentismo", formatoMoneda(liquidacion.presentismo)],
-        [`Horas extra 50% (${formatoCantidad(liquidacion.horas_extra_cantidad)} hs)`, formatoMoneda(liquidacion.importe_horas_extra)],
-        [`Horas extra 100% (${formatoCantidad(liquidacion.horas_extra_100_cantidad)} hs)`, formatoMoneda(liquidacion.importe_horas_extra_100)],
-        [`Feriados (${formatoCantidad(liquidacion.feriados_cantidad)} dias)`, formatoMoneda(liquidacion.importe_feriados)],
+        [
+          `Horas extra 50% (${formatoCantidad(liquidacion.horas_extra_cantidad)} hs)`,
+          formatoMoneda(liquidacion.importe_horas_extra),
+        ],
+        [
+          `Horas extra 100% (${formatoCantidad(liquidacion.horas_extra_100_cantidad)} hs)`,
+          formatoMoneda(liquidacion.importe_horas_extra_100),
+        ],
+        [
+          `Feriados (${formatoCantidad(liquidacion.feriados_cantidad)} dias)`,
+          formatoMoneda(liquidacion.importe_feriados),
+        ],
         ["No remunerativo", formatoMoneda(liquidacion.no_remunerativo)],
         ["Aguinaldo", formatoMoneda(liquidacion.aguinaldo)],
         ["Vacaciones", formatoMoneda(liquidacion.vacaciones)],
+        ["Adicional", formatoMoneda(liquidacion.adicional)],
         ["Adelantos", `-${formatoMoneda(liquidacion.adelantos)}`],
-        [`Dias no trabajados (${formatoCantidad(liquidacion.dias_no_trabajados)})`, `-${formatoMoneda(liquidacion.descuento_dias_no_trabajados)}`],
+        [
+          `Dias no trabajados (${formatoCantidad(liquidacion.dias_no_trabajados)})`,
+          `-${formatoMoneda(liquidacion.descuento_dias_no_trabajados)}`,
+        ],
       ]
 
       rows.forEach(([label, value]) => {
@@ -739,6 +833,7 @@ router.post("/", async (req, res) => {
         dias_no_trabajados: 0,
         descuento_dias_no_trabajados: 0,
         adelantos: 0,
+        adicional: 0,
         descuentos: 0,
         monto_neto: importe_horas,
         estado: "pendiente",
@@ -755,6 +850,7 @@ router.post("/", async (req, res) => {
 
     const creada = Array.isArray(data) ? data[0] : data
     getIo()?.emit('liquidaciones:changed')
+    triggerSueldoTxtExport(mes, anio)
     res.status(201).json(mapLiquidacion(creada, 0))
   } catch (err) {
     console.error("❌ Error en try-catch:", err)
@@ -777,13 +873,14 @@ router.put("/:id", async (req, res) => {
       feriados_cantidad,
       dias_no_trabajados,
       adelantos,
+      adicional,
       observaciones,
     } = req.body
 
     // Obtener liquidación actual para recalcular total
     const { data: liquidacion } = await db
       .from("liquidaciones")
-      .select("empleado_id, total_horas, monto_bruto, observaciones, presentismo, horas_extra_cantidad, horas_extra_100_cantidad, no_remunerativo, aguinaldo, vacaciones, feriados_cantidad, dias_no_trabajados, adelantos")
+      .select("empleado_id, total_horas, monto_bruto, observaciones, presentismo, horas_extra_cantidad, horas_extra_100_cantidad, no_remunerativo, aguinaldo, vacaciones, feriados_cantidad, dias_no_trabajados, adelantos, adicional")
       .eq("id", req.params.id)
       .single()
 
@@ -818,6 +915,7 @@ router.put("/:id", async (req, res) => {
       feriados_cantidad: roundMoney(feriados_cantidad ?? conceptosActuales.feriados_cantidad),
       dias_no_trabajados: roundMoney(dias_no_trabajados ?? conceptosActuales.dias_no_trabajados),
       adelantos: roundMoney(adelantos ?? conceptosActuales.adelantos),
+      adicional: roundMoney(adicional ?? conceptosActuales.adicional ?? 0),
     }
 
     const importeHorasExtra = roundMoney(conceptos.horas_extra_cantidad * valorHoraCalculado * 1.5)
@@ -834,19 +932,22 @@ router.put("/:id", async (req, res) => {
       conceptos.vacaciones +
       importeHorasExtra +
       importeHorasExtra100 +
-      importeFeriados -
+      importeFeriados +
+      conceptos.adicional -
       conceptos.adelantos -
       descuentoDiasNoTrabajados
     )
 
     const { nota: notaActual, meta: metaActual } = parseObservacionesData(liquidacion.observaciones)
     const observacionesFinal = String(observaciones ?? notaActual ?? "")
+    // Evitar duplicar 'adicional' en meta cuando se guarda en columna
+    const metaSanitized = { ...metaActual }
     const observacionesPayload = buildObservacionesData(observacionesFinal, {
-      ...metaActual,
+      ...metaSanitized,
       base_manual: total_horas !== undefined || monto_bruto !== undefined
         ? true
-        : metaActual?.base_manual === true,
-      horas_trabajadas_reales: roundMoney(metaActual?.horas_trabajadas_reales ?? liquidacion.total_horas ?? 0),
+        : metaSanitized?.base_manual === true,
+      horas_trabajadas_reales: roundMoney(metaSanitized?.horas_trabajadas_reales ?? liquidacion.total_horas ?? 0),
     })
 
     const { data: pagosExistentes } = await db
@@ -874,6 +975,7 @@ router.put("/:id", async (req, res) => {
         importe_feriados: importeFeriados,
         dias_no_trabajados: conceptos.dias_no_trabajados,
         descuento_dias_no_trabajados: descuentoDiasNoTrabajados,
+        adicional: conceptos.adicional,
         adelantos: conceptos.adelantos,
         descuentos: conceptos.adelantos,
         monto_neto: Math.max(0, total),
@@ -885,6 +987,7 @@ router.put("/:id", async (req, res) => {
 
     if (error) return res.status(400).json({ error: error.message })
     getIo()?.emit('liquidaciones:changed')
+    triggerSueldoTxtExportFromPeriodo(updatedRows[0]?.periodo_inicio)
     res.json(mapLiquidacion(updatedRows[0], 0))
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -895,6 +998,11 @@ router.put("/:id", async (req, res) => {
 router.delete("/:id", async (req, res) => {
   try {
     const liquidacionId = req.params.id
+    const { data: liquidacionAntesDeEliminar } = await db
+      .from("liquidaciones")
+      .select("periodo_inicio")
+      .eq("id", liquidacionId)
+      .single()
     
     // Primero, eliminar todos los pagos asociados
     const { error: errorPagos } = await db
@@ -920,6 +1028,7 @@ router.delete("/:id", async (req, res) => {
     
     console.log("✅ Liquidación eliminada")
     getIo()?.emit('liquidaciones:changed')
+    triggerSueldoTxtExportFromPeriodo(liquidacionAntesDeEliminar?.periodo_inicio)
     res.json({ message: "Liquidación y sus pagos eliminados correctamente" })
   } catch (err) {
     console.error("❌ Error en try-catch DELETE:", err)
@@ -959,7 +1068,7 @@ router.post("/:liquidacion_id/pagos", async (req, res) => {
     // Validar que el monto no exceda el adeudado
     const { data: liquidacion } = await db
       .from("liquidaciones")
-      .select("monto_neto")
+      .select("monto_neto, periodo_inicio")
       .eq("id", liquidacion_id)
       .single()
 
@@ -972,12 +1081,37 @@ router.post("/:liquidacion_id/pagos", async (req, res) => {
       .eq("liquidacion_id", liquidacion_id)
 
     const totalPagado = pagosExistentes ? pagosExistentes.reduce((sum, p) => sum + Number(p.monto || 0), 0) : 0
-    const aDeudarse = Number(liquidacion.monto_neto || 0) - totalPagado
+    const montoNetoNum = Number(liquidacion.monto_neto || 0)
+    const aDeudarseRaw = montoNetoNum - totalPagado
 
-    if (monto > aDeudarse) {
-      return res.status(400).json({
-        error: `Monto excede lo adeudado. A deudarse: ${aDeudarse}`
-      })
+    // Normalizar valores numéricos
+    const montoNum = Number(monto || 0)
+    const aDeudarse = Number.isFinite(aDeudarseRaw) ? Math.round(aDeudarseRaw * 100) / 100 : 0
+
+    // DEBUG: log valores para analizar discrepancias
+    console.log(`[PAGOS] liquidacion_id=${liquidacion_id} monto_neto=${montoNetoNum} totalPagado=${totalPagado} aDeudarse=${aDeudarse} montoRecibido=${montoNum}`)
+
+    // Permitir una pequeña tolerancia por redondeo (hasta 1 centavo)
+    const TOLERANCIA = 0.01
+
+    if (aDeudarse <= TOLERANCIA) {
+      return res.status(400).json({ error: "La liquidación ya no tiene saldo pendiente." })
+    }
+
+    // Si el monto es mayor al adeudado (por error de usuario o intención), lo ajustamos al restante
+    if (montoNum > aDeudarse + TOLERANCIA) {
+      console.info(`[PAGOS] Monto pedido ${montoNum} mayor al restante ${aDeudarse}, se ajustará al restante (liquidacion_id=${liquidacion_id})`)
+    }
+
+    // Si el monto es ligeramente mayor al adeudado por redondeo, ajustarlo al restante
+    let montoFinal = montoNum
+    if (Math.abs(montoNum - aDeudarse) <= TOLERANCIA) {
+      montoFinal = aDeudarse
+    }
+    // Si intentan pagar más que lo adeudado, capear al restante (evita rechazo)
+    if (montoFinal > aDeudarse) {
+      console.info(`[PAGOS] Ajustando monto pedido ${montoFinal} al restante ${aDeudarse} (liquidacion_id=${liquidacion_id})`)
+      montoFinal = aDeudarse
     }
 
     // Crear pago
@@ -986,7 +1120,7 @@ router.post("/:liquidacion_id/pagos", async (req, res) => {
       .insert([
         {
           liquidacion_id,
-          monto,
+          monto: montoFinal,
           medio_pago,
           fecha_pago: fecha || new Date().toISOString().split("T")[0]
         }
@@ -996,6 +1130,13 @@ router.post("/:liquidacion_id/pagos", async (req, res) => {
     if (error) return res.status(400).json({ error: error.message })
 
     getIo()?.emit('liquidaciones:changed')
+    triggerSueldoTxtExportFromPeriodo(liquidacion?.periodo_inicio)
+
+    // Informar si el pago fue ajustado
+    if (montoFinal !== montoNum) {
+      return res.status(201).json({ message: `Pago ajustado a ${montoFinal} (restante)`, data: data[0] })
+    }
+
     res.status(201).json(data[0])
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -1005,11 +1146,27 @@ router.post("/:liquidacion_id/pagos", async (req, res) => {
 // Eliminar pago
 router.delete("/pagos/:id", async (req, res) => {
   try {
+    const { data: pago } = await db
+      .from("pagos_sueldo")
+      .select("liquidacion_id")
+      .eq("id", req.params.id)
+      .single()
+
     const { error } = await db.from("pagos_sueldo").delete().eq("id", req.params.id)
 
     if (error) return res.status(400).json({ error: error.message })
 
     getIo()?.emit('liquidaciones:changed')
+
+    if (pago?.liquidacion_id) {
+      const { data: liq } = await db
+        .from("liquidaciones")
+        .select("periodo_inicio")
+        .eq("id", pago.liquidacion_id)
+        .single()
+      triggerSueldoTxtExportFromPeriodo(liq?.periodo_inicio)
+    }
+
     res.json({ message: "Pago eliminado" })
   } catch (err) {
     res.status(500).json({ error: err.message })

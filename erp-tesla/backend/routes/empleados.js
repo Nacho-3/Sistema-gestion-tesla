@@ -2,6 +2,8 @@ import express from "express"
 import db from "../db.js"
 import { pool } from "../db.js"
 import { getIo } from '../socket.js'
+import path from "path";
+import fs from "fs/promises";
 
 const router = express.Router()
 const TIPOS_EMPLEADO_VALIDOS = ["monotributista", "empleado_dependiente", "no_corresponde"]
@@ -115,6 +117,9 @@ router.post("/", async (req, res) => {
       .select()
 
     if (error) return res.status(400).json({ error: error.message })
+    await ensureEmpleadosFolderExists();
+    await saveEmpleadoFile(data[0]);
+
     getIo()?.emit('empleados:changed')
     res.status(201).json(data[0])
   } catch (err) {
@@ -224,7 +229,10 @@ router.put("/:id", async (req, res) => {
     if (error) return res.status(400).json({ error: error.message })
     if (data.length === 0) return res.status(404).json({ error: "Empleado no encontrado" })
 
-    getIo()?.emit('empleados:changed')
+    // Regenerar archivo del empleado actualizado
+    await saveEmpleadoFile(data[0]);
+
+    getIo()?.emit("empleados:changed")
     res.json(data[0])
   } catch (err) {
     return handleInternalError(res, err, "actualizar_empleado")
@@ -235,63 +243,30 @@ router.put("/:id", async (req, res) => {
 // Si tiene datos asociados, se realiza una baja lógica para preservar el historial.
 router.delete("/:id", async (req, res) => {
   try {
-    const empleadoId = Number(req.params.id)
-    if (!Number.isInteger(empleadoId) || empleadoId <= 0) {
-      return res.status(400).json({ error: "ID de empleado invalido" })
-    }
+    const { id } = req.params
 
-    const empleadoRes = await pool.query(
-      `SELECT id, nombre, apellido FROM empleados WHERE id = $1 LIMIT 1`,
-      [empleadoId]
-    )
+    const { data: empleado, error: empleadoError } = await db
+      .from("empleados")
+      .select("*")
+      .eq("id", id)
+      .single()
 
-    if (empleadoRes.rowCount === 0) {
+    if (empleadoError || !empleado) {
       return res.status(404).json({ error: "Empleado no encontrado" })
     }
 
-    const [horasRes, liqRes] = await Promise.all([
-      pool.query(`SELECT COUNT(*)::int AS c FROM horas WHERE empleado_id = $1`, [empleadoId]),
-      pool.query(`SELECT COUNT(*)::int AS c FROM liquidaciones WHERE empleado_id = $1`, [empleadoId]),
-    ])
+    const { error } = await db.from("empleados").delete().eq("id", id)
 
-    const horasCount = Number(horasRes.rows[0]?.c || 0)
-    const liqCount = Number(liqRes.rows[0]?.c || 0)
-
-    if (horasCount > 0 || liqCount > 0) {
-      const desactivarRes = await pool.query(
-        `UPDATE empleados
-         SET activo = FALSE, updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1
-         RETURNING id, nombre, apellido, activo`,
-        [empleadoId]
-      )
-
-      getIo()?.emit('empleados:changed')
-      return res.json({
-        ok: true,
-        action: "deactivated",
-        message: "El empleado tenía datos asociados y fue dado de baja para preservar el historial.",
-        data: desactivarRes.rows[0],
-        detalle: {
-          horas: horasCount,
-          liquidaciones: liqCount,
-        },
-      })
+    if (error) {
+      return res.status(500).json({ error: "Error al eliminar el empleado." })
     }
 
-    const { data, error } = await db
-      .from("empleados")
-      .delete()
-      .eq("id", empleadoId)
-      .select("id, nombre, apellido")
+    await deleteEmpleadoFolder(empleado);
 
-    if (error) return res.status(400).json({ error: error.message })
-    if (data.length === 0) return res.status(404).json({ error: "Empleado no encontrado" })
-
-    getIo()?.emit('empleados:changed')
-    res.json({ mensaje: "Empleado eliminado", data: data[0] })
+    getIo()?.emit("empleados:changed")
+    res.json({ message: "Empleado eliminado correctamente." })
   } catch (err) {
-    return handleInternalError(res, err, "eliminar_empleado")
+    res.status(500).json({ error: err.message })
   }
 })
 
@@ -320,4 +295,91 @@ router.put("/:id/tarifa", async (req, res) => {
   }
 })
 
+// Generar carpetas y archivos para todos los empleados registrados
+router.post("/generar-archivos", async (req, res) => {
+  try {
+    const { data: empleados, error } = await db
+      .from("empleados")
+      .select("*")
+      .eq("activo", true);
+
+    if (error) {
+      return res.status(500).json({ error: "Error al obtener empleados." });
+    }
+
+    await ensureEmpleadosFolderExists();
+
+    for (const empleado of empleados) {
+      await saveEmpleadoFile(empleado);
+    }
+
+    res.json({ message: "Archivos generados para todos los empleados activos." });
+  } catch (err) {
+    return handleInternalError(res, err, "generar_archivos_empleados");
+  }
+});
+
 export default router
+
+const EMPLEADOS_FOLDER = path.join("C:\\Users\\usuario\\Desktop\\GESTION TESLA", "empleados");
+
+const ensureEmpleadosFolderExists = async () => {
+  await fs.mkdir(EMPLEADOS_FOLDER, { recursive: true });
+};
+
+const saveEmpleadoFile = async (empleado) => {
+  try {
+    const empleadoFolderPath = path.join(EMPLEADOS_FOLDER, `${empleado.nombre}_${empleado.apellido}`);
+    await fs.mkdir(empleadoFolderPath, { recursive: true });
+
+    const empleadoFilePath = path.join(empleadoFolderPath, `${empleado.nombre}_${empleado.apellido}.txt`);
+
+    // Obtener el nombre del grupo
+    let nombreGrupo = "-";
+    if (empleado.grupo_id) {
+      const { data: grupo, error } = await db
+        .from("grupos")
+        .select("nombre")
+        .eq("id", empleado.grupo_id)
+        .single();
+
+      if (!error && grupo) {
+        nombreGrupo = grupo.nombre;
+      }
+    }
+
+    // Formatear la fecha de nacimiento
+    const fechaNacimientoFormateada = empleado.fecha_nacimiento
+      ? new Date(empleado.fecha_nacimiento).toISOString().split("T")[0] // Formato YYYY-MM-DD
+      : "-";
+
+    // Generar contenido del archivo con resumen del empleado
+    const empleadoContent = `Resumen del Empleado:\n\n` +
+      `Nombre: ${empleado.nombre} ${empleado.apellido}\n` +
+      `DNI: ${empleado.dni}\n` +
+      `CUIT: ${empleado.cuit || "-"}\n` +
+      `Fecha de Nacimiento: ${fechaNacimientoFormateada}\n` +
+      `Dirección: ${empleado.direccion || "-"}\n` +
+      `Teléfono: ${empleado.telefono || "-"}\n` +
+      `Tipo: ${empleado.tipo || "-"}\n` +
+      `Alias: ${empleado.alias || "-"}\n` +
+      `Grupo: ${nombreGrupo}\n` +
+      `Valor Hora: $${empleado.valor_hora || 0}`;
+
+    await fs.writeFile(empleadoFilePath, empleadoContent);
+  } catch (error) {
+    console.error("Error al guardar los datos del empleado:", error);
+    throw error;
+  }
+};
+
+const deleteEmpleadoFolder = async (empleado) => {
+  try {
+    const empleadoFolderPath = path.join(EMPLEADOS_FOLDER, `${empleado.nombre}_${empleado.apellido}`);
+    await fs.rm(empleadoFolderPath, { recursive: true, force: true });
+    console.log(`Carpeta del empleado eliminada: ${empleadoFolderPath}`);
+  } catch (error) {
+    console.error("Error al eliminar la carpeta del empleado:", error);
+    throw error;
+  }
+};

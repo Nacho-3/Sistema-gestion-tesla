@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed, watch } from "vue"
+import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
@@ -7,6 +7,7 @@ import socket from '../socket.js'
 // Estado
 const horas = ref([])
 const empleados = ref([])
+const clientes = ref([])
 const obras = ref([])
 const grupos = ref([])
 const loadingHoras = ref(false)
@@ -22,6 +23,15 @@ const showFormRango = ref(false)
 const editingId = ref(null)
 const expandedEmpleadosHoras = ref(new Set())
 const expandedPrestadas = ref(new Set())
+const selectEmpleadoDiariaRef = ref(null)
+const selectEmpleadoRangoRef = ref(null)
+const inputCantidadDiariaRef = ref(null)
+const inputHoraInicioDiariaRef = ref(null)
+
+const ULTIMA_CARGA_STORAGE_KEY = "tesla-horas-ultima-carga"
+let ctrlShortcutArmed = false
+let ctrlShortcutComboUsed = false
+let focoModalDiaria = "empleado"
 
 // Filtros
 const filtroMes = ref(new Date().getMonth() + 1)
@@ -31,29 +41,52 @@ const filtroObra = ref("")
 const nombresMes = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 const ADMIN_GROUP_REGEX = /admin/i
 
-// Formulario carga diaria
-const formDiaria = ref({
+const normalizeToNonSunday = (date) => {
+  const nextDate = new Date(date)
+  if (nextDate.getDay() === 0) {
+    nextDate.setDate(nextDate.getDate() + 1)
+  }
+  return nextDate
+}
+
+const getTodayInputDate = () => {
+  const now = normalizeToNonSunday(new Date())
+  const year = now.getFullYear()
+  const month = String(now.getMonth() + 1).padStart(2, "0")
+  const day = String(now.getDate()).padStart(2, "0")
+  return `${year}-${month}-${day}`
+}
+
+const createEmptyFormDiaria = (overrides = {}) => ({
   empleado_id: "",
+  cliente_id: "",
   obra_id: "",
-  fecha: new Date().toISOString().split("T")[0],
+  fecha: getTodayInputDate(),
   hora_inicio: "",
   hora_fin: "",
   cantidad_horas: "",
+  cantidad_horas_extra: "",
+  cantidad_horas_extra_50: "",
+  cantidad_horas_extra_100: "",
   es_hora_extra: false,
   tipo_hora_extra: "",
   observaciones: "",
   es_prestada: false,
   grupo_origen_id: "",
-  grupo_destino_id: ""
+  grupo_destino_id: "",
+  ...overrides,
 })
 
-// Formulario carga por rango
-const formRango = ref({
+const createEmptyFormRango = (overrides = {}) => ({
   empleado_id: "",
+  cliente_id: "",
   obra_id: "",
-  fecha_desde: new Date().toISOString().split("T")[0],
-  fecha_hasta: new Date().toISOString().split("T")[0],
+  fecha_desde: getTodayInputDate(),
+  fecha_hasta: getTodayInputDate(),
   horas_por_dia: "",
+  cantidad_horas_extra: "",
+  cantidad_horas_extra_50: "",
+  cantidad_horas_extra_100: "",
   hora_inicio: "",
   hora_fin: "",
   es_hora_extra: false,
@@ -61,14 +94,45 @@ const formRango = ref({
   observaciones: "",
   es_prestada: false,
   grupo_origen_id: "",
-  grupo_destino_id: ""
+  grupo_destino_id: "",
+  ...overrides,
 })
+
+// Formulario carga diaria
+const formDiaria = ref(createEmptyFormDiaria())
+
+// Formulario carga por rango
+const formRango = ref(createEmptyFormRango())
 
 // Resumen
 const resumenEmpleado = ref([])
 const resumenObra = ref([])
 const resumenGrupo = ref([])
 const resumenPrestadas = ref([])
+
+const resumenEmpleadoOrdenado = computed(() => {
+  return [...(resumenEmpleado.value || [])].sort((a, b) => {
+    const totalA = Number(a?.total_horas || 0)
+    const totalB = Number(b?.total_horas || 0)
+    return totalB - totalA
+  })
+})
+
+const resumenObraOrdenado = computed(() => {
+  return [...(resumenObra.value || [])].sort((a, b) => {
+    const totalA = Number(a?.total_horas || 0)
+    const totalB = Number(b?.total_horas || 0)
+    return totalB - totalA
+  })
+})
+
+const resumenGrupoOrdenado = computed(() => {
+  return [...(resumenGrupo.value || [])].sort((a, b) => {
+    const totalA = Number(a?.total_horas || 0)
+    const totalB = Number(b?.total_horas || 0)
+    return totalB - totalA
+  })
+})
 
 // Cargar horas
 const loadHoras = async () => {
@@ -93,12 +157,14 @@ const loadHoras = async () => {
 // Cargar datos auxiliares
 const loadDatos = async () => {
   try {
-    const [resEmpleados, resObras, resGrupos] = await Promise.all([
+    const [resEmpleados, resClientes, resObras, resGrupos] = await Promise.all([
       api.getEmpleados(),
+      api.getClientes(),
       api.getObras(),
       api.getGrupos()
     ])
     empleados.value = resEmpleados.data || []
+    clientes.value = resClientes.data || []
     obras.value = resObras.data || []
     grupos.value = resGrupos.data || []
   } catch (err) {
@@ -149,29 +215,102 @@ const isObraAdministrativa = (obra) => {
   return ADMIN_GROUP_REGEX.test(String(obra.nombre || ""))
 }
 
-const obrasNoAdministrativas = computed(() => {
-  return (obras.value || []).filter((obra) => !isObraAdministrativa(obra))
+const compareAlphabetically = (a, b) => {
+  return String(a || "").localeCompare(String(b || ""), "es", { sensitivity: "base" })
+}
+
+const clientesOrdenados = computed(() => {
+  return [...(clientes.value || [])].sort((a, b) => {
+    const labelA = a?.empresa || a?.razon_social || ""
+    const labelB = b?.empresa || b?.razon_social || ""
+    return compareAlphabetically(labelA, labelB)
+  })
 })
+
+const obrasNoAdministrativas = computed(() => {
+  return [...(obras.value || [])]
+    .filter((obra) => !isObraAdministrativa(obra))
+    .sort((a, b) => compareAlphabetically(a?.nombre, b?.nombre))
+})
+
+const getObrasDisponibles = (clienteId) => {
+  const clienteIdNormalizado = String(clienteId || "")
+  return obrasNoAdministrativas.value.filter((obra) => {
+    if (!clienteIdNormalizado) return true
+    return String(obra.cliente_id) === clienteIdNormalizado
+  })
+}
+
+const obrasDisponiblesDiaria = computed(() => getObrasDisponibles(formDiaria.value.cliente_id))
+const obrasDisponiblesRango = computed(() => getObrasDisponibles(formRango.value.cliente_id))
 
 const syncObraDiariaPorEmpleado = () => {
   if (!isEmpleadoAdministrativo(formDiaria.value.empleado_id)) return
+  formDiaria.value.cliente_id = ""
   const obraAdmin = getObraAdministrativaParaEmpleado(formDiaria.value.empleado_id)
   formDiaria.value.obra_id = obraAdmin ? obraAdmin.id : ""
 }
 
 const syncObraRangoPorEmpleado = () => {
   if (!isEmpleadoAdministrativo(formRango.value.empleado_id)) return
+  formRango.value.cliente_id = ""
   const obraAdmin = getObraAdministrativaParaEmpleado(formRango.value.empleado_id)
   formRango.value.obra_id = obraAdmin ? obraAdmin.id : ""
 }
 
 watch(() => formDiaria.value.empleado_id, syncObraDiariaPorEmpleado)
 watch(() => formRango.value.empleado_id, syncObraRangoPorEmpleado)
-watch(() => formDiaria.value.tipo_hora_extra, (value) => {
-  formDiaria.value.es_hora_extra = Boolean(value)
+watch(() => formDiaria.value.cliente_id, (clienteId) => {
+  const obraActual = obras.value.find((obra) => String(obra.id) === String(formDiaria.value.obra_id))
+  if (obraActual && clienteId && String(obraActual.cliente_id) !== String(clienteId)) {
+    formDiaria.value.obra_id = ""
+  }
 })
-watch(() => formRango.value.tipo_hora_extra, (value) => {
-  formRango.value.es_hora_extra = Boolean(value)
+watch(() => formRango.value.cliente_id, (clienteId) => {
+  const obraActual = obras.value.find((obra) => String(obra.id) === String(formRango.value.obra_id))
+  if (obraActual && clienteId && String(obraActual.cliente_id) !== String(clienteId)) {
+    formRango.value.obra_id = ""
+  }
+})
+watch(() => formDiaria.value.obra_id, (obraId) => {
+  const obra = obras.value.find((item) => String(item.id) === String(obraId))
+  if (obra?.cliente_id) formDiaria.value.cliente_id = obra.cliente_id
+})
+watch(() => formRango.value.obra_id, (obraId) => {
+  const obra = obras.value.find((item) => String(item.id) === String(obraId))
+  if (obra?.cliente_id) formRango.value.cliente_id = obra.cliente_id
+})
+const syncExtraState = (formValue) => {
+  const extra50 = parseNumeroHoras(formValue.cantidad_horas_extra_50) || 0
+  const extra100 = parseNumeroHoras(formValue.cantidad_horas_extra_100) || 0
+  const totalExtra = Math.round((extra50 + extra100) * 100) / 100
+
+  formValue.es_hora_extra = totalExtra > 0
+  formValue.cantidad_horas_extra = totalExtra > 0 ? String(totalExtra) : ""
+  formValue.tipo_hora_extra = extra100 > 0 && extra50 === 0 ? "100" : (extra50 > 0 ? "50" : "")
+}
+
+watch(() => formDiaria.value.fecha, (fecha) => {
+  if (esDomingo(fecha)) {
+    const fechaAjustada = parseLocalDate(fecha)
+    fechaAjustada.setDate(fechaAjustada.getDate() + 1)
+    formDiaria.value.fecha = formatLocalDate(fechaAjustada)
+    error.value = "Los domingos no se cargan. La fecha se ajustó automáticamente al lunes."
+    return
+  }
+
+  if (!esSabado(fecha)) {
+    formDiaria.value.cantidad_horas_extra_100 = ""
+    syncExtraState(formDiaria.value)
+  }
+})
+
+watch(() => [formDiaria.value.cantidad_horas_extra_50, formDiaria.value.cantidad_horas_extra_100], () => {
+  syncExtraState(formDiaria.value)
+})
+watch(() => [formRango.value.cantidad_horas_extra_50, formRango.value.cantidad_horas_extra_100], () => {
+  formRango.value.cantidad_horas_extra_100 = ""
+  syncExtraState(formRango.value)
 })
 
 // Cargar resúmenes
@@ -210,28 +349,22 @@ const loadResumenes = async () => {
 const openModalDiaria = (hora = null) => {
   if (hora) {
     editingId.value = hora.id
+    focoModalDiaria = "cantidad"
+    const tipoExtraActual = hora.es_hora_extra ? (hora.tipo_hora_extra || (hora.tipo === "extra_100" ? "100" : "50")) : ""
     formDiaria.value = {
       ...hora,
-      tipo_hora_extra: hora.es_hora_extra ? (hora.tipo_hora_extra || (hora.tipo === "extra_100" ? "100" : "50")) : "",
+      cliente_id: hora.cliente_id || "",
+      cantidad_horas_extra: hora.es_hora_extra ? Number(hora.cantidad_horas || 0) : "",
+      cantidad_horas_extra_50: tipoExtraActual === "50" ? Number(hora.cantidad_horas || 0) : "",
+      cantidad_horas_extra_100: tipoExtraActual === "100" ? Number(hora.cantidad_horas || 0) : "",
+      tipo_hora_extra: tipoExtraActual,
     }
     modoDiaria.value = (hora.hora_inicio && hora.hora_fin) ? "horario" : "cantidad"
   } else {
     editingId.value = null
+    focoModalDiaria = "empleado"
     modoDiaria.value = "cantidad"
-    formDiaria.value = {
-      empleado_id: "",
-      obra_id: "",
-      fecha: new Date().toISOString().split("T")[0],
-      hora_inicio: "",
-      hora_fin: "",
-      cantidad_horas: "",
-      es_hora_extra: false,
-      tipo_hora_extra: "",
-      observaciones: "",
-      es_prestada: false,
-      grupo_origen_id: "",
-      grupo_destino_id: ""
-    }
+    formDiaria.value = createEmptyFormDiaria()
   }
   showFormDiaria.value = true
 }
@@ -241,27 +374,270 @@ const closeModalDiaria = () => {
   showFormDiaria.value = false
   editingId.value = null
   modoDiaria.value = "cantidad"
+  formDiaria.value = createEmptyFormDiaria()
 }
 
 // Cerrar modal de carga por rango
 const closeModalRango = () => {
   showFormRango.value = false
   modoRango.value = "cantidad"
-  formRango.value = {
-    empleado_id: "",
-    obra_id: "",
-    fecha_desde: new Date().toISOString().split("T")[0],
-    fecha_hasta: new Date().toISOString().split("T")[0],
-    horas_por_dia: "",
-    hora_inicio: "",
-    hora_fin: "",
-    es_hora_extra: false,
-    tipo_hora_extra: "",
-    observaciones: "",
-    es_prestada: false,
-    grupo_origen_id: "",
-    grupo_destino_id: ""
+  formRango.value = createEmptyFormRango()
+}
+
+const parseNumeroHoras = (value) => {
+  if (value === "" || value === null || value === undefined) return null
+  if (typeof value === "number") return Number.isFinite(value) ? value : null
+  const raw = String(value).trim()
+  if (!raw) return null
+  const normalizado = raw.includes(",")
+    ? raw.replace(/\./g, "").replace(",", ".")
+    : raw
+  const numero = Number(normalizado)
+  return Number.isFinite(numero) ? numero : null
+}
+
+const parseLocalDate = (dateStr) => {
+  if (!dateStr) return null
+  const [year, month, day] = String(dateStr).split("-").map(Number)
+  if (!year || !month || !day) return null
+  return new Date(year, month - 1, day)
+}
+
+const formatLocalDate = (date) => {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, "0")
+  const day = String(date.getDate()).padStart(2, "0")
+  return `${year}-${month}-${day}`
+}
+
+const getDateObject = (dateValue) => {
+  if (!dateValue) return null
+  if (typeof dateValue === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateValue)) {
+    return parseLocalDate(dateValue)
   }
+  const parsed = new Date(dateValue)
+  return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
+const getProximaFechaPorRegistros = (registros = []) => {
+  const fechasValidas = (registros || [])
+    .map((item) => getDateObject(item?.fecha))
+    .filter(Boolean)
+
+  if (!fechasValidas.length) return getTodayInputDate()
+
+  const fechaMasAlta = new Date(Math.max(...fechasValidas.map((fecha) => fecha.getTime())))
+  fechaMasAlta.setDate(fechaMasAlta.getDate() + 1)
+  return formatLocalDate(normalizeToNonSunday(fechaMasAlta))
+}
+
+const getUltimaCargaGuardada = () => {
+  if (typeof window === "undefined") return null
+
+  try {
+    const raw = window.localStorage.getItem(ULTIMA_CARGA_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return parsed && parsed.empleado_id ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+const ultimaCargaRapida = ref(getUltimaCargaGuardada())
+
+const guardarUltimaCargaRapida = ({ empleado_id, cliente_id, obra_id, fecha }) => {
+  const payload = {
+    empleado_id: empleado_id || "",
+    cliente_id: cliente_id || "",
+    obra_id: obra_id || "",
+    fecha: fecha || getTodayInputDate(),
+  }
+
+  ultimaCargaRapida.value = payload
+
+  if (typeof window !== "undefined") {
+    window.localStorage.setItem(ULTIMA_CARGA_STORAGE_KEY, JSON.stringify(payload))
+  }
+}
+
+const abrirCargaRapidaConDatos = ({ empleado_id, cliente_id, obra_id, fecha }) => {
+  activeTab.value = "carga"
+  modalidadCarga.value = "diaria"
+  showFormRango.value = false
+  error.value = ""
+  editingId.value = null
+  modoDiaria.value = "cantidad"
+  focoModalDiaria = "cantidad"
+
+  const fechaBase = getDateObject(fecha) || new Date()
+  fechaBase.setDate(fechaBase.getDate() + 1)
+
+  formDiaria.value = createEmptyFormDiaria({
+    empleado_id: empleado_id || "",
+    cliente_id: cliente_id || "",
+    obra_id: obra_id || "",
+    fecha: formatLocalDate(normalizeToNonSunday(fechaBase)),
+  })
+
+  syncObraDiariaPorEmpleado()
+  showFormDiaria.value = true
+}
+
+const abrirCargaRapidaUltimoEmpleado = () => {
+  const ultimoGuardado = ultimaCargaRapida.value
+
+  if (ultimoGuardado?.empleado_id) {
+    abrirCargaRapidaConDatos(ultimoGuardado)
+    return
+  }
+
+  const ultimaHora = [...(horas.value || [])]
+    .sort((a, b) => (getDateObject(b.fecha)?.getTime() || 0) - (getDateObject(a.fecha)?.getTime() || 0))[0]
+
+  if (ultimaHora?.empleado_id) {
+    abrirCargaRapidaConDatos(ultimaHora)
+    return
+  }
+
+  openModalDiaria()
+}
+
+const abrirCargaRapidaEmpleado = (grupo) => {
+  const ultimoRegistro = Array.isArray(grupo?.registros) && grupo.registros.length > 0
+    ? grupo.registros[0]
+    : null
+
+  guardarUltimaCargaRapida({
+    empleado_id: grupo?.empleado_id && grupo.empleado_id !== "sin_empleado" ? grupo.empleado_id : "",
+    cliente_id: ultimoRegistro?.cliente_id || "",
+    obra_id: ultimoRegistro?.obra_id || "",
+    fecha: ultimoRegistro?.fecha || getTodayInputDate(),
+  })
+
+  abrirCargaRapidaConDatos({
+    empleado_id: grupo?.empleado_id && grupo.empleado_id !== "sin_empleado" ? grupo.empleado_id : "",
+    cliente_id: ultimoRegistro?.cliente_id || "",
+    obra_id: ultimoRegistro?.obra_id || "",
+    fecha: ultimoRegistro?.fecha || getTodayInputDate(),
+  })
+}
+
+const calcularHorasDesdeHorario = (horaInicio, horaFin) => {
+  if (!horaInicio || !horaFin) return 0
+  const inicio = new Date(`2000-01-01T${horaInicio}`)
+  const fin = new Date(`2000-01-01T${horaFin}`)
+  const diferencia = (fin - inicio) / (1000 * 60 * 60)
+  return Number.isFinite(diferencia) && diferencia > 0 ? diferencia : 0
+}
+
+const esSabado = (fechaStr) => {
+  const fecha = parseLocalDate(fechaStr)
+  return Boolean(fecha) && fecha.getDay() === 6
+}
+
+const esDomingo = (fechaStr) => {
+  const fecha = parseLocalDate(fechaStr)
+  return Boolean(fecha) && fecha.getDay() === 0
+}
+
+const esSabadoDiaria = computed(() => esSabado(formDiaria.value.fecha))
+
+const validarDistribucionHorasExtra = (totalHoras, horasExtra50, horasExtra100) => {
+  const extra50 = horasExtra50 === "" || horasExtra50 === null || horasExtra50 === undefined ? 0 : parseNumeroHoras(horasExtra50)
+  const extra100 = horasExtra100 === "" || horasExtra100 === null || horasExtra100 === undefined ? 0 : parseNumeroHoras(horasExtra100)
+
+  if (horasExtra50 !== "" && horasExtra50 !== null && horasExtra50 !== undefined && (!Number.isFinite(extra50) || extra50 < 0)) {
+    return "Las horas extra al 50% deben ser 0 o mayores"
+  }
+
+  if (horasExtra100 !== "" && horasExtra100 !== null && horasExtra100 !== undefined && (!Number.isFinite(extra100) || extra100 < 0)) {
+    return "Las horas extra al 100% deben ser 0 o mayores"
+  }
+
+  if ((extra50 + extra100) > totalHoras) {
+    return "La suma de las horas extra (50% + 100%) no puede superar el total cargado"
+  }
+
+  return ""
+}
+
+const focusPrimerCampoDiaria = () => {
+  nextTick(() => {
+    if (focoModalDiaria === "cantidad") {
+      if (modoDiaria.value === "horario") {
+        inputHoraInicioDiariaRef.value?.focus()
+      } else {
+        inputCantidadDiariaRef.value?.focus()
+      }
+      return
+    }
+
+    selectEmpleadoDiariaRef.value?.focus()
+  })
+}
+
+watch(showFormDiaria, (visible) => {
+  if (visible) focusPrimerCampoDiaria()
+})
+
+watch(showFormRango, (visible) => {
+  if (visible) {
+    nextTick(() => selectEmpleadoRangoRef.value?.focus())
+  }
+})
+
+const isEditableTarget = (target) => {
+  const tagName = String(target?.tagName || "").toUpperCase()
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(tagName) || target?.isContentEditable === true
+}
+
+const handleKeyboardShortcutDown = (event) => {
+  if ((showFormDiaria.value || showFormRango.value) && (event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault()
+    if (showFormDiaria.value) saveHoraDiaria()
+    if (showFormRango.value) saveHoraRango()
+    return
+  }
+
+  if ((showFormDiaria.value || showFormRango.value) && event.key === "Escape") {
+    event.preventDefault()
+    if (showFormDiaria.value) closeModalDiaria()
+    if (showFormRango.value) closeModalRango()
+    return
+  }
+
+  if (isEditableTarget(event.target)) return
+
+  if (event.ctrlKey && event.shiftKey && (event.key === "Control" || event.key === "Shift")) {
+    event.preventDefault()
+    ctrlShortcutArmed = false
+    ctrlShortcutComboUsed = true
+    abrirCargaRapidaUltimoEmpleado()
+    return
+  }
+
+  if (event.key === "Control" && !event.shiftKey && !event.altKey && !event.metaKey) {
+    ctrlShortcutArmed = true
+    ctrlShortcutComboUsed = false
+    return
+  }
+
+  if (ctrlShortcutArmed && event.key !== "Control") {
+    ctrlShortcutComboUsed = true
+  }
+}
+
+const handleKeyboardShortcutUp = (event) => {
+  if (event.key !== "Control") return
+
+  if (ctrlShortcutArmed && !ctrlShortcutComboUsed && !showFormDiaria.value && !showFormRango.value && !isEditableTarget(event.target)) {
+    event.preventDefault()
+    openModalDiaria()
+  }
+
+  ctrlShortcutArmed = false
+  ctrlShortcutComboUsed = false
 }
 
 // Guardar hora diaria
@@ -282,6 +658,11 @@ const saveHoraDiaria = async () => {
     return
   }
 
+  if (esDomingo(formDiaria.value.fecha)) {
+    error.value = "No se pueden registrar horas los domingos"
+    return
+  }
+
   if (modoDiaria.value === "cantidad" && !formDiaria.value.cantidad_horas) {
     error.value = "Ingresá la cantidad de horas"
     return
@@ -296,17 +677,44 @@ const saveHoraDiaria = async () => {
     return
   }
 
+  const totalHorasDiaria = modoDiaria.value === "cantidad"
+    ? (parseNumeroHoras(formDiaria.value.cantidad_horas) || 0)
+    : calcularHorasDesdeHorario(formDiaria.value.hora_inicio, formDiaria.value.hora_fin)
+
+  const horasExtra50Diaria = parseNumeroHoras(formDiaria.value.cantidad_horas_extra_50) || 0
+  const horasExtra100Diaria = parseNumeroHoras(formDiaria.value.cantidad_horas_extra_100) || 0
+  const totalExtraDiaria = Math.round((horasExtra50Diaria + horasExtra100Diaria) * 100) / 100
+
+  const errorHorasExtraDiaria = validarDistribucionHorasExtra(
+    totalHorasDiaria,
+    formDiaria.value.cantidad_horas_extra_50,
+    formDiaria.value.cantidad_horas_extra_100
+  )
+  if (errorHorasExtraDiaria) {
+    error.value = errorHorasExtraDiaria
+    return
+  }
+
+  if (horasExtra100Diaria > 0 && !esSabado(formDiaria.value.fecha)) {
+    error.value = "Las horas extra al 100% corresponden a sábado. Si necesitás combinarlas, usá esta opción en una carga diaria del sábado."
+    return
+  }
+
   saving.value = true
   try {
     const payload = {
       empleado_id: formDiaria.value.empleado_id,
+      cliente_id: formDiaria.value.cliente_id || null,
       obra_id: formDiaria.value.obra_id,
       fecha: formDiaria.value.fecha,
-      cantidad_horas: modoDiaria.value === "cantidad" ? formDiaria.value.cantidad_horas : null,
+      cantidad_horas: modoDiaria.value === "cantidad" ? parseNumeroHoras(formDiaria.value.cantidad_horas) : null,
+      cantidad_horas_extra: totalExtraDiaria > 0 ? totalExtraDiaria : null,
+      cantidad_horas_extra_50: horasExtra50Diaria > 0 ? horasExtra50Diaria : null,
+      cantidad_horas_extra_100: horasExtra100Diaria > 0 ? horasExtra100Diaria : null,
       hora_inicio: modoDiaria.value === "horario" ? formDiaria.value.hora_inicio || null : null,
       hora_fin: modoDiaria.value === "horario" ? formDiaria.value.hora_fin || null : null,
-      es_hora_extra: formDiaria.value.es_hora_extra,
-      tipo_hora_extra: formDiaria.value.es_hora_extra ? formDiaria.value.tipo_hora_extra || "50" : null,
+      es_hora_extra: totalExtraDiaria > 0,
+      tipo_hora_extra: horasExtra100Diaria > 0 && horasExtra50Diaria === 0 ? "100" : (totalExtraDiaria > 0 ? "50" : null),
       observaciones: formDiaria.value.observaciones || "",
       es_prestada: formDiaria.value.es_prestada,
       grupo_origen_id: formDiaria.value.es_prestada ? formDiaria.value.grupo_origen_id : null,
@@ -318,6 +726,14 @@ const saveHoraDiaria = async () => {
     } else {
       await api.createHora(payload)
     }
+
+    guardarUltimaCargaRapida({
+      empleado_id: payload.empleado_id,
+      cliente_id: payload.cliente_id,
+      obra_id: payload.obra_id,
+      fecha: payload.fecha,
+    })
+
     await loadHoras()
     closeModalDiaria()
   } catch (err) {
@@ -356,7 +772,10 @@ const saveHoraRango = async () => {
     return
   }
 
-  if (new Date(formRango.value.fecha_desde) > new Date(formRango.value.fecha_hasta)) {
+  const fechaDesdeLocal = parseLocalDate(formRango.value.fecha_desde)
+  const fechaHastaLocal = parseLocalDate(formRango.value.fecha_hasta)
+
+  if (!fechaDesdeLocal || !fechaHastaLocal || fechaDesdeLocal > fechaHastaLocal) {
     error.value = "La fecha inicial debe ser menor a la fecha final"
     return
   }
@@ -366,28 +785,55 @@ const saveHoraRango = async () => {
     return
   }
 
+  const totalHorasRango = modoRango.value === "cantidad"
+    ? (parseNumeroHoras(formRango.value.horas_por_dia) || 0)
+    : calcularHorasDesdeHorario(formRango.value.hora_inicio, formRango.value.hora_fin)
+
+  const horasExtra50Rango = parseNumeroHoras(formRango.value.cantidad_horas_extra_50) || 0
+  const horasExtra100Rango = parseNumeroHoras(formRango.value.cantidad_horas_extra_100) || 0
+  const totalExtraRango = Math.round((horasExtra50Rango + horasExtra100Rango) * 100) / 100
+
+  const errorHorasExtraRango = validarDistribucionHorasExtra(
+    totalHorasRango,
+    formRango.value.cantidad_horas_extra_50,
+    formRango.value.cantidad_horas_extra_100
+  )
+  if (errorHorasExtraRango) {
+    error.value = errorHorasExtraRango
+    return
+  }
+
+  if (horasExtra100Rango > 0) {
+    error.value = "La carga por rango genera días hábiles (lunes a viernes). Las horas al 100% del sábado cargalas desde Carga diaria."
+    return
+  }
+
   saving.value = true
   try {
     // Generar registros de horas automáticamente
-    const fechaInicio = new Date(formRango.value.fecha_desde)
-    const fechaFin = new Date(formRango.value.fecha_hasta)
+    const fechaInicio = parseLocalDate(formRango.value.fecha_desde)
+    const fechaFin = parseLocalDate(formRango.value.fecha_hasta)
     let fechaActual = new Date(fechaInicio)
 
     while (fechaActual <= fechaFin) {
-      const fechaStr = fechaActual.toISOString().split("T")[0]
+      const fechaStr = formatLocalDate(fechaActual)
       // Solo registrar de lunes a viernes (día 1-5)
       const dia = fechaActual.getDay()
       if (dia !== 0 && dia !== 6) {
         // no es domingo ni sábado
         await api.createHora({
           empleado_id: formRango.value.empleado_id,
+          cliente_id: formRango.value.cliente_id || null,
           obra_id: formRango.value.obra_id,
           fecha: fechaStr,
-          cantidad_horas: modoRango.value === "cantidad" ? parseFloat(formRango.value.horas_por_dia) : null,
+          cantidad_horas: modoRango.value === "cantidad" ? parseNumeroHoras(formRango.value.horas_por_dia) : null,
+          cantidad_horas_extra: totalExtraRango > 0 ? totalExtraRango : null,
+          cantidad_horas_extra_50: horasExtra50Rango > 0 ? horasExtra50Rango : null,
+          cantidad_horas_extra_100: horasExtra100Rango > 0 ? horasExtra100Rango : null,
           hora_inicio: modoRango.value === "horario" ? formRango.value.hora_inicio || null : null,
           hora_fin: modoRango.value === "horario" ? formRango.value.hora_fin || null : null,
-          es_hora_extra: formRango.value.es_hora_extra,
-          tipo_hora_extra: formRango.value.es_hora_extra ? formRango.value.tipo_hora_extra || "50" : null,
+          es_hora_extra: totalExtraRango > 0,
+          tipo_hora_extra: totalExtraRango > 0 ? "50" : null,
           es_prestada: formRango.value.es_prestada,
           grupo_origen_id: formRango.value.es_prestada ? formRango.value.grupo_origen_id : null,
           grupo_destino_id: formRango.value.es_prestada ? formRango.value.grupo_destino_id : null
@@ -395,6 +841,13 @@ const saveHoraRango = async () => {
       }
       fechaActual.setDate(fechaActual.getDate() + 1)
     }
+
+    guardarUltimaCargaRapida({
+      empleado_id: formRango.value.empleado_id,
+      cliente_id: formRango.value.cliente_id || null,
+      obra_id: formRango.value.obra_id || null,
+      fecha: formRango.value.fecha_hasta,
+    })
 
     await loadHoras()
     closeModalRango()
@@ -430,23 +883,45 @@ const getNombreEmpleado = (empleadoId) => {
   return emp ? `${emp.nombre} ${emp.apellido}` : "-"
 }
 
+const getNombreCliente = (clienteId) => {
+  if (!clienteId) return "Sin cliente"
+  const cliente = clientes.value.find((c) => String(c.id) === String(clienteId))
+  return cliente?.empresa || cliente?.razon_social || "Sin cliente"
+}
+
 const getNombreObra = (obraId) => {
   if (!obraId) return "Sin obra"
   const obra = obras.value.find((o) => String(o.id) === String(obraId))
   if (!obra) return "Sin obra"
-  return isObraAdministrativa(obra) ? "Administración" : obra.nombre
+  return isObraAdministrativa(obra) ? "Administracion" : obra.nombre
+}
+
+const getEtiquetaObraClienteResumen = (item) => {
+  const nombreObra = item?.obra_nombre || getNombreObra(item?.obra_id)
+  if (!item?.obra_id || nombreObra === "Administracion" || nombreObra === "Sin obra") {
+    return nombreObra
+  }
+
+  const obra = obras.value.find((o) => String(o.id) === String(item.obra_id))
+  if (!obra?.cliente_id) return nombreObra
+
+  const nombreCliente = getNombreCliente(obra.cliente_id)
+  if (!nombreCliente || nombreCliente === "Sin cliente") return nombreObra
+
+  return `${nombreObra} - ${nombreCliente}`
 }
 
 const getNombreObraRegistro = (hora) => {
+  const clienteNombre = hora?.cliente_id ? getNombreCliente(hora.cliente_id) : ""
   if (!hora?.obra_id) return "Sin obra"
   const obra = obras.value.find((o) => String(o.id) === String(hora?.obra_id))
   if (!obra) return "Sin obra"
 
   if (isObraAdministrativa(obra) && isEmpleadoAdministrativo(hora?.empleado_id)) {
-    return "Administración"
+    return "Administracion"
   }
 
-  return obra.nombre
+  return clienteNombre ? `${clienteNombre} / ${obra.nombre}` : obra.nombre
 }
 
 const getNombreGrupo = (grupoId) => {
@@ -456,7 +931,8 @@ const getNombreGrupo = (grupoId) => {
 
 const formatearFecha = (fecha) => {
   if (!fecha) return "-"
-  return new Date(fecha).toLocaleDateString("es-AR")
+  const date = getDateObject(fecha)
+  return date ? date.toLocaleDateString("es-AR") : "-"
 }
 
 const getCantidadHoras = (hora) => {
@@ -490,10 +966,20 @@ const horasAgrupadasPorEmpleado = computed(() => {
   }
 
   return Array.from(grupos.values())
-    .map((grupo) => ({
-      ...grupo,
-      registros: grupo.registros.sort((a, b) => new Date(b.fecha) - new Date(a.fecha))
-    }))
+    .map((grupo) => {
+      const registrosOrdenados = [...grupo.registros].sort((a, b) => {
+        const fechaB = getDateObject(b.fecha)?.getTime() || 0
+        const fechaA = getDateObject(a.fecha)?.getTime() || 0
+        return fechaB - fechaA
+      })
+
+      return {
+        ...grupo,
+        registros: registrosOrdenados,
+        ultimaFecha: registrosOrdenados[0]?.fecha || null,
+        proximaFecha: getProximaFechaPorRegistros(registrosOrdenados),
+      }
+    })
     .sort((a, b) => a.empleado.localeCompare(b.empleado, "es", { sensitivity: "base" }))
 })
 
@@ -574,9 +1060,13 @@ const aplicarFiltros = async () => {
 onMounted(async () => {
   await loadDatos()
   await loadHoras()
+  window.addEventListener("keydown", handleKeyboardShortcutDown)
+  window.addEventListener("keyup", handleKeyboardShortcutUp)
   socket.on('horas:changed', loadHoras)
 })
 onUnmounted(() => {
+  window.removeEventListener("keydown", handleKeyboardShortcutDown)
+  window.removeEventListener("keyup", handleKeyboardShortcutUp)
   socket.off('horas:changed', loadHoras)
 })
 </script>
@@ -628,6 +1118,15 @@ onUnmounted(() => {
             <button class="btn-primary" @click="openModalDiaria()">
               + Registrar hora
             </button>
+          </div>
+
+          <div class="atajos-bar">
+            <span><strong>⌨️ Atajos:</strong></span>
+            <span><kbd>Ctrl</kbd> nueva carga</span>
+            <span><kbd>Ctrl</kbd> + <kbd>Shift</kbd> cargar de nuevo al último empleado</span>
+            <span><kbd>Tab</kbd> / <kbd>Shift</kbd> + <kbd>Tab</kbd> navegar</span>
+            <span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> guardar</span>
+            <span><kbd>Esc</kbd> cerrar</span>
           </div>
 
           <!-- Filtros -->
@@ -692,23 +1191,33 @@ onUnmounted(() => {
               :key="grupo.empleado_id"
               class="acordeon-item"
             >
-              <button class="acordeon-header" @click="toggleEmpleadoHoras(grupo.empleado_id)">
-                <div class="acordeon-titulo">
-                  <span class="flecha" :class="{ abierta: expandedEmpleadosHoras.has(grupo.empleado_id) }">▶</span>
-                  <span>{{ grupo.empleado }}</span>
-                </div>
-                <div class="acordeon-meta">
-                  <span>{{ grupo.registros.length }} registros</span>
-                  <span>{{ grupo.totalHoras.toFixed(2) }} hs</span>
-                </div>
-              </button>
+              <div class="acordeon-header">
+                <button class="acordeon-toggle" @click="toggleEmpleadoHoras(grupo.empleado_id)">
+                  <div class="acordeon-titulo">
+                    <span class="flecha" :class="{ abierta: expandedEmpleadosHoras.has(grupo.empleado_id) }">▶</span>
+                    <span>{{ grupo.empleado }}</span>
+                  </div>
+                  <div class="acordeon-meta">
+                    <span>{{ grupo.registros.length }} registros</span>
+                    <span>{{ grupo.totalHoras.toFixed(2) }} hs</span>
+                    <span v-if="grupo.ultimaFecha">Último: {{ formatearFecha(grupo.ultimaFecha) }}</span>
+                  </div>
+                </button>
+                <button
+                  v-if="grupo.empleado_id !== 'sin_empleado'"
+                  class="btn-recarga"
+                  @click="abrirCargaRapidaEmpleado(grupo)"
+                >
+                  + Cargar de nuevo
+                </button>
+              </div>
 
               <div v-if="expandedEmpleadosHoras.has(grupo.empleado_id)" class="acordeon-body">
                 <div class="horas-table">
                   <table>
                     <thead>
                       <tr>
-                        <th>Obra</th>
+                        <th>Cliente / Obra</th>
                         <th>Fecha</th>
                         <th>Horas</th>
                         <th>Tipo</th>
@@ -717,7 +1226,7 @@ onUnmounted(() => {
                     </thead>
                     <tbody>
                       <tr v-for="hora in grupo.registros" :key="hora.id">
-                        <td>{{ getNombreObra(hora.obra_id) }}</td>
+                        <td>{{ hora.obra_id ? getNombreObraRegistro(hora) : getNombreCliente(hora.cliente_id) }}</td>
                         <td>{{ formatearFecha(hora.fecha) }}</td>
                         <td>{{ getCantidadHoras(hora).toFixed(2) }}</td>
                         <td>
@@ -832,7 +1341,7 @@ onUnmounted(() => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(emp, idx) in resumenEmpleado" :key="idx">
+                <tr v-for="(emp, idx) in resumenEmpleadoOrdenado" :key="idx">
                   <td>{{ emp.empleado || "-" }}</td>
                   <td>{{ emp.total_horas?.toFixed(2) || 0 }}</td>
                 </tr>
@@ -854,8 +1363,8 @@ onUnmounted(() => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(obra, idx) in resumenObra" :key="idx">
-                  <td>{{ obra.obra_nombre || getNombreObra(obra.obra_id) }}</td>
+                <tr v-for="(obra, idx) in resumenObraOrdenado" :key="idx">
+                  <td>{{ getEtiquetaObraClienteResumen(obra) }}</td>
                   <td>{{ obra.total_horas?.toFixed(2) || 0 }}</td>
                 </tr>
               </tbody>
@@ -876,7 +1385,7 @@ onUnmounted(() => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(grupo, idx) in resumenGrupo" :key="idx">
+                <tr v-for="(grupo, idx) in resumenGrupoOrdenado" :key="idx">
                   <td>{{ getNombreGrupo(grupo.grupo_id) }}</td>
                   <td>{{ grupo.total_horas?.toFixed(2) || 0 }}</td>
                 </tr>
@@ -947,7 +1456,7 @@ onUnmounted(() => {
           <form @submit.prevent="saveHoraDiaria" class="modal-form">
             <label class="form-group">
               <span>Empleado *</span>
-              <select v-model="formDiaria.empleado_id" required>
+              <select ref="selectEmpleadoDiariaRef" v-model="formDiaria.empleado_id" required>
                 <option value="">Seleccionar empleado...</option>
                 <option v-for="emp in empleados" :key="emp.id" :value="emp.id">
                   {{ emp.nombre }} {{ emp.apellido }}
@@ -956,17 +1465,27 @@ onUnmounted(() => {
             </label>
 
             <label v-if="!isEmpleadoAdministrativo(formDiaria.empleado_id)" class="form-group">
+              <span>Cliente</span>
+              <select v-model="formDiaria.cliente_id">
+                <option value="">Sin cliente</option>
+                <option v-for="cliente in clientesOrdenados" :key="cliente.id" :value="cliente.id">
+                  {{ cliente.empresa || cliente.razon_social }}
+                </option>
+              </select>
+            </label>
+
+            <label v-if="!isEmpleadoAdministrativo(formDiaria.empleado_id)" class="form-group">
               <span>Obra</span>
               <select v-model="formDiaria.obra_id">
                 <option value="">Sin obra</option>
-                <option v-for="obra in obrasNoAdministrativas" :key="obra.id" :value="obra.id">
+                <option v-for="obra in obrasDisponiblesDiaria" :key="obra.id" :value="obra.id">
                   {{ obra.nombre }}
                 </option>
               </select>
             </label>
 
             <div v-else class="info-rango">
-              Obra: <strong>Administración</strong>
+              Obra: <strong>Administracion</strong>
             </div>
 
             <label class="form-group">
@@ -988,9 +1507,10 @@ onUnmounted(() => {
             <label v-if="modoDiaria === 'cantidad'" class="form-group">
               <span>Cantidad de horas *</span>
               <input
-                v-model.number="formDiaria.cantidad_horas"
-                type="number"
-                step="0.5"
+                ref="inputCantidadDiariaRef"
+                v-model="formDiaria.cantidad_horas"
+                type="text"
+                inputmode="decimal"
                 placeholder="Ej: 8"
               />
             </label>
@@ -998,7 +1518,7 @@ onUnmounted(() => {
             <div v-if="modoDiaria === 'horario'" class="form-row">
               <label class="form-group">
                 <span>Hora inicio *</span>
-                <input v-model="formDiaria.hora_inicio" type="time" />
+                <input ref="inputHoraInicioDiariaRef" v-model="formDiaria.hora_inicio" type="time" />
               </label>
               <label class="form-group">
                 <span>Hora fin *</span>
@@ -1006,14 +1526,36 @@ onUnmounted(() => {
               </label>
             </div>
 
-            <label class="form-group">
-              <span>Tipo de horas extra</span>
-              <select v-model="formDiaria.tipo_hora_extra">
-                <option value="">No corresponde</option>
-                <option value="50">Hora extra al 50%</option>
-                <option value="100">Hora extra al 100%</option>
-              </select>
-            </label>
+            <div class="form-row">
+              <label class="form-group">
+                <span>Horas extra al 50%</span>
+                <input
+                  v-model="formDiaria.cantidad_horas_extra_50"
+                  type="text"
+                  inputmode="decimal"
+                  placeholder="Ej: 1"
+                />
+              </label>
+
+              <label v-if="esSabadoDiaria" class="form-group">
+                <span>Horas extra al 100%</span>
+                <input
+                  v-model="formDiaria.cantidad_horas_extra_100"
+                  type="text"
+                  inputmode="decimal"
+                  placeholder="Ej: 2"
+                />
+              </label>
+            </div>
+
+            <div class="info-rango">
+              <template v-if="esSabadoDiaria">
+                Podés separar en la misma carga cuántas horas van al <strong>50%</strong> y cuántas al <strong>100%</strong>.
+              </template>
+              <template v-else>
+                Para este día solo se habilitan <strong>horas extra al 50%</strong>. Las horas al <strong>100%</strong> se cargan únicamente en <strong>sábados</strong>.
+              </template>
+            </div>
 
             <label class="form-group checkbox">
               <input v-model="formDiaria.es_prestada" type="checkbox" />
@@ -1074,7 +1616,7 @@ onUnmounted(() => {
           <form @submit.prevent="saveHoraRango" class="modal-form">
             <label class="form-group">
               <span>Empleado *</span>
-              <select v-model="formRango.empleado_id" required>
+              <select ref="selectEmpleadoRangoRef" v-model="formRango.empleado_id" required>
                 <option value="">Seleccionar empleado...</option>
                 <option v-for="emp in empleados" :key="emp.id" :value="emp.id">
                   {{ emp.nombre }} {{ emp.apellido }}
@@ -1083,17 +1625,27 @@ onUnmounted(() => {
             </label>
 
             <label v-if="!isEmpleadoAdministrativo(formRango.empleado_id)" class="form-group">
+              <span>Cliente</span>
+              <select v-model="formRango.cliente_id">
+                <option value="">Sin cliente</option>
+                <option v-for="cliente in clientesOrdenados" :key="cliente.id" :value="cliente.id">
+                  {{ cliente.empresa || cliente.razon_social }}
+                </option>
+              </select>
+            </label>
+
+            <label v-if="!isEmpleadoAdministrativo(formRango.empleado_id)" class="form-group">
               <span>Obra</span>
               <select v-model="formRango.obra_id">
                 <option value="">Sin obra</option>
-                <option v-for="obra in obrasNoAdministrativas" :key="obra.id" :value="obra.id">
+                <option v-for="obra in obrasDisponiblesRango" :key="obra.id" :value="obra.id">
                   {{ obra.nombre }}
                 </option>
               </select>
             </label>
 
             <div v-else class="info-rango">
-              Obra: <strong>Administración</strong>
+              Obra: <strong>Administracion</strong>
             </div>
 
             <div class="form-row">
@@ -1122,9 +1674,9 @@ onUnmounted(() => {
             <label v-if="modoRango === 'cantidad'" class="form-group">
               <span>Horas por día *</span>
               <input
-                v-model.number="formRango.horas_por_dia"
-                type="number"
-                step="0.5"
+                v-model="formRango.horas_por_dia"
+                type="text"
+                inputmode="decimal"
                 placeholder="Ej: 8"
               />
             </label>
@@ -1141,13 +1693,18 @@ onUnmounted(() => {
             </div>
 
             <label class="form-group">
-              <span>Tipo de horas extra</span>
-              <select v-model="formRango.tipo_hora_extra">
-                <option value="">No corresponde</option>
-                <option value="50">Hora extra al 50%</option>
-                <option value="100">Hora extra al 100%</option>
-              </select>
+              <span>Horas extra al 50% por día</span>
+              <input
+                v-model="formRango.cantidad_horas_extra_50"
+                type="text"
+                inputmode="decimal"
+                placeholder="Ej: 1"
+              />
             </label>
+
+            <div class="info-rango">
+              En <strong>carga por rango</strong> solo se habilitan horas extra al <strong>50%</strong>. Las horas al <strong>100%</strong> del sábado cargalas desde <strong>Carga diaria</strong>.
+            </div>
 
             <label class="form-group checkbox">
               <input v-model="formRango.es_prestada" type="checkbox" />
@@ -1383,18 +1940,31 @@ onUnmounted(() => {
 
 .acordeon-header {
   width: 100%;
-  padding: 0.9rem 1rem;
+  padding: 0.65rem 1rem;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 0.75rem;
   background: rgba(30, 41, 59, 0.7);
-  border: none;
-  cursor: pointer;
-  color: #e2e8f0;
 }
 
-.acordeon-header:hover {
-  background: rgba(30, 41, 59, 0.9);
+.acordeon-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  background: transparent;
+  border: none;
+  color: #e2e8f0;
+  cursor: pointer;
+  padding: 0.25rem 0;
+  text-align: left;
+}
+
+.acordeon-toggle:hover {
+  color: #f8fafc;
 }
 
 .acordeon-titulo {
@@ -1419,6 +1989,25 @@ onUnmounted(() => {
   gap: 1rem;
   color: #93c5fd;
   font-size: 0.85rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.btn-recarga {
+  padding: 0.35rem 0.75rem;
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  border-radius: 9999px;
+  background: rgba(59, 130, 246, 0.14);
+  color: #93c5fd;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-recarga:hover {
+  background: rgba(59, 130, 246, 0.24);
+  border-color: rgba(96, 165, 250, 0.7);
 }
 
 .acordeon-body {
@@ -1529,6 +2118,31 @@ td {
 
 .btn-delete:hover {
   background-color: rgba(239, 68, 68, 0.3);
+}
+
+.atajos-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1rem;
+  align-items: center;
+  padding: 0.85rem 1rem;
+  margin-bottom: 1rem;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 0.5rem;
+  color: #cbd5e1;
+  font-size: 0.85rem;
+}
+
+.atajos-bar kbd {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.35rem;
+  background: rgba(30, 41, 59, 0.95);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: #f8fafc;
+  font-size: 0.78rem;
+  font-family: inherit;
 }
 
 .empty-state {

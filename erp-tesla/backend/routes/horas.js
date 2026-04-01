@@ -1,3 +1,65 @@
+import fs from "fs/promises";
+const HORAS_FOLDER = path.join("C:\\Users\\usuario\\Desktop\\GESTION TESLA", "horas");
+
+const saveResumenHorasPdf = async ({ mes, anio, nombreArchivo, pdfBuffer }) => {
+  const mesInt = parseInt(mes)
+  const anioInt = parseInt(anio)
+  if (!Number.isFinite(mesInt) || !Number.isFinite(anioInt) || !pdfBuffer) return
+
+  const subfolder = path.join(HORAS_FOLDER, `${anioInt}_${String(mesInt).padStart(2, "0")}`)
+  await fs.mkdir(subfolder, { recursive: true })
+  const filePath = path.join(subfolder, nombreArchivo)
+  await fs.writeFile(filePath, pdfBuffer)
+}
+
+// Guarda o actualiza el archivo resumen mensual de horas
+const saveResumenHorasMes = async (mes, anio) => {
+  await fs.mkdir(HORAS_FOLDER, { recursive: true });
+  // Obtener todas las horas del mes
+  const mesInt = parseInt(mes);
+  const anioInt = parseInt(anio);
+  if (!Number.isFinite(mesInt) || !Number.isFinite(anioInt)) return;
+  const inicio = new Date(anioInt, mesInt - 1, 1).toISOString().split("T")[0];
+  const fin = new Date(anioInt, mesInt, 0).toISOString().split("T")[0];
+  const { data: horasData } = await db.from("horas").select("*").gte("fecha", inicio).lte("fecha", fin);
+  if (!horasData) return;
+  // Obtener empleados y obras para nombres
+  const { data: empleados } = await db.from("empleados").select("id, nombre, apellido");
+  const { data: obras } = await db.from("obras").select("id, nombre");
+  // Generar resumen por empleado
+  const resumenPorEmpleado = {};
+  horasData.forEach((h) => {
+    const emp = empleados?.find((e) => e.id === h.empleado_id);
+    const nombreEmp = emp ? `${emp.nombre} ${emp.apellido}` : `Empleado ${h.empleado_id}`;
+    if (!resumenPorEmpleado[nombreEmp]) resumenPorEmpleado[nombreEmp] = 0;
+    resumenPorEmpleado[nombreEmp] += getCantidadHoras(h);
+  });
+  // Generar resumen por obra
+  const resumenPorObra = {};
+  horasData.forEach((h) => {
+    const obra = obras?.find((o) => o.id === h.obra_id);
+    const nombreObra = obra ? obra.nombre : `Obra ${h.obra_id}`;
+    if (!resumenPorObra[nombreObra]) resumenPorObra[nombreObra] = 0;
+    resumenPorObra[nombreObra] += getCantidadHoras(h);
+  });
+  // Contenido del archivo
+  let content = `Resumen mensual de horas\nMes: ${mes}/${anio}\n\n`;
+  content += `Total de registros: ${horasData.length}\n`;
+  content += `\n--- Horas por empleado ---\n`;
+  Object.entries(resumenPorEmpleado).forEach(([emp, hs]) => {
+    content += `  - ${emp}: ${hs.toFixed(2)} hs\n`;
+  });
+  content += `\n--- Horas por obra ---\n`;
+  Object.entries(resumenPorObra).forEach(([obra, hs]) => {
+    content += `  - ${obra}: ${hs.toFixed(2)} hs\n`;
+  });
+  // Guardar archivo dentro de la carpeta del mes correspondiente
+  const subfolder = path.join(HORAS_FOLDER, `${anioInt}_${String(mesInt).padStart(2, "0")}`);
+  await fs.mkdir(subfolder, { recursive: true });
+  const nombreArchivo = `horas_${anioInt}_${String(mesInt).padStart(2, "0")}.txt`;
+  const filePath = path.join(subfolder, nombreArchivo);
+  await fs.writeFile(filePath, content);
+};
 import express from "express"
 import db from "../db.js"
 import { getIo } from '../socket.js'
@@ -8,7 +70,7 @@ import { drawPremiumHeader, setupPremiumFooter, drawPremiumSectionTitle, PDF_COL
 
 const router = express.Router()
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const LOGO_PATH = path.join(__dirname, "..", "assets", "logo.png")
+const LOGO_PATH = path.join(__dirname, "..", "assets", "logo_presupuesto.png")
 
 const getCantidadHoras = (registro = {}) => {
   const valor =
@@ -38,6 +100,160 @@ const getTipoHora = ({ es_hora_extra, tipo_hora_extra, es_prestada }) => {
   return "normal"
 }
 
+const normalizeNullableId = (value) => {
+  if (value === undefined) return undefined
+  if (value === null || value === "") return null
+  const numberValue = Number(value)
+  return Number.isFinite(numberValue) ? numberValue : null
+}
+
+const parseFlexibleNumber = (value) => {
+  if (value === undefined || value === null || value === "") return null
+  if (typeof value === "number") return Number.isFinite(value) ? value : null
+  const raw = String(value).trim()
+  if (!raw) return null
+  const normalized = raw.includes(",")
+    ? raw.replace(/\./g, "").replace(",", ".")
+    : raw
+  const numberValue = Number(normalized)
+  return Number.isFinite(numberValue) ? numberValue : null
+}
+
+const resolveClienteObraRelacion = async ({ clienteId, obraId }) => {
+  if (!obraId) {
+    return { clienteId: clienteId ?? null, obraId: null }
+  }
+
+  const { data: obra, error } = await db
+    .from("obras")
+    .select("id, cliente_id")
+    .eq("id", obraId)
+    .single()
+
+  if (error || !obra) {
+    throw new Error("La obra seleccionada no existe")
+  }
+
+  if (clienteId && Number(clienteId) !== Number(obra.cliente_id)) {
+    throw new Error("La obra seleccionada no pertenece al cliente indicado")
+  }
+
+  return {
+    clienteId: obra.cliente_id ? Number(obra.cliente_id) : (clienteId ?? null),
+    obraId: Number(obra.id),
+  }
+}
+
+const roundHoras = (value) => {
+  const numero = Number(value)
+  if (!Number.isFinite(numero)) return 0
+  return Math.round(numero * 100) / 100
+}
+
+const parseLocalDateOnly = (dateValue) => {
+  if (!dateValue) return null
+  const [year, month, day] = String(dateValue).split("-").map(Number)
+  if (!year || !month || !day) return null
+  return new Date(year, month - 1, day)
+}
+
+const isSaturdayDate = (dateValue) => {
+  const parsedDate = parseLocalDateOnly(dateValue)
+  return Boolean(parsedDate) && parsedDate.getDay() === 6
+}
+
+const isSundayDate = (dateValue) => {
+  const parsedDate = parseLocalDateOnly(dateValue)
+  return Boolean(parsedDate) && parsedDate.getDay() === 0
+}
+
+const resolveHorasExtraDetalle = ({
+  fecha,
+  horasComputadas,
+  es_hora_extra = false,
+  tipo_hora_extra = null,
+  cantidad_horas_extra = null,
+  cantidad_horas_extra_50 = null,
+  cantidad_horas_extra_100 = null,
+}) => {
+  let horasExtra50 = 0
+  let horasExtra100 = 0
+
+  const extra50Numerica = parseFlexibleNumber(cantidad_horas_extra_50)
+  const extra100Numerica = parseFlexibleNumber(cantidad_horas_extra_100)
+
+  if (Number.isFinite(extra50Numerica) && extra50Numerica > 0) {
+    horasExtra50 = roundHoras(extra50Numerica)
+  }
+
+  if (Number.isFinite(extra100Numerica) && extra100Numerica > 0) {
+    horasExtra100 = roundHoras(extra100Numerica)
+  }
+
+  if (horasExtra50 === 0 && horasExtra100 === 0) {
+    const esExtraLegacy = es_hora_extra === true || normalizeTipoHoraExtra(tipo_hora_extra) !== null
+    const tipoLegacy = normalizeTipoHoraExtra(tipo_hora_extra) || "50"
+    const cantidadExtraLegacy = parseFlexibleNumber(cantidad_horas_extra)
+    const horasExtraLegacy = esExtraLegacy ? roundHoras(cantidadExtraLegacy ?? horasComputadas) : 0
+
+    if (tipoLegacy === "100") {
+      horasExtra100 = horasExtraLegacy
+    } else {
+      horasExtra50 = horasExtraLegacy
+    }
+  }
+
+  const horasExtraTotales = roundHoras(horasExtra50 + horasExtra100)
+
+  if (horasExtraTotales > horasComputadas) {
+    throw new Error("La suma de las horas extra (50% + 100%) no puede superar el total de horas cargadas")
+  }
+
+  if (horasExtra100 > 0 && !isSaturdayDate(fecha)) {
+    throw new Error("Las horas extra al 100% solo corresponden a sábados")
+  }
+
+  return {
+    horasExtra50,
+    horasExtra100,
+    horasExtraTotales,
+    horasBaseFinal: roundHoras(horasComputadas - horasExtraTotales),
+  }
+}
+
+const buildHoraPayload = ({
+  empleado_id,
+  cliente_id,
+  obra_id,
+  fecha,
+  hora_inicio = null,
+  hora_fin = null,
+  horas_trabajadas,
+  cantidad_horas,
+  es_hora_extra = false,
+  tipo_hora_extra = null,
+  observaciones = "",
+  es_prestada = false,
+  grupo_origen_id = null,
+  grupo_destino_id = null,
+}) => ({
+  empleado_id,
+  cliente_id: cliente_id ?? null,
+  obra_id: obra_id ?? null,
+  fecha,
+  hora_inicio,
+  hora_fin,
+  horas_trabajadas: parseFloat(roundHoras(horas_trabajadas)),
+  cantidad_horas: parseFloat(roundHoras(cantidad_horas)),
+  es_hora_extra,
+  tipo_hora_extra,
+  observaciones: String(observaciones || "").trim(),
+  es_prestada,
+  tipo: getTipoHora({ es_hora_extra, tipo_hora_extra, es_prestada }),
+  grupo_origen_id: es_prestada ? grupo_origen_id : null,
+  grupo_destino_id: es_prestada ? grupo_destino_id : null,
+})
+
 const getRangoMes = (mes, anio) => {
   if (!mes || !anio) return null
   const mesInt = parseInt(mes)
@@ -55,6 +271,17 @@ const isAdministrativeObra = (obra, grupos = []) => {
   if (ADMIN_GROUP_REGEX.test(String(obra.nombre || ""))) return true
   const grupo = grupos.find((g) => String(g.id) === String(obra.grupo_id))
   return ADMIN_GROUP_REGEX.test(String(grupo?.nombre || ""))
+}
+
+const resolveGrupoForHora = ({ hora, obras = [], empleados = [], grupos = [] }) => {
+  const obra = obras.find((o) => String(o.id) === String(hora?.obra_id))
+  const grupoId = obra?.grupo_id ?? empleados.find((e) => String(e.id) === String(hora?.empleado_id))?.grupo_id ?? null
+  const grupo = grupos.find((g) => String(g.id) === String(grupoId))
+  return {
+    grupoId: grupoId ? Number(grupoId) : null,
+    grupoNombre: grupo?.nombre || "Sin grupo",
+    obra,
+  }
 }
 
 // Resolver automáticamente la obra para empleados administrativos
@@ -109,58 +336,73 @@ router.get("/resumen/pdf", async (req, res) => {
 
     if (horasError) return res.status(400).json({ error: horasError.message })
 
-    const [empleadosRes, obrasRes, gruposRes] = await Promise.all([
-      db.from("empleados").select("id, nombre, apellido"),
-      db.from("obras").select("id, nombre, grupo_id"),
-      db.from("grupos").select("id, nombre")
+    const [empleadosRes, obrasRes, gruposRes, clientesRes] = await Promise.all([
+      db.from("empleados").select("id, nombre, apellido, grupo_id"),
+      db.from("obras").select("id, nombre, grupo_id, cliente_id"),
+      db.from("grupos").select("id, nombre"),
+      db.from("clientes").select("id, empresa, razon_social")
     ])
 
     const empleadosData = empleadosRes.data || []
     const obrasData = obrasRes.data || []
     const gruposData = gruposRes.data || []
+    const clientesData = clientesRes.data || []
     const horas = horasData || []
 
     const resumenEmpleado = {}
     const resumenObra = {}
     const resumenGrupo = {}
-    const prestadasDetalle = []
     const prestamosEntreGrupos = {}
 
     horas.forEach((h) => {
       const hs = getCantidadHoras(h)
 
       const emp = empleadosData.find((e) => e.id === h.empleado_id)
-      const obra = obrasData.find((o) => o.id === h.obra_id)
-      const grupo = gruposData.find((g) => g.id === obra?.grupo_id)
+      const { obra, grupoNombre: grupoLabel } = resolveGrupoForHora({
+        hora: h,
+        obras: obrasData,
+        empleados: empleadosData,
+        grupos: gruposData,
+      })
+      const grupoEmpleado = gruposData.find((g) => g.id === emp?.grupo_id)
+      const esAdministrativo = /admin/i.test(String(grupoEmpleado?.nombre || ""))
+
+      const clienteId = obra?.cliente_id ?? h?.cliente_id ?? null
+      const cliente = clientesData.find((c) => c.id === clienteId)
+      const clienteNombre = cliente?.empresa || cliente?.razon_social || null
 
       const empLabel = emp ? `${emp.nombre} ${emp.apellido}` : `Empleado ${h.empleado_id}`
-      const obraLabel = isAdministrativeObra(obra, gruposData) ? "Administración" : (obra?.nombre || "Obra sin nombre")
-      const grupoLabel = grupo?.nombre || "Sin grupo"
+      const obraLabel = esAdministrativo
+        ? "Administracion"
+        : (obra
+          ? (clienteNombre ? `${obra.nombre} - ${clienteNombre}` : obra.nombre)
+          : (clienteNombre || "Sin obra"))
+      const obraKey = esAdministrativo
+        ? "administracion"
+        : (obra?.id ? `obra_${obra.id}` : (clienteId ? `cliente_${clienteId}` : "sin_obra"))
 
       if (!resumenEmpleado[empLabel]) resumenEmpleado[empLabel] = 0
-      if (!resumenObra[obraLabel]) resumenObra[obraLabel] = 0
+      if (!resumenObra[obraKey]) resumenObra[obraKey] = { label: obraLabel, value: 0 }
       if (!resumenGrupo[grupoLabel]) resumenGrupo[grupoLabel] = 0
 
       resumenEmpleado[empLabel] += hs
-      resumenObra[obraLabel] += hs
+      resumenObra[obraKey].value += hs
       resumenGrupo[grupoLabel] += hs
 
       const esPrestada = h.es_prestada === true || String(h.tipo || "").toLowerCase() === "prestada"
       if (esPrestada) {
-        const grupoOrigen = gruposData.find((g) => g.id === h.grupo_origen_id)?.nombre || "Sin grupo origen"
-        const grupoDestino = gruposData.find((g) => g.id === h.grupo_destino_id)?.nombre || "Sin grupo destino"
+        const grupoOrigen = String(gruposData.find((g) => g.id === h.grupo_origen_id)?.nombre || "Sin grupo origen").trim()
+        const grupoDestino = String(gruposData.find((g) => g.id === h.grupo_destino_id)?.nombre || "Sin grupo destino").trim()
+        const key = `${grupoOrigen.toLowerCase()}|||${grupoDestino.toLowerCase()}`
 
-        prestadasDetalle.push({
-          empleado: empLabel,
-          grupo_origen: grupoOrigen,
-          grupo_destino: grupoDestino,
-          fecha: h.fecha,
-          horas: hs
-        })
-
-        const key = `${grupoOrigen}|||${grupoDestino}`
-        if (!prestamosEntreGrupos[key]) prestamosEntreGrupos[key] = 0
-        prestamosEntreGrupos[key] += hs
+        if (!prestamosEntreGrupos[key]) {
+          prestamosEntreGrupos[key] = {
+            origen: grupoOrigen,
+            destino: grupoDestino,
+            horas: 0,
+          }
+        }
+        prestamosEntreGrupos[key].horas += hs
       }
     })
 
@@ -168,13 +410,17 @@ router.get("/resumen/pdf", async (req, res) => {
     const chunks = []
     const mesesNombre = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
     const mesNombre = mesesNombre[Math.max(0, Number(mes) - 1)] || `Mes ${mes}`
-    const fechaArchivo = new Date().toISOString().slice(0, 10)
-    const nombreArchivo = `Resumen Horas ${sanitizeFileText(mesNombre)} ${sanitizeFileText(anio)} ${fechaArchivo}.pdf`
+    const nombreArchivo = `Resumen Horas ${sanitizeFileText(mesNombre)} ${sanitizeFileText(anio)}.pdf`
     const pageWidth = doc.page.width
 
     doc.on("data", (chunk) => chunks.push(chunk))
-    doc.on("end", () => {
+    doc.on("end", async () => {
       const pdfBuffer = Buffer.concat(chunks)
+      try {
+        await saveResumenHorasPdf({ mes, anio, nombreArchivo, pdfBuffer })
+      } catch (fileErr) {
+        console.error("[HORAS PDF] Error guardando resumen en disco:", fileErr)
+      }
       res.setHeader("Content-Type", "application/pdf")
       res.setHeader("Content-Disposition", `attachment; filename="${nombreArchivo}"`)
       res.send(pdfBuffer)
@@ -182,18 +428,35 @@ router.get("/resumen/pdf", async (req, res) => {
 
     setupPremiumFooter(doc, { leftText: "Tesla Montajes Electricos - Resumen mensual de horas" })
 
-    const drawSectionTitle = (title) => {
-      drawPremiumSectionTitle(doc, title)
+    const ensureSpace = (minHeight = 90) => {
+      if (doc.y > doc.page.height - minHeight) {
+        doc.addPage()
+        doc.y = 60
+      }
+    }
+
+    const drawSectionTitle = (title, minHeight = 90) => {
+      ensureSpace(minHeight)
+      doc.moveDown(0.5)
+      const titleY = doc.y
+      doc.font("Helvetica-Bold").fontSize(11.5).fillColor(PDF_COLORS.ink)
+      doc.text(title, 45, titleY, {
+        width: pageWidth - 90,
+        align: "left",
+      })
+      const lineY = doc.y + 2
+      doc.strokeColor(PDF_COLORS.line).lineWidth(0.8).moveTo(45, lineY).lineTo(pageWidth - 45, lineY).stroke()
+      doc.y = lineY + 8
     }
 
     const drawList = (items, leftLabel, rightLabel) => {
-      if (doc.y > doc.page.height - 110) doc.addPage()
+      ensureSpace(110)
 
       const drawTableHeader = () => {
         const headerY = doc.y
         doc.rect(45, headerY, pageWidth - 90, 22).fill(PDF_COLORS.navy)
         doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(9)
-        doc.text(leftLabel, 55, headerY + 7, { width: 350 })
+        doc.text(leftLabel, 55, headerY + 7, { width: 350, align: "left" })
         doc.text(rightLabel, 410, headerY + 7, { width: 120, align: "right" })
         doc.fillColor(PDF_COLORS.ink)
         doc.y = headerY + 22
@@ -218,11 +481,60 @@ router.get("/resumen/pdf", async (req, res) => {
         const bg = idx % 2 === 0 ? PDF_COLORS.light : PDF_COLORS.lightAlt
         doc.rect(45, y, pageWidth - 90, 20).fill(bg)
         doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9.5)
-        doc.text(it.label, 55, y + 6, { width: 350, ellipsis: true })
+        doc.text(it.label, 55, y + 6, { width: 350, ellipsis: true, align: "left" })
         doc.text(`${it.value.toFixed(2)} hs`, 410, y + 6, { width: 120, align: "right" })
         y += 20
       })
-      doc.y = y + 2
+      doc.y = y + 4
+    }
+
+    const drawTransferSummary = (items) => {
+      drawSectionTitle("Horas prestadas entre grupos", 140)
+      ensureSpace(120)
+
+      const tableX = 45
+      const tableWidth = pageWidth - 90
+      const horasWidth = 120
+      const detalleWidth = tableWidth - horasWidth
+
+      const drawTransferHeader = () => {
+        const headerY = doc.y
+        doc.rect(tableX, headerY, tableWidth, 24).fill(PDF_COLORS.navy)
+        doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(9)
+        doc.text("TRANSFERENCIA", tableX + 10, headerY + 8, { width: detalleWidth - 20, align: "left" })
+        doc.text("HORAS", tableX + detalleWidth, headerY + 8, { width: horasWidth - 10, align: "right" })
+        doc.fillColor(PDF_COLORS.ink)
+        doc.y = headerY + 24
+      }
+
+      drawTransferHeader()
+      let y = doc.y
+
+      if (!items.length) {
+        doc.rect(tableX, y, tableWidth, 20).fill(PDF_COLORS.light)
+        doc.font("Helvetica").fontSize(10).fillColor(PDF_COLORS.ink)
+        doc.text("Sin horas prestadas entre grupos en este período", tableX + 10, y + 6, { width: tableWidth - 20, align: "left" })
+        doc.y = y + 24
+        return
+      }
+
+      items.forEach((item, idx) => {
+        if (y > doc.page.height - 70) {
+          doc.addPage()
+          doc.y = 60
+          drawSectionTitle("Horas prestadas entre grupos", 140)
+          drawTransferHeader()
+          y = doc.y
+        }
+        const bg = idx % 2 === 0 ? "#f8fafc" : "#eef2f7"
+        doc.rect(tableX, y, tableWidth, 22).fill(bg)
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9.4)
+        doc.text(`${item.origen} prestó a ${item.destino}`, tableX + 10, y + 7, { width: detalleWidth - 20, align: "left", ellipsis: true })
+        doc.font("Helvetica-Bold")
+        doc.text(`${item.horas.toFixed(2)} hs`, tableX + detalleWidth, y + 7, { width: horasWidth - 10, align: "right" })
+        y += 22
+      })
+      doc.y = y + 4
     }
 
     const headerBottom = drawPremiumHeader(doc, {
@@ -237,7 +549,7 @@ router.get("/resumen/pdf", async (req, res) => {
 
     const totalHorasMes = horas.reduce((sum, h) => sum + getCantidadHoras(h), 0)
     const totalRegistros = horas.length
-    const totalPrestadas = prestadasDetalle.reduce((sum, p) => sum + p.horas, 0)
+    const totalPrestadas = Object.values(prestamosEntreGrupos).reduce((sum, item) => sum + Number(item.horas || 0), 0)
 
     const resumenY = doc.y
     doc.roundedRect(45, resumenY, pageWidth - 90, 66, 6).fill(PDF_COLORS.card)
@@ -269,8 +581,8 @@ router.get("/resumen/pdf", async (req, res) => {
 
     drawSectionTitle("Horas por obra")
     drawList(
-      Object.entries(resumenObra)
-        .map(([label, value]) => ({ label, value }))
+      Object.values(resumenObra)
+        .map((item) => ({ label: item.label, value: item.value }))
         .sort((a, b) => b.value - a.value),
       "OBRA",
       "TOTAL"
@@ -285,28 +597,14 @@ router.get("/resumen/pdf", async (req, res) => {
       "TOTAL"
     )
 
-    drawSectionTitle("Detalle de horas prestadas")
-    drawList(
-      prestadasDetalle
-        .map((p) => ({
-          label: `${p.grupo_origen} -> ${p.grupo_destino} (${new Date(p.fecha).toLocaleDateString("es-AR")})`,
-          value: p.horas
+    drawTransferSummary(
+      Object.values(prestamosEntreGrupos)
+        .map((item) => ({
+          origen: item.origen,
+          destino: item.destino,
+          horas: Number(item.horas || 0),
         }))
-        .sort((a, b) => b.value - a.value),
-      "DETALLE",
-      "HORAS"
-    )
-
-    drawSectionTitle("Resumen entre grupos")
-    drawList(
-      Object.entries(prestamosEntreGrupos)
-        .map(([key, value]) => {
-          const [origen, destino] = key.split("|||")
-          return { label: `${origen} prestó horas a ${destino}`, value }
-        })
-        .sort((a, b) => b.value - a.value),
-      "TRANSFERENCIA",
-      "HORAS"
+        .sort((a, b) => b.horas - a.horas)
     )
 
     doc.end()
@@ -351,11 +649,15 @@ router.post("/", async (req, res) => {
   try {
     const {
       empleado_id,
+      cliente_id,
       obra_id,
       fecha,
       hora_inicio,
       hora_fin,
       cantidad_horas,
+      cantidad_horas_extra,
+      cantidad_horas_extra_50,
+      cantidad_horas_extra_100,
       horas_trabajadas,
       es_hora_extra = false,
       tipo_hora_extra,
@@ -372,13 +674,23 @@ router.post("/", async (req, res) => {
       })
     }
 
+    if (isSundayDate(fecha)) {
+      return res.status(400).json({ error: "No se pueden registrar horas los domingos" })
+    }
+
     // Resolver obra automáticamente si no viene en el request y el empleado es administrativo
-    let obraIdFinal = obra_id || null
-    if (!obraIdFinal) {
+    let clienteIdFinal = normalizeNullableId(cliente_id) ?? null
+    let obraIdFinal = normalizeNullableId(obra_id) ?? null
+    if (!obraIdFinal && !clienteIdFinal) {
       obraIdFinal = await resolveObraForAdministrativeEmpleado(empleado_id)
     }
 
-    const cantidadNumerica = Number(cantidad_horas)
+    ;({ clienteId: clienteIdFinal, obraId: obraIdFinal } = await resolveClienteObraRelacion({
+      clienteId: clienteIdFinal,
+      obraId: obraIdFinal,
+    }))
+
+    const cantidadNumerica = parseFlexibleNumber(cantidad_horas)
     const tieneCantidadValida = Number.isFinite(cantidadNumerica) && cantidadNumerica > 0
 
     if (!tieneCantidadValida && (!hora_inicio || !hora_fin)) {
@@ -394,7 +706,7 @@ router.post("/", async (req, res) => {
       horasComputadas = (fin - inicio) / (1000 * 60 * 60)
     }
 
-    const horasTrabajadasNumericas = Number(horas_trabajadas)
+    const horasTrabajadasNumericas = parseFlexibleNumber(horas_trabajadas)
     const horasTrabajadasFinal = Number.isFinite(horasTrabajadasNumericas) && horasTrabajadasNumericas > 0
       ? horasTrabajadasNumericas
       : horasComputadas
@@ -403,35 +715,99 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "La cantidad de horas debe ser mayor a 0" })
     }
 
-    const esHoraExtraFinal = es_hora_extra === true || normalizeTipoHoraExtra(tipo_hora_extra) !== null
-    const tipoHoraExtraFinal = esHoraExtraFinal ? (normalizeTipoHoraExtra(tipo_hora_extra) || "50") : null
+    const {
+      horasExtra50,
+      horasExtra100,
+      horasExtraTotales,
+      horasBaseFinal,
+    } = resolveHorasExtraDetalle({
+      fecha,
+      horasComputadas,
+      es_hora_extra,
+      tipo_hora_extra,
+      cantidad_horas_extra,
+      cantidad_horas_extra_50,
+      cantidad_horas_extra_100,
+    })
 
-    const { data, error } = await db
-      .from("horas")
-      .insert([
-        {
+    const registrosParaInsertar = []
+
+    if (horasExtraTotales === 0 || horasBaseFinal > 0) {
+      registrosParaInsertar.push(
+        buildHoraPayload({
           empleado_id,
+          cliente_id: clienteIdFinal,
           obra_id: obraIdFinal,
           fecha,
           hora_inicio,
           hora_fin,
-          horas_trabajadas: parseFloat(horasTrabajadasFinal),
-          cantidad_horas: parseFloat(horasComputadas),
-          es_hora_extra: esHoraExtraFinal,
-          tipo_hora_extra: tipoHoraExtraFinal,
-          observaciones: String(observaciones || "").trim(),
-          es_prestada,
-          tipo: getTipoHora({ es_hora_extra: esHoraExtraFinal, tipo_hora_extra: tipoHoraExtraFinal, es_prestada }),
-          grupo_origen_id: es_prestada ? grupo_origen_id : null,
-          grupo_destino_id: es_prestada ? grupo_destino_id : null
-        }
-      ])
+          horas_trabajadas: horasExtraTotales > 0 ? horasBaseFinal : horasTrabajadasFinal,
+          cantidad_horas: horasExtraTotales > 0 ? horasBaseFinal : horasComputadas,
+          es_hora_extra: false,
+          tipo_hora_extra: null,
+          observaciones,
+          es_prestada: horasExtraTotales > 0 ? es_prestada : es_prestada,
+          grupo_origen_id,
+          grupo_destino_id,
+        })
+      )
+    }
+
+    if (horasExtra50 > 0) {
+      registrosParaInsertar.push(
+        buildHoraPayload({
+          empleado_id,
+          cliente_id: clienteIdFinal,
+          obra_id: obraIdFinal,
+          fecha,
+          hora_inicio: null,
+          hora_fin: null,
+          horas_trabajadas: horasExtra50,
+          cantidad_horas: horasExtra50,
+          es_hora_extra: true,
+          tipo_hora_extra: "50",
+          observaciones,
+          es_prestada: false,
+          grupo_origen_id: null,
+          grupo_destino_id: null,
+        })
+      )
+    }
+
+    if (horasExtra100 > 0) {
+      registrosParaInsertar.push(
+        buildHoraPayload({
+          empleado_id,
+          cliente_id: clienteIdFinal,
+          obra_id: obraIdFinal,
+          fecha,
+          hora_inicio: null,
+          hora_fin: null,
+          horas_trabajadas: horasExtra100,
+          cantidad_horas: horasExtra100,
+          es_hora_extra: true,
+          tipo_hora_extra: "100",
+          observaciones,
+          es_prestada: false,
+          grupo_origen_id: null,
+          grupo_destino_id: null,
+        })
+      )
+    }
+
+    const { data, error } = await db
+      .from("horas")
+      .insert(registrosParaInsertar)
       .select("*")
-      .single()
 
     if (error) return res.status(400).json({ error: error.message })
     getIo()?.emit('horas:changed')
-    res.status(201).json(data)
+    // Guardar/actualizar resumen mensual
+    const fechaObj = new Date((data?.[0] || {}).fecha || fecha)
+    const mes = fechaObj.getMonth() + 1
+    const anio = fechaObj.getFullYear()
+    await saveResumenHorasMes(mes, anio)
+    res.status(201).json(registrosParaInsertar.length === 1 ? (data?.[0] || null) : { registros: data || [] })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -443,11 +819,15 @@ router.put("/:id", async (req, res) => {
     const { id } = req.params
     const {
       empleado_id,
+      cliente_id,
       obra_id,
       fecha,
       hora_inicio,
       hora_fin,
       cantidad_horas,
+      cantidad_horas_extra,
+      cantidad_horas_extra_50,
+      cantidad_horas_extra_100,
       horas_trabajadas,
       es_hora_extra,
       tipo_hora_extra,
@@ -459,7 +839,7 @@ router.put("/:id", async (req, res) => {
 
     const { data: actual, error: actualError } = await db
       .from("horas")
-      .select("id, empleado_id, obra_id")
+      .select("id, empleado_id, obra_id, cliente_id, fecha")
       .eq("id", id)
       .single()
 
@@ -468,14 +848,20 @@ router.put("/:id", async (req, res) => {
     }
 
     const empleadoIdResolved = empleado_id || actual.empleado_id
+    let clienteIdResolved = cliente_id !== undefined ? normalizeNullableId(cliente_id) : actual.cliente_id
     let obraIdResolved = obra_id !== undefined ? (obra_id || null) : actual.obra_id
 
     // Si no hay obra, intentar resolver automáticamente para empleados administrativos
-    if (!obraIdResolved) {
+    if (!obraIdResolved && !clienteIdResolved) {
       obraIdResolved = await resolveObraForAdministrativeEmpleado(empleadoIdResolved)
     }
 
-    const cantidadNumerica = Number(cantidad_horas)
+    ;({ clienteId: clienteIdResolved, obraId: obraIdResolved } = await resolveClienteObraRelacion({
+      clienteId: clienteIdResolved,
+      obraId: normalizeNullableId(obraIdResolved),
+    }))
+
+    const cantidadNumerica = parseFlexibleNumber(cantidad_horas)
     const tieneCantidadValida = Number.isFinite(cantidadNumerica) && cantidadNumerica > 0
     let horasComputadas = tieneCantidadValida ? cantidadNumerica : null
 
@@ -485,7 +871,7 @@ router.put("/:id", async (req, res) => {
       horasComputadas = (fin - inicio) / (1000 * 60 * 60)
     }
 
-    const horasTrabajadasNumericas = Number(horas_trabajadas)
+    const horasTrabajadasNumericas = parseFlexibleNumber(horas_trabajadas)
     const horasTrabajadasFinal = Number.isFinite(horasTrabajadasNumericas) && horasTrabajadasNumericas > 0
       ? horasTrabajadasNumericas
       : horasComputadas
@@ -494,33 +880,123 @@ router.put("/:id", async (req, res) => {
       return res.status(400).json({ error: "Debe proveer cantidad_horas válida o ambas horas (inicio/fin)" })
     }
 
-    const esHoraExtraFinal = es_hora_extra === true || normalizeTipoHoraExtra(tipo_hora_extra) !== null
-    const tipoHoraExtraFinal = esHoraExtraFinal ? (normalizeTipoHoraExtra(tipo_hora_extra) || "50") : null
+    const fechaResolved = fecha || actual.fecha
 
-    const { data, error } = await db
+    if (isSundayDate(fechaResolved)) {
+      return res.status(400).json({ error: "No se pueden registrar horas los domingos" })
+    }
+
+    const {
+      horasExtra50,
+      horasExtra100,
+      horasExtraTotales,
+      horasBaseFinal,
+    } = resolveHorasExtraDetalle({
+      fecha: fechaResolved,
+      horasComputadas,
+      es_hora_extra,
+      tipo_hora_extra,
+      cantidad_horas_extra,
+      cantidad_horas_extra_50,
+      cantidad_horas_extra_100,
+    })
+
+    const payloadsToPersist = []
+
+    if (horasExtraTotales === 0 || horasBaseFinal > 0) {
+      payloadsToPersist.push(
+        buildHoraPayload({
+          empleado_id: empleadoIdResolved,
+          cliente_id: clienteIdResolved,
+          obra_id: obraIdResolved,
+          fecha: fechaResolved,
+          hora_inicio,
+          hora_fin,
+          horas_trabajadas: horasExtraTotales > 0 ? horasBaseFinal : horasTrabajadasFinal,
+          cantidad_horas: horasExtraTotales > 0 ? horasBaseFinal : horasComputadas,
+          es_hora_extra: false,
+          tipo_hora_extra: null,
+          observaciones: observaciones !== undefined ? String(observaciones || "").trim() : undefined,
+          es_prestada: es_prestada,
+          grupo_origen_id,
+          grupo_destino_id,
+        })
+      )
+    }
+
+    if (horasExtra50 > 0) {
+      payloadsToPersist.push(
+        buildHoraPayload({
+          empleado_id: empleadoIdResolved,
+          cliente_id: clienteIdResolved,
+          obra_id: obraIdResolved,
+          fecha: fechaResolved,
+          hora_inicio: null,
+          hora_fin: null,
+          horas_trabajadas: horasExtra50,
+          cantidad_horas: horasExtra50,
+          es_hora_extra: true,
+          tipo_hora_extra: "50",
+          observaciones: observaciones !== undefined ? String(observaciones || "").trim() : undefined,
+          es_prestada: false,
+          grupo_origen_id: null,
+          grupo_destino_id: null,
+        })
+      )
+    }
+
+    if (horasExtra100 > 0) {
+      payloadsToPersist.push(
+        buildHoraPayload({
+          empleado_id: empleadoIdResolved,
+          cliente_id: clienteIdResolved,
+          obra_id: obraIdResolved,
+          fecha: fechaResolved,
+          hora_inicio: null,
+          hora_fin: null,
+          horas_trabajadas: horasExtra100,
+          cantidad_horas: horasExtra100,
+          es_hora_extra: true,
+          tipo_hora_extra: "100",
+          observaciones: observaciones !== undefined ? String(observaciones || "").trim() : undefined,
+          es_prestada: false,
+          grupo_origen_id: null,
+          grupo_destino_id: null,
+        })
+      )
+    }
+
+    let data = null
+    let error = null
+
+    const [payloadPrincipal, ...payloadsAdicionales] = payloadsToPersist
+
+    const updateResult = await db
       .from("horas")
-      .update({
-        empleado_id: empleadoIdResolved,
-        obra_id: obraIdResolved,
-        fecha,
-        hora_inicio,
-        hora_fin,
-        horas_trabajadas: parseFloat(horasTrabajadasFinal),
-        cantidad_horas: parseFloat(horasComputadas),
-        es_hora_extra: esHoraExtraFinal,
-        tipo_hora_extra: tipoHoraExtraFinal,
-        observaciones: observaciones !== undefined ? String(observaciones || "").trim() : undefined,
-        es_prestada,
-        tipo: getTipoHora({ es_hora_extra: esHoraExtraFinal, tipo_hora_extra: tipoHoraExtraFinal, es_prestada }),
-        grupo_origen_id: es_prestada ? grupo_origen_id : null,
-        grupo_destino_id: es_prestada ? grupo_destino_id : null
-      })
+      .update(payloadPrincipal)
       .eq("id", id)
       .select("*")
       .single()
 
+    data = updateResult.data
+    error = updateResult.error
     if (error) return res.status(400).json({ error: error.message })
+
+    if (payloadsAdicionales.length > 0) {
+      const { error: insertError } = await db
+        .from("horas")
+        .insert(payloadsAdicionales)
+        .select("*")
+
+      if (insertError) return res.status(400).json({ error: insertError.message })
+    }
+
     getIo()?.emit('horas:changed')
+    // Guardar/actualizar resumen mensual
+    const fechaObj = new Date(data.fecha)
+    const mes = fechaObj.getMonth() + 1
+    const anio = fechaObj.getFullYear()
+    await saveResumenHorasMes(mes, anio)
     res.json(data)
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -532,9 +1008,18 @@ router.delete("/:id", async (req, res) => {
   try {
     const { id } = req.params
 
+    // Obtener la fecha antes de eliminar
+    const { data: horaData, error: errorGet } = await db.from("horas").select("fecha").eq("id", id).single();
     const { data, error } = await db.from("horas").delete().eq("id", id).select().single()
 
     if (error) return res.status(400).json({ error: error.message })
+    // Actualizar resumen mensual si se obtuvo la fecha
+    if (horaData && horaData.fecha) {
+      const fechaObj = new Date(horaData.fecha);
+      const mes = fechaObj.getMonth() + 1;
+      const anio = fechaObj.getFullYear();
+      await saveResumenHorasMes(mes, anio);
+    }
     getIo()?.emit('horas:changed')
     res.json(data)
   } catch (err) {
@@ -604,37 +1089,48 @@ router.get("/resumen/obra", async (req, res) => {
 
     if (error) return res.status(400).json({ error: error.message })
 
-    const [obrasDataRes, empleadosDataRes, gruposDataRes] = await Promise.all([
+    const [obrasDataRes, empleadosDataRes, gruposDataRes, clientesDataRes] = await Promise.all([
       db.from("obras").select("id, nombre, grupo_id"),
       db.from("empleados").select("id, grupo_id"),
-      db.from("grupos").select("id, nombre")
+      db.from("grupos").select("id, nombre"),
+      db.from("clientes").select("id, empresa, razon_social")
     ])
 
     const obrasData = obrasDataRes.data || []
     const empleadosData = empleadosDataRes.data || []
     const gruposData = gruposDataRes.data || []
+    const clientesData = clientesDataRes.data || []
 
-    // Agrupar manualmente por obra, pero las horas del grupo administrativo van a "Administración"
+    // Agrupar manualmente por obra, pero las horas del grupo administrativo van a "Administracion"
     const resumen = {}
     data.forEach((h) => {
       const empleado = empleadosData.find((e) => e.id === h.empleado_id)
       const grupoEmpleado = gruposData.find((g) => g.id === empleado?.grupo_id)
       const esAdministrativo = /admin/i.test(String(grupoEmpleado?.nombre || ""))
 
-      const claveResumen = esAdministrativo ? "administracion" : String(h.obra_id || "sin_obra")
+      const cliente = clientesData.find((c) => c.id === h.cliente_id)
+      const clienteNombre = cliente?.empresa || cliente?.razon_social || "Sin cliente"
+
+      const claveResumen = esAdministrativo
+        ? "administracion"
+        : (h.obra_id
+          ? `obra_${h.obra_id}`
+          : (h.cliente_id ? `cliente_${h.cliente_id}` : "sin_obra"))
       if (!resumen[claveResumen]) {
         resumen[claveResumen] = {
           obra_id: esAdministrativo ? null : (h.obra_id ? Number(h.obra_id) : null),
           obra_nombre: esAdministrativo
-            ? "Administración"
-            : (obrasData.find((o) => o.id === h.obra_id)?.nombre || "Sin obra"),
+            ? "Administracion"
+            : (h.obra_id
+              ? (obrasData.find((o) => o.id === h.obra_id)?.nombre || "Sin obra")
+              : (h.cliente_id ? clienteNombre : "Sin obra")),
           total_horas: 0
         }
       }
       resumen[claveResumen].total_horas += getCantidadHoras(h)
     })
 
-    const resultado = Object.values(resumen)
+    const resultado = Object.values(resumen).sort((a, b) => Number(b.total_horas || 0) - Number(a.total_horas || 0))
 
     res.json(resultado)
   } catch (err) {
@@ -662,14 +1158,21 @@ router.get("/resumen/grupo", async (req, res) => {
     if (horasError) return res.status(400).json({ error: horasError.message })
     if (!horasData || horasData.length === 0) return res.json([])
 
-    // Obtener obras para mapear grupo
-    const { data: obrasData } = await db.from("obras").select("id, grupo_id")
+    // Obtener obras y empleados para mapear grupo
+    const [{ data: obrasData }, { data: empleadosData }] = await Promise.all([
+      db.from("obras").select("id, grupo_id"),
+      db.from("empleados").select("id, grupo_id"),
+    ])
 
-    // Agrupar por grupo
+    // Agrupar por grupo (obra primero, grupo del empleado como fallback)
     const resumen = {}
     horasData.forEach((h) => {
-      const obra = obrasData?.find((o) => o.id === h.obra_id)
-      const grupoId = obra?.grupo_id
+      const { grupoId } = resolveGrupoForHora({
+        hora: h,
+        obras: obrasData || [],
+        empleados: empleadosData || [],
+        grupos: [],
+      })
 
       if (grupoId) {
         if (!resumen[grupoId]) {
@@ -682,7 +1185,7 @@ router.get("/resumen/grupo", async (req, res) => {
     const resultado = Object.entries(resumen).map(([grupoId, totalHoras]) => ({
       grupo_id: Number(grupoId),
       total_horas: totalHoras
-    }))
+    })).sort((a, b) => Number(b.total_horas || 0) - Number(a.total_horas || 0))
 
     res.json(resultado)
   } catch (err) {

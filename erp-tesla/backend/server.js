@@ -29,8 +29,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const schemaPath = path.join(__dirname, "database", "schema.sql")
 
 const ensureDatabaseSchema = async () => {
-  const sql = fs.readFileSync(schemaPath, "utf8")
-  await pool.query(sql)
+  try {
+    const sql = fs.readFileSync(schemaPath, "utf8");
+    await pool.query(sql);
+  } catch (error) {
+    console.error("Error al aplicar el schema.sql:", error);
+    throw error;
+  }
 }
 
 const parseAllowedOrigins = () => {
