@@ -65,6 +65,10 @@ const certificadosDelPresupuesto = computed(() =>
     .sort((a, b) => Number(a.secuencia) - Number(b.secuencia))
 )
 
+const certificadosPagadosCount = computed(() => certificados.value.filter((c) => String(c.estado) === "pagado").length)
+const certificadosPendientesCount = computed(() => certificados.value.filter((c) => String(c.estado) !== "pagado").length)
+const presupuestosConCertificadosCount = computed(() => certificadosAgrupados.value.length)
+
 const ultimoCertificado = computed(() => certificadosDelPresupuesto.value.at(-1) || null)
 const siguienteSecuencia = computed(() => (ultimoCertificado.value?.secuencia || 0) + 1)
 const importeOriginal = computed(() => Number(presupuestoSeleccionado.value?.total) || 0)
@@ -129,6 +133,12 @@ const openAdvanceModal = (presupuestoId) => {
   selectedGroupId.value = String(presupuestoId)
   form.value.presupuesto_id = String(presupuestoId)
   showAdvanceModal.value = true
+}
+
+const closeAdvanceModal = () => {
+  showAdvanceModal.value = false
+  selectedGroupId.value = ""
+  resetForm()
 }
 
 const editCertificado = (certificado) => {
@@ -220,16 +230,70 @@ onUnmounted(() => {
       <div v-if="error" class="error-msg">{{ error }}</div>
       <div v-if="ok" class="ok-msg">{{ ok }}</div>
 
+      <section class="certificados-topbar">
+        <div class="certificados-topbar-copy">
+          <span class="section-kicker">Seguimiento contractual</span>
+          <h2>Gestión de certificados</h2>
+          <p>Generá certificados originales, administrá avances y controlá saldos, pagos y acumulados por presupuesto desde una sola pantalla.</p>
+        </div>
+        <div class="certificados-topbar-actions">
+          <div class="topbar-badge">
+            <span>Presupuestos habilitados</span>
+            <strong>{{ presupuestosDisponiblesParaPrimerCertificado.length }}</strong>
+          </div>
+          <button class="btn-primary topbar-main-btn" type="button" @click="openGenerator()">+ Nuevo generador</button>
+        </div>
+      </section>
+
+      <section class="certificados-stats">
+        <article class="cert-stat-card cert-stat-card-primary">
+          <span>Certificados cargados</span>
+          <strong>{{ certificados.length }}</strong>
+          <small>Total histórico de certificados emitidos.</small>
+        </article>
+        <article class="cert-stat-card">
+          <span>Presupuestos con avances</span>
+          <strong>{{ presupuestosConCertificadosCount }}</strong>
+          <small>Presupuestos que ya tienen al menos un certificado.</small>
+        </article>
+        <article class="cert-stat-card cert-stat-card-paid">
+          <span>Pagados</span>
+          <strong>{{ certificadosPagadosCount }}</strong>
+          <small>Certificados totalmente abonados.</small>
+        </article>
+        <article class="cert-stat-card cert-stat-card-pending">
+          <span>Pendientes</span>
+          <strong>{{ certificadosPendientesCount }}</strong>
+          <small>Certificados aún con saldo a regularizar.</small>
+        </article>
+      </section>
+
       <section class="form-card">
         <div class="section-head">
           <div>
+            <span class="section-kicker">Generador base</span>
             <h3>Generador de certificados</h3>
             <p>Solo muestra presupuestos originales que todavia no tienen certificados.</p>
           </div>
           <button class="btn-secondary" type="button" @click="openGenerator()">Nuevo generador</button>
         </div>
 
-        <div class="grid-form">
+        <div class="summary-pills">
+          <div class="summary-pill">
+            <span>Presupuesto seleccionado</span>
+            <strong>{{ presupuestoSeleccionado ? `#${presupuestoSeleccionado.numero}` : "Sin seleccionar" }}</strong>
+          </div>
+          <div class="summary-pill">
+            <span>Modalidad</span>
+            <strong>{{ form.tipo_registro === "monto" ? "Por monto" : "Por porcentaje" }}</strong>
+          </div>
+          <div class="summary-pill">
+            <span>Total estimado</span>
+            <strong>{{ formatMoney(totalCertConIva) }}</strong>
+          </div>
+        </div>
+
+        <div class="grid-form grid-form-surface">
           <div class="full-span">
             <label>Presupuesto original</label>
             <select v-model="form.presupuesto_id">
@@ -309,8 +373,11 @@ onUnmounted(() => {
 
       <section class="table-card">
         <div class="section-head">
-          <h3>Historial por presupuesto</h3>
-          <span>{{ certificados.length }} certificados cargados</span>
+          <div>
+            <span class="section-kicker">Historial agrupado</span>
+            <h3>Historial por presupuesto</h3>
+          </div>
+          <span class="group-badge group-badge-neutral">{{ certificados.length }} certificados cargados</span>
         </div>
 
         <div v-if="loading" class="loading">Cargando...</div>
@@ -318,6 +385,7 @@ onUnmounted(() => {
           <article v-for="group in certificadosAgrupados" :key="group.presupuestoId" class="group-card">
             <div class="group-head">
               <div>
+                <span class="section-kicker">Presupuesto base</span>
                 <strong>#{{ group.presupuesto?.numero }} - {{ group.presupuesto?.cliente }}</strong>
                 <p>{{ group.presupuesto?.obra }}</p>
               </div>
@@ -327,6 +395,7 @@ onUnmounted(() => {
               </div>
             </div>
 
+            <div class="table-shell">
             <table>
               <thead>
                 <tr>
@@ -357,13 +426,15 @@ onUnmounted(() => {
                 </tr>
               </tbody>
             </table>
+            </div>
           </article>
         </div>
       </section>
 
-      <Modal v-if="showAdvanceModal" @close="showAdvanceModal = false">
+      <Modal v-if="showAdvanceModal" @close="closeAdvanceModal">
         <template #header>
-          <div>
+          <div class="modal-header-copy">
+            <span class="section-kicker">Avance secuencial</span>
             <h2>{{ editingId ? 'Editar avance' : `Nuevo avance ${siguienteSecuencia}` }}</h2>
             <p v-if="presupuestoSeleccionado">
               Presupuesto #{{ presupuestoSeleccionado.numero }} · {{ presupuestoSeleccionado.cliente }} · {{ presupuestoSeleccionado.obra }}
@@ -372,13 +443,29 @@ onUnmounted(() => {
         </template>
 
         <template #body>
+          <div class="modal-summary-pills">
+            <div class="summary-pill">
+              <span>Secuencia</span>
+              <strong>{{ editingId ? `Editando ${siguienteSecuencia - 1}` : `Nuevo ${siguienteSecuencia}` }}</strong>
+            </div>
+            <div class="summary-pill">
+              <span>Total con IVA</span>
+              <strong>{{ formatMoney(totalCertConIva) }}</strong>
+            </div>
+            <div class="summary-pill">
+              <span>Saldo pendiente</span>
+              <strong>{{ formatMoney(saldoPendiente) }}</strong>
+            </div>
+          </div>
+
+          <section class="modal-section">
           <div class="grid-form modal-form">
-            <div>
+            <div class="field-card">
               <label>Fecha</label>
               <input v-model="form.fecha" type="date" />
             </div>
 
-            <div>
+            <div class="field-card">
               <label>Estado</label>
               <select v-model="form.estado">
                 <option value="pendiente">Pendiente</option>
@@ -386,7 +473,7 @@ onUnmounted(() => {
               </select>
             </div>
 
-            <div>
+            <div class="field-card">
               <label>Tipo de avance</label>
               <select v-model="form.tipo_registro">
                 <option value="porcentaje">Por porcentaje</option>
@@ -394,31 +481,32 @@ onUnmounted(() => {
               </select>
             </div>
 
-            <div v-if="form.tipo_registro === 'porcentaje'">
+            <div v-if="form.tipo_registro === 'porcentaje'" class="field-card">
               <label>Porcentaje de avance</label>
               <input v-model.number="form.porcentaje_avance" type="number" min="0" step="0.01" />
             </div>
 
-            <div v-else>
+            <div v-else class="field-card">
               <label>Monto base</label>
               <input v-model.number="form.monto_base" type="number" min="0" step="0.01" />
             </div>
 
-            <div>
+            <div class="field-card">
               <label>Indice CAC</label>
               <input v-model.number="form.indice_cac" type="number" min="0" step="0.0001" />
             </div>
 
-            <div>
+            <div class="field-card">
               <label>Pagos</label>
               <input v-model.number="form.pagos" type="number" min="0" step="0.01" />
             </div>
 
-            <div class="full-span">
+            <div class="full-span field-card">
               <label>Observaciones</label>
               <input v-model="form.observaciones" type="text" />
             </div>
           </div>
+          </section>
 
           <div class="stats-grid preview-grid modal-preview-grid">
             <div class="stat-card"><span>Importe original</span><strong>{{ formatMoney(importeOriginal) }}</strong></div>
@@ -430,7 +518,12 @@ onUnmounted(() => {
           </div>
 
           <div v-if="certificadosDelPresupuesto.length" class="history-inline modal-history">
+            <div class="section-head section-head-compact">
+              <div>
+                <span class="section-kicker">Referencia</span>
             <h4>Historial del presupuesto</h4>
+              </div>
+            </div>
             <div class="history-list">
               <button
                 v-for="c in certificadosDelPresupuesto"
@@ -446,8 +539,8 @@ onUnmounted(() => {
         </template>
 
         <template #footer>
-          <button class="btn-secondary" type="button" @click="showAdvanceModal = false">Cerrar</button>
-          <button class="btn-primary" :disabled="saving || !form.presupuesto_id" @click="saveCertificado">
+          <button class="btn-secondary" type="button" @click="closeAdvanceModal">Cerrar</button>
+          <button class="btn-primary" type="button" :disabled="saving || !form.presupuesto_id" @click="saveCertificado">
             {{ saving ? "Guardando..." : editingId ? "Actualizar avance" : "Guardar avance" }}
           </button>
         </template>
@@ -462,11 +555,123 @@ onUnmounted(() => {
   gap: 16px;
 }
 
+.certificados-topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1.35rem 1.45rem;
+  border-radius: 1.1rem;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.14), transparent 30%),
+    linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(15, 23, 42, 0.84));
+}
+
+.certificados-topbar-copy {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.section-kicker {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #7dd3fc;
+}
+
+.certificados-topbar-copy h2 {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 1.5rem;
+}
+
+.certificados-topbar-copy p {
+  margin: 0;
+  max-width: 62ch;
+  color: #94a3b8;
+  line-height: 1.5;
+}
+
+.certificados-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.topbar-badge {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.7rem 0.9rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(125, 211, 252, 0.18);
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.topbar-badge span {
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #93c5fd;
+}
+
+.topbar-badge strong {
+  color: #e0f2fe;
+}
+
+.topbar-main-btn {
+  white-space: nowrap;
+}
+
+.certificados-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.cert-stat-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: linear-gradient(180deg, rgba(17, 24, 39, 0.92), rgba(15, 23, 36, 0.92));
+  box-shadow: 0 16px 34px -30px rgba(0, 0, 0, 0.78);
+}
+
+.cert-stat-card span {
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #9aa6b8;
+}
+
+.cert-stat-card strong {
+  font-size: 1.3rem;
+  color: #f8fafc;
+}
+
+.cert-stat-card small {
+  color: #94a3b8;
+  line-height: 1.45;
+}
+
+.cert-stat-card-primary strong { color: #7dd3fc; }
+.cert-stat-card-paid strong { color: #86efac; }
+.cert-stat-card-pending strong { color: #fde68a; }
+
 .form-card,
 .table-card {
-  background: rgba(15, 23, 42, 0.55);
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 14px;
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.08), transparent 34%),
+    rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 16px;
   padding: 16px;
 }
 
@@ -485,6 +690,44 @@ onUnmounted(() => {
   color: #94a3b8;
 }
 
+.section-head h3,
+.group-head strong {
+  margin: 0;
+}
+
+.section-head-compact {
+  margin-bottom: 8px;
+}
+
+.summary-pills,
+.modal-summary-pills {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.summary-pill {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.62), rgba(15, 23, 42, 0.92));
+}
+
+.summary-pill span {
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #9aa6b8;
+}
+
+.summary-pill strong {
+  color: #f8fafc;
+}
+
 .muted {
   color: #94a3b8;
 }
@@ -499,10 +742,23 @@ onUnmounted(() => {
   font-size: 0.82rem;
 }
 
+.group-badge-neutral {
+  background: rgba(59, 130, 246, 0.12);
+  color: #dbeafe;
+  border-color: rgba(96, 165, 250, 0.24);
+}
+
 .grid-form {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
+}
+
+.grid-form-surface {
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .full-span {
@@ -522,7 +778,7 @@ onUnmounted(() => {
 .stat-card {
   background: rgba(30, 41, 59, 0.55);
   border: 1px solid rgba(148, 163, 184, 0.18);
-  border-radius: 12px;
+  border-radius: 14px;
   padding: 12px;
   display: grid;
   gap: 6px;
@@ -538,10 +794,26 @@ onUnmounted(() => {
   margin-top: 14px;
 }
 
+.modal-section {
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(255, 255, 255, 0.03);
+}
+
 .modal-form,
 .modal-preview-grid,
 .modal-history {
   margin-top: 0;
+}
+
+.field-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(9, 15, 26, 0.34);
 }
 
 .history-list {
@@ -567,21 +839,34 @@ onUnmounted(() => {
   align-items: center;
 }
 
+.actions {
+  margin-top: 1.15rem;
+  padding-top: 0.55rem;
+}
+
 .groups-list {
   display: grid;
   gap: 14px;
 }
 
 .group-card {
-  background: rgba(15, 23, 42, 0.42);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.56), rgba(15, 23, 42, 0.42));
   border: 1px solid rgba(148, 163, 184, 0.14);
-  border-radius: 12px;
+  border-radius: 14px;
   padding: 14px;
+}
+
+.table-shell {
+  overflow-x: auto;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: rgba(2, 6, 23, 0.2);
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
+  min-width: 880px;
 }
 
 th, td {
@@ -592,6 +877,11 @@ th, td {
 
 tbody tr {
   cursor: pointer;
+  transition: background-color 0.16s ease;
+}
+
+tbody tr:hover {
+  background: rgba(59, 130, 246, 0.08);
 }
 
 label {
@@ -659,6 +949,7 @@ input, select {
 }
 
 @media (max-width: 900px) {
+  .certificados-topbar,
   .section-head,
   .group-head,
   .actions {

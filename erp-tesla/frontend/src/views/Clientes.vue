@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from "vue"
+import { computed, ref, onMounted, onUnmounted } from "vue"
 import api, { extractApiErrorMessage } from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
@@ -16,6 +16,7 @@ const obrasCliente = ref([])
 const presupuestosCliente = ref([])
 const presupuestosAceptados = ref([])
 const downloadingPdf = ref(false)
+const filtroBusqueda = ref("")
 
 // Formulario
 const form = ref({
@@ -27,6 +28,27 @@ const form = ref({
   email: "",
   iva: "Responsable Inscripto"
 })
+
+const clientesFiltrados = computed(() => {
+  const termino = String(filtroBusqueda.value || "").trim().toLowerCase()
+  if (!termino) return clientes.value
+
+  return clientes.value.filter((cliente) => {
+    const campos = [
+      cliente.empresa,
+      cliente.razon_social,
+      cliente.cuit,
+      cliente.telefono,
+      cliente.email,
+      cliente.iva,
+    ]
+
+    return campos.some((campo) => String(campo || "").toLowerCase().includes(termino))
+  })
+})
+
+const clientesConEmpresa = computed(() => clientes.value.filter((cliente) => String(cliente.empresa || "").trim()).length)
+const clientesConCuit = computed(() => clientes.value.filter((cliente) => String(cliente.cuit || "").trim()).length)
 
 // Cargar clientes
 const loadClientes = async () => {
@@ -221,52 +243,100 @@ onUnmounted(() => {
   >
     <div class="clientes-container">
       <!-- VISTA: LISTA DE CLIENTES -->
-      <div v-if="vistaActual === 'lista'">
-        <!-- Botón nuevo cliente -->
-        <div class="clientes-header">
-          <button class="btn-primary" @click="openForm()">
+      <div v-if="vistaActual === 'lista'" class="clientes-list-view">
+        <section class="clientes-topbar">
+          <div class="clientes-topbar-copy">
+            <span class="section-kicker">Base comercial</span>
+            <h2>Gestión de clientes</h2>
+          </div>
+          <button class="btn-primary clientes-new-btn" @click="openForm()">
             + Nuevo cliente
           </button>
-        </div>
+        </section>
 
-        <!-- Mensaje de error -->
+        <section class="clientes-stats">
+          <article class="clientes-stat-card">
+            <span>Total de clientes</span>
+            <strong>{{ clientes.length }}</strong>
+            <small>Registros activos disponibles en el sistema.</small>
+          </article>
+          <article class="clientes-stat-card">
+            <span>Con empresa</span>
+            <strong>{{ clientesConEmpresa }}</strong>
+            <small>Clientes con nombre comercial informado.</small>
+          </article>
+          <article class="clientes-stat-card">
+            <span>Con CUIT</span>
+            <strong>{{ clientesConCuit }}</strong>
+            <small>Registros listos para documentación fiscal.</small>
+          </article>
+        </section>
+
+        <section class="clientes-toolbar">
+          <label class="clientes-search-field">
+            <span>Buscar en tiempo real</span>
+            <input
+              v-model="filtroBusqueda"
+              type="text"
+              placeholder="Empresa, razón social, CUIT, teléfono, email o IVA"
+            />
+          </label>
+          <div class="clientes-toolbar-count">
+            Mostrando {{ clientesFiltrados.length }} de {{ clientes.length }} clientes
+          </div>
+        </section>
+
         <div v-if="error" class="error-alert">
           {{ error }}
         </div>
 
-        <!-- Tabla de clientes -->
-        <div v-if="!loading && clientes.length > 0" class="clientes-table">
-          <table>
-            <thead>
-              <tr>
-                <th>Empresa</th>
-                <th>Razón Social</th>
-                <th>CUIT</th>
-                <th>Teléfono</th>
-                <th>IVA</th>
-                <th>Acciones</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="cliente in clientes" :key="cliente.id">
-                <td>{{ cliente.empresa || "-" }}</td>
-                <td>{{ cliente.razon_social }}</td>
-                <td>{{ cliente.cuit || "-" }}</td>
-                <td>{{ cliente.telefono || "-" }}</td>
-                <td>{{ cliente.iva || "-" }}</td>
-                <td>
-                  <div class="acciones">
-                    <button class="btn-ficha" @click="verFicha(cliente)">
-                      📋 Ver ficha
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+        <div v-if="!loading && clientesFiltrados.length > 0" class="clientes-table-shell">
+          <div class="clientes-table-header-row">
+            <div>
+              <span class="section-kicker">Listado</span>
+              <h3>Clientes registrados</h3>
+            </div>
+          </div>
+
+          <div class="clientes-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Empresa</th>
+                  <th>Razón Social</th>
+                  <th>CUIT</th>
+                  <th>Teléfono</th>
+                  <th>IVA</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="cliente in clientesFiltrados" :key="cliente.id">
+                  <td>
+                    <div class="cliente-main-cell">
+                      <strong>{{ cliente.empresa || cliente.razon_social || "-" }}</strong>
+                      <small v-if="cliente.email">{{ cliente.email }}</small>
+                    </div>
+                  </td>
+                  <td>{{ cliente.razon_social || "-" }}</td>
+                  <td>{{ cliente.cuit || "-" }}</td>
+                  <td>{{ cliente.telefono || "-" }}</td>
+                  <td>
+                    <span class="iva-badge">{{ cliente.iva || "-" }}</span>
+                  </td>
+                  <td>
+                    <div class="acciones">
+                      <button class="btn-ficha" @click="verFicha(cliente)">
+                        Ver ficha
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
 
-        <!-- Estado vacío -->
         <div v-if="!loading && clientes.length === 0" class="empty-state">
           <p>No hay clientes registrados</p>
           <button class="btn-primary" @click="openForm()">
@@ -274,7 +344,13 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <!-- Cargando -->
+        <div v-if="!loading && clientes.length > 0 && clientesFiltrados.length === 0" class="empty-state empty-state-search">
+          <p>No hay coincidencias para la búsqueda actual</p>
+          <button class="btn-secondary" @click="filtroBusqueda = ''">
+            Limpiar búsqueda
+          </button>
+        </div>
+
         <div v-if="loading" class="loading">
           Cargando...
         </div>
@@ -416,13 +492,18 @@ onUnmounted(() => {
       <div v-if="showForm" class="modal-overlay" @click.self="closeForm">
         <div class="modal">
           <div class="modal-header">
-            <h3>{{ editingId ? "Editar cliente" : "Nuevo cliente" }}</h3>
+            <div class="modal-header-copy">
+              <span class="section-kicker modal-kicker">Ficha comercial</span>
+              <h3>{{ editingId ? "Editar cliente" : "Nuevo cliente" }}</h3>
+              <p>Completá los datos principales para dejar la ficha lista y bien presentada.</p>
+            </div>
             <button class="btn-close" @click="closeForm">×</button>
           </div>
 
 
           <form @submit.prevent="saveCliente" class="modal-form">
-            <label class="form-group">
+            <div class="modal-form-grid">
+            <label class="form-group form-group-full">
               <span>Empresa</span>
               <input
                 v-model="form.empresa"
@@ -430,7 +511,7 @@ onUnmounted(() => {
                 placeholder="Nombre comercial (opcional)"
               />
             </label>
-            <label class="form-group">
+            <label class="form-group form-group-full">
               <span>Razón Social *</span>
               <input
                 v-model="form.razon_social"
@@ -463,7 +544,7 @@ onUnmounted(() => {
               </select>
             </label>
 
-            <label class="form-group">
+            <label class="form-group form-group-full">
               <span>Dirección</span>
               <input
                 v-model="form.direccion"
@@ -490,6 +571,7 @@ onUnmounted(() => {
                 placeholder="Ingrese el email o '-' si no aplica"
               />
             </label>
+            </div>
 
             <div class="modal-actions">
               <button type="submit" class="btn-primary" :disabled="loading">
@@ -509,13 +591,143 @@ onUnmounted(() => {
 <style scoped>
 .clientes-container {
   padding: 1.5rem;
+  display: grid;
+  gap: 1.75rem;
 }
 
-.clientes-header {
+.clientes-list-view {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.section-kicker {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #7dd3fc;
+}
+
+.clientes-topbar,
+.clientes-toolbar,
+.clientes-table-shell,
+.clientes-stat-card,
+.empty-state {
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(15, 23, 42, 0.78));
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  box-shadow: 0 18px 38px rgba(15, 23, 42, 0.45);
+}
+
+.clientes-topbar {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 2rem;
+  align-items: end;
+  gap: 1.2rem;
+  flex-wrap: wrap;
+  padding: 1.4rem 1.5rem;
+  border-radius: 1rem;
+}
+
+.clientes-topbar-copy {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.clientes-topbar-copy h2,
+.clientes-table-header-row h3 {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 1.45rem;
+}
+
+.clientes-topbar-copy p {
+  margin: 0;
+  color: #94a3b8;
+  max-width: 58ch;
+  line-height: 1.45;
+}
+
+.clientes-new-btn {
+  white-space: nowrap;
+}
+
+.clientes-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1.4rem;
+}
+
+.clientes-stat-card {
+  padding: 1.15rem 1.2rem;
+  border-radius: 0.95rem;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.clientes-stat-card span {
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.clientes-stat-card strong {
+  font-size: 1.55rem;
+  color: #f8fafc;
+}
+
+.clientes-stat-card small {
+  color: #94a3b8;
+  line-height: 1.35;
+}
+
+.clientes-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 1.15rem;
+  flex-wrap: wrap;
+  padding: 1.1rem 1.2rem;
+  border-radius: 1rem;
+}
+
+.clientes-search-field {
+  display: grid;
+  gap: 0.45rem;
+  flex: 1;
+  min-width: min(100%, 420px);
+}
+
+.clientes-search-field span {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #cbd5e1;
+}
+
+.clientes-search-field input {
+  width: 100%;
+  padding: 0.85rem 0.95rem;
+  background: rgba(15, 23, 42, 0.86);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 0.85rem;
+  color: #e2e8f0;
+  font-size: 0.95rem;
+}
+
+.clientes-search-field input:focus {
+  outline: none;
+  border-color: rgba(56, 189, 248, 0.6);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
+}
+
+.clientes-toolbar-count {
+  color: #94a3b8;
+  font-size: 0.88rem;
+  white-space: nowrap;
 }
 
 .error-alert {
@@ -527,8 +739,25 @@ onUnmounted(() => {
   margin-bottom: 1.5rem;
 }
 
+.clientes-table-shell {
+  border-radius: 1rem;
+  overflow: hidden;
+}
+
+.clientes-table-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 1.15rem 0.75rem;
+}
+
+.clientes-table-header-row h3 {
+  font-size: 1.1rem;
+}
+
 .clientes-table {
   overflow-x: auto;
+  padding: 0 0.9rem 0.9rem;
 }
 
 table {
@@ -536,7 +765,8 @@ table {
   border-collapse: collapse;
   background-color: rgba(15, 23, 42, 0.6);
   border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.5rem;
+  border-radius: 0.85rem;
+  overflow: hidden;
 }
 
 thead {
@@ -567,6 +797,32 @@ td {
   padding: 1rem;
   color: #cbd5e1;
   font-size: 0.9375rem;
+}
+
+.cliente-main-cell {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.cliente-main-cell strong {
+  color: #f8fafc;
+  font-size: 0.96rem;
+}
+
+.cliente-main-cell small {
+  color: #94a3b8;
+  font-size: 0.78rem;
+}
+
+.iva-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.16);
+  color: #bfdbfe;
+  font-size: 0.8rem;
+  font-weight: 600;
 }
 
 .acciones {
@@ -625,10 +881,12 @@ td {
 .empty-state {
   text-align: center;
   padding: 3rem 2rem;
-  background-color: rgba(15, 23, 42, 0.6);
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.5rem;
+  border-radius: 1rem;
   color: #94a3b8;
+}
+
+.empty-state-search {
+  padding-block: 2.2rem;
 }
 
 .empty-state p {
@@ -649,7 +907,9 @@ td {
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: rgba(0, 0, 0, 0.7);
+  padding: 1.5rem;
+  background: rgba(2, 6, 23, 0.78);
+  backdrop-filter: blur(10px);
   display: flex;
   justify-content: center;
   align-items: center;
@@ -657,96 +917,117 @@ td {
 }
 
 .modal {
-  background-color: #0f172a;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.75rem;
-  width: 130%;
-  max-width: 530px;
-  max-height: 96vh;
+  width: min(760px, 100%);
+  max-height: min(88vh, 920px);
   overflow-y: auto;
-  box-shadow: 0 40px 25px -5px rgba(0, 0, 0, 0.5);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(15, 23, 42, 0.94));
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 1.15rem;
+  box-shadow: 0 34px 80px rgba(2, 6, 23, 0.58);
 }
 
 .modal-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  padding: 1.5rem;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1.45rem 1.6rem 1.1rem;
   border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.modal-header-copy {
+  display: grid;
+  gap: 0.28rem;
+}
+
+.modal-kicker {
+  color: #93c5fd;
 }
 
 .modal-header h3 {
   margin: 0;
-  color: #e2e8f0;
-  font-size: 1.25rem;
+  color: #f8fafc;
+  font-size: 1.45rem;
+}
+
+.modal-header p {
+  margin: 0;
+  color: #94a3b8;
+  line-height: 1.45;
 }
 
 .btn-close {
-  background: none;
-  border: none;
+  width: 2.5rem;
+  height: 2.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 999px;
   color: #94a3b8;
-  font-size: 2rem;
+  font-size: 1.7rem;
+  line-height: 1;
   cursor: pointer;
   padding: 0;
-  transition: color 0.2s;
+  flex-shrink: 0;
+  transition: all 0.2s;
 }
 
 .btn-close:hover {
-  color: #cbd5e1;
+  color: #e2e8f0;
+  border-color: rgba(147, 197, 253, 0.34);
+  background: rgba(30, 41, 59, 0.95);
 }
 
 .modal-form {
-  padding: 1rem 1.25rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.65rem;
+  padding: 1.3rem 1.6rem 1.6rem;
+  display: grid;
+  gap: 1.25rem;
+}
+
+.modal-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem 1.1rem;
 }
 
 .form-group {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.48rem;
+}
+
+.form-group-full {
+  grid-column: 1 / -1;
 }
 
 .form-group span {
-  font-size: 0.875rem;
-  font-weight: 500;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: #cbd5e1;
 }
 
-.form-group input {
-  padding: 0.5rem 0.75rem;
-  background-color: rgba(30, 41, 59, 0.8);
-  border: 1px solid rgba(148, 163, 184, 0.3);
-  border-radius: 0.375rem;
-  color: #e2e8f0;
-  font-size: 0.875rem;
-  transition: all 0.2s;
-}
-
-.form-group input:focus {
-  outline: none;
-  border-color: #3b82f6;
-  background-color: rgba(30, 41, 59, 1);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
-}
-
+.form-group input,
 .form-group select {
-  padding: 0.5rem 0.75rem;
-  background-color: rgba(30, 41, 59, 0.8);
-  border: 1px solid rgba(148, 163, 184, 0.3);
-  border-radius: 0.375rem;
+  min-height: 3rem;
+  padding: 0.78rem 0.9rem;
+  background-color: rgba(15, 23, 42, 0.86);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 0.8rem;
   color: #e2e8f0;
-  font-size: 0.875rem;
+  font-size: 0.94rem;
   transition: all 0.2s;
-  cursor: pointer;
 }
 
+.form-group input:focus,
 .form-group select:focus {
   outline: none;
-  border-color: #3b82f6;
-  background-color: rgba(30, 41, 59, 1);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  border-color: rgba(96, 165, 250, 0.9);
+  background-color: rgba(15, 23, 42, 0.98);
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.12);
 }
 
 .form-group select option {
@@ -757,7 +1038,14 @@ td {
 .modal-actions {
   display: flex;
   gap: 0.75rem;
-  margin-top: 0.5rem;
+  margin-top: 0.15rem;
+}
+
+.modal-actions .btn-primary,
+.modal-actions .btn-secondary {
+  min-height: 3rem;
+  border-radius: 0.8rem;
+  font-weight: 700;
 }
 
 .btn-primary {
@@ -813,6 +1101,47 @@ td {
 
 .btn-ficha:hover {
   background-color: rgba(34, 197, 94, 0.3);
+}
+
+@media (max-width: 760px) {
+  .clientes-topbar,
+  .clientes-toolbar,
+  .ficha-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .clientes-toolbar-count {
+    white-space: normal;
+  }
+
+  .modal-overlay {
+    padding: 1rem;
+    align-items: flex-start;
+  }
+
+  .modal {
+    width: 100%;
+    margin-top: 1rem;
+  }
+
+  .modal-header,
+  .modal-form {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .modal-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .form-group-full {
+    grid-column: auto;
+  }
+
+  .modal-actions {
+    flex-direction: column;
+  }
 }
 
 /* Ficha del Cliente */

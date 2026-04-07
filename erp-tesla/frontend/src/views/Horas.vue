@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
+import { formatHoursAsClock, parseHoursInput } from "../utils/hourFormat"
 
 // Estado
 const horas = ref([])
@@ -83,6 +84,7 @@ const createEmptyFormRango = (overrides = {}) => ({
   obra_id: "",
   fecha_desde: getTodayInputDate(),
   fecha_hasta: getTodayInputDate(),
+  cantidad_horas: "",
   horas_por_dia: "",
   cantidad_horas_extra: "",
   cantidad_horas_extra_50: "",
@@ -103,6 +105,10 @@ const formDiaria = ref(createEmptyFormDiaria())
 
 // Formulario carga por rango
 const formRango = ref(createEmptyFormRango())
+const rangoDias = ref([])
+const loadingRangoDias = ref(false)
+let rangoDiasRequestToken = 0
+let plantillaRangoEmpleadoId = ""
 
 // Resumen
 const resumenEmpleado = ref([])
@@ -243,6 +249,7 @@ const getObrasDisponibles = (clienteId) => {
 
 const obrasDisponiblesDiaria = computed(() => getObrasDisponibles(formDiaria.value.cliente_id))
 const obrasDisponiblesRango = computed(() => getObrasDisponibles(formRango.value.cliente_id))
+const getObrasDisponiblesFilaRango = (clienteId) => getObrasDisponibles(clienteId)
 
 const syncObraDiariaPorEmpleado = () => {
   if (!isEmpleadoAdministrativo(formDiaria.value.empleado_id)) return
@@ -280,13 +287,19 @@ watch(() => formRango.value.obra_id, (obraId) => {
   const obra = obras.value.find((item) => String(item.id) === String(obraId))
   if (obra?.cliente_id) formRango.value.cliente_id = obra.cliente_id
 })
+watch(
+  () => [showFormRango.value, formRango.value.empleado_id, formRango.value.fecha_desde, formRango.value.fecha_hasta],
+  () => {
+    prepararDiasRango()
+  }
+)
 const syncExtraState = (formValue) => {
   const extra50 = parseNumeroHoras(formValue.cantidad_horas_extra_50) || 0
   const extra100 = parseNumeroHoras(formValue.cantidad_horas_extra_100) || 0
   const totalExtra = Math.round((extra50 + extra100) * 100) / 100
 
   formValue.es_hora_extra = totalExtra > 0
-  formValue.cantidad_horas_extra = totalExtra > 0 ? String(totalExtra) : ""
+  formValue.cantidad_horas_extra = totalExtra > 0 ? formatearHoras(totalExtra) : ""
   formValue.tipo_hora_extra = extra100 > 0 && extra50 === 0 ? "100" : (extra50 > 0 ? "50" : "")
 }
 
@@ -309,7 +322,6 @@ watch(() => [formDiaria.value.cantidad_horas_extra_50, formDiaria.value.cantidad
   syncExtraState(formDiaria.value)
 })
 watch(() => [formRango.value.cantidad_horas_extra_50, formRango.value.cantidad_horas_extra_100], () => {
-  formRango.value.cantidad_horas_extra_100 = ""
   syncExtraState(formRango.value)
 })
 
@@ -318,25 +330,16 @@ const loadResumenes = async () => {
   loadingResumen.value = true
   error.value = ""
   try {
-    console.log("Cargando resúmenes para mes:", filtroMes.value, "año:", filtroAnio.value)
-    
     const resEmpl = await api.getResumenEmpleado(filtroMes.value, filtroAnio.value)
     const resObra = await api.getResumenObra(filtroMes.value, filtroAnio.value)
     const resGrupo = await api.getResumenGrupo(filtroMes.value, filtroAnio.value)
     const resPrestadas = await api.getResumenPrestadas(filtroMes.value, filtroAnio.value)
-    
-    console.log("Respuestas:", resEmpl, resObra, resGrupo, resPrestadas)
-    
+
     // Forzar asignación limpia para reactividad
     resumenEmpleado.value = [...(resEmpl?.data || [])]
     resumenObra.value = [...(resObra?.data || [])]
     resumenGrupo.value = [...(resGrupo?.data || [])]
     resumenPrestadas.value = [...(resPrestadas?.data || [])]
-    
-    console.log("Resumen empleado:", resumenEmpleado.value)
-    console.log("Resumen obra:", resumenObra.value)
-    console.log("Resumen grupo:", resumenGrupo.value)
-    console.log("Resumen prestadas:", resumenPrestadas.value)
   } catch (err) {
     console.error("Error al cargar resúmenes:", err)
     error.value = "Error al cargar resúmenes"
@@ -354,9 +357,10 @@ const openModalDiaria = (hora = null) => {
     formDiaria.value = {
       ...hora,
       cliente_id: hora.cliente_id || "",
-      cantidad_horas_extra: hora.es_hora_extra ? Number(hora.cantidad_horas || 0) : "",
-      cantidad_horas_extra_50: tipoExtraActual === "50" ? Number(hora.cantidad_horas || 0) : "",
-      cantidad_horas_extra_100: tipoExtraActual === "100" ? Number(hora.cantidad_horas || 0) : "",
+      cantidad_horas: formatearHoras(hora.cantidad_horas ?? hora.horas_trabajadas),
+      cantidad_horas_extra: hora.es_hora_extra ? formatearHoras(hora.cantidad_horas || 0) : "",
+      cantidad_horas_extra_50: tipoExtraActual === "50" ? formatearHoras(hora.cantidad_horas || 0) : "",
+      cantidad_horas_extra_100: tipoExtraActual === "100" ? formatearHoras(hora.cantidad_horas || 0) : "",
       tipo_hora_extra: tipoExtraActual,
     }
     modoDiaria.value = (hora.hora_inicio && hora.hora_fin) ? "horario" : "cantidad"
@@ -382,19 +386,425 @@ const closeModalRango = () => {
   showFormRango.value = false
   modoRango.value = "cantidad"
   formRango.value = createEmptyFormRango()
+  rangoDias.value = []
+  loadingRangoDias.value = false
+  plantillaRangoEmpleadoId = ""
+}
+
+const buildRangoDiaBase = ({ fecha, empleadoId, base = null, existentes = [] }) => {
+  const esEmpleadoAdmin = isEmpleadoAdministrativo(empleadoId)
+  const obraAdmin = esEmpleadoAdmin ? getObraAdministrativaParaEmpleado(empleadoId) : null
+  const modo = base?.hora_inicio && base?.hora_fin ? "horario" : "cantidad"
+  const horasNormales = base?.cantidad_horas ?? base?.horas_trabajadas
+  const extra50 = Number(base?.cantidad_horas_extra_50 || 0)
+  const extra100 = Number(base?.cantidad_horas_extra_100 || 0)
+
+  return {
+    key: `${fecha}-${existentes.map((item) => item.id).join("-") || "new"}`,
+    fecha,
+    incluir: true,
+    existenteIds: existentes.map((item) => item.id),
+    tieneRegistrosExistentes: existentes.length > 0,
+    tieneMultiplesRegistros: false,
+    cliente_id: esEmpleadoAdmin ? "" : (base?.cliente_id || ""),
+    obra_id: esEmpleadoAdmin ? (obraAdmin?.id || "") : (base?.obra_id || ""),
+    modo,
+    cantidad_horas: modo === "cantidad" && Number.isFinite(Number(horasNormales)) ? formatearHoras(horasNormales) : "",
+    hora_inicio: base?.hora_inicio || "",
+    hora_fin: base?.hora_fin || "",
+    cantidad_horas_extra_50: extra50 > 0 ? formatearHoras(extra50) : "",
+    cantidad_horas_extra_100: extra100 > 0 ? formatearHoras(extra100) : "",
+    observaciones: base?.observaciones || "",
+    es_prestada: Boolean(base?.es_prestada),
+    grupo_origen_id: base?.grupo_origen_id || "",
+    grupo_destino_id: base?.grupo_destino_id || "",
+  }
+}
+
+const getMesesEnRango = (fechaDesde, fechaHasta) => {
+  const inicio = parseLocalDate(fechaDesde)
+  const fin = parseLocalDate(fechaHasta)
+  if (!inicio || !fin || inicio > fin) return []
+
+  const cursor = new Date(inicio.getFullYear(), inicio.getMonth(), 1)
+  const limite = new Date(fin.getFullYear(), fin.getMonth(), 1)
+  const meses = []
+
+  while (cursor <= limite) {
+    meses.push({ mes: cursor.getMonth() + 1, anio: cursor.getFullYear() })
+    cursor.setMonth(cursor.getMonth() + 1)
+  }
+
+  return meses
+}
+
+const getDiasRango = (fechaDesde, fechaHasta) => {
+  const inicio = parseLocalDate(fechaDesde)
+  const fin = parseLocalDate(fechaHasta)
+  if (!inicio || !fin || inicio > fin) return []
+
+  const dias = []
+  const cursor = new Date(inicio)
+  while (cursor <= fin) {
+    if (cursor.getDay() !== 0) {
+      dias.push(formatLocalDate(cursor))
+    }
+    cursor.setDate(cursor.getDate() + 1)
+  }
+  return dias
+}
+
+const getResumenExistentePorFecha = (registros = [], fecha, empleadoId) => {
+  const registrosDia = registros.filter((item) => String(item.empleado_id) === String(empleadoId) && String(item.fecha) === String(fecha))
+  if (!registrosDia.length) return null
+
+  const registrosBase = registrosDia.filter((item) => !item.es_hora_extra)
+  const firmasBase = new Set(
+    registrosBase.map((item) => [
+      item.cliente_id || "",
+      item.obra_id || "",
+      item.hora_inicio || "",
+      item.hora_fin || "",
+      item.es_prestada ? "prestada" : "normal",
+      item.grupo_origen_id || "",
+      item.grupo_destino_id || "",
+    ].join("|"))
+  )
+
+  if (registrosBase.length > 1 || firmasBase.size > 1) {
+    return {
+      fecha,
+      existenteIds: registrosDia.map((item) => item.id),
+      tieneRegistrosExistentes: true,
+      tieneMultiplesRegistros: true,
+    }
+  }
+
+  const base = registrosBase[0] || registrosDia[0]
+  const extra50 = registrosDia
+    .filter((item) => item.es_hora_extra && String(item.tipo_hora_extra || item.tipo || "") !== "100")
+    .reduce((acc, item) => acc + getCantidadHoras(item), 0)
+  const extra100 = registrosDia
+    .filter((item) => item.es_hora_extra && (String(item.tipo_hora_extra || "") === "100" || String(item.tipo || "") === "extra_100"))
+    .reduce((acc, item) => acc + getCantidadHoras(item), 0)
+
+  return {
+    ...base,
+    fecha,
+    existenteIds: registrosDia.map((item) => item.id),
+    tieneRegistrosExistentes: true,
+    tieneMultiplesRegistros: false,
+    cantidad_horas_extra_50: extra50,
+    cantidad_horas_extra_100: extra100,
+  }
+}
+
+const getPlantillaEmpleadoRango = (empleadoId) => {
+  if (String(ultimaCargaRapida.value?.empleado_id || "") === String(empleadoId)) {
+    return {
+      cliente_id: ultimaCargaRapida.value?.cliente_id || "",
+      obra_id: ultimaCargaRapida.value?.obra_id || "",
+      modo: "cantidad",
+      cantidad_horas: "",
+      hora_inicio: "",
+      hora_fin: "",
+      observaciones: "",
+      es_prestada: false,
+      grupo_origen_id: "",
+      grupo_destino_id: "",
+    }
+  }
+
+  const ultimoRegistro = [...(horas.value || [])]
+    .filter((item) => String(item.empleado_id) === String(empleadoId) && !item.es_hora_extra)
+    .sort((a, b) => (getDateObject(b.fecha)?.getTime() || 0) - (getDateObject(a.fecha)?.getTime() || 0))[0]
+
+  if (!ultimoRegistro) return null
+
+  return {
+    ...ultimoRegistro,
+    modo: ultimoRegistro.hora_inicio && ultimoRegistro.hora_fin ? "horario" : "cantidad",
+    cantidad_horas: formatearHoras(ultimoRegistro.cantidad_horas ?? ultimoRegistro.horas_trabajadas),
+    observaciones: ultimoRegistro.observaciones || "",
+    es_prestada: Boolean(ultimoRegistro.es_prestada),
+    grupo_origen_id: ultimoRegistro.grupo_origen_id || "",
+    grupo_destino_id: ultimoRegistro.grupo_destino_id || "",
+  }
+}
+
+const isPlantillaRangoVacia = () => {
+  return !(
+    formRango.value.cliente_id ||
+    formRango.value.obra_id ||
+    formRango.value.cantidad_horas ||
+    formRango.value.hora_inicio ||
+    formRango.value.hora_fin ||
+    formRango.value.cantidad_horas_extra_50 ||
+    formRango.value.cantidad_horas_extra_100 ||
+    formRango.value.observaciones ||
+    formRango.value.es_prestada ||
+    formRango.value.grupo_origen_id ||
+    formRango.value.grupo_destino_id
+  )
+}
+
+const hidratarPlantillaRango = (template) => {
+  if (!template) return
+
+  modoRango.value = template.modo || "cantidad"
+  formRango.value = {
+    ...formRango.value,
+    cliente_id: template.cliente_id || "",
+    obra_id: template.obra_id || "",
+    cantidad_horas: template.cantidad_horas || template.horas_por_dia || "",
+    horas_por_dia: template.cantidad_horas || template.horas_por_dia || "",
+    hora_inicio: template.hora_inicio || "",
+    hora_fin: template.hora_fin || "",
+    cantidad_horas_extra_50: template.cantidad_horas_extra_50 || "",
+    cantidad_horas_extra_100: template.cantidad_horas_extra_100 || "",
+    observaciones: template.observaciones || "",
+    es_prestada: Boolean(template.es_prestada),
+    grupo_origen_id: template.grupo_origen_id || "",
+    grupo_destino_id: template.grupo_destino_id || "",
+  }
+}
+
+const getPlantillaRangoActual = (fecha = "") => {
+  const esEmpleadoAdmin = isEmpleadoAdministrativo(formRango.value.empleado_id)
+  const obraAdmin = esEmpleadoAdmin ? getObraAdministrativaParaEmpleado(formRango.value.empleado_id) : null
+
+  return {
+    cliente_id: esEmpleadoAdmin ? "" : (formRango.value.cliente_id || ""),
+    obra_id: esEmpleadoAdmin ? (obraAdmin?.id || "") : (formRango.value.obra_id || ""),
+    modo: modoRango.value,
+    cantidad_horas: modoRango.value === "cantidad" ? (formRango.value.cantidad_horas || formRango.value.horas_por_dia || "") : "",
+    hora_inicio: modoRango.value === "horario" ? (formRango.value.hora_inicio || "") : "",
+    hora_fin: modoRango.value === "horario" ? (formRango.value.hora_fin || "") : "",
+    cantidad_horas_extra_50: formRango.value.cantidad_horas_extra_50 || "",
+    cantidad_horas_extra_100: fecha && !esSabado(fecha) ? "" : (formRango.value.cantidad_horas_extra_100 || ""),
+    observaciones: formRango.value.observaciones || "",
+    es_prestada: Boolean(formRango.value.es_prestada),
+    grupo_origen_id: formRango.value.es_prestada ? (formRango.value.grupo_origen_id || "") : "",
+    grupo_destino_id: formRango.value.es_prestada ? (formRango.value.grupo_destino_id || "") : "",
+  }
+}
+
+const normalizeRangoEditableData = (data, fecha = "") => {
+  const esEmpleadoAdmin = isEmpleadoAdministrativo(formRango.value.empleado_id)
+  const obraAdmin = esEmpleadoAdmin ? getObraAdministrativaParaEmpleado(formRango.value.empleado_id) : null
+  const modo = data?.modo === "horario" ? "horario" : "cantidad"
+  const esPrestada = Boolean(data?.es_prestada)
+
+  return {
+    ...data,
+    cliente_id: esEmpleadoAdmin ? "" : (data?.cliente_id || ""),
+    obra_id: esEmpleadoAdmin ? (obraAdmin?.id || "") : (data?.obra_id || ""),
+    modo,
+    cantidad_horas: modo === "cantidad" ? (data?.cantidad_horas || "") : "",
+    hora_inicio: modo === "horario" ? (data?.hora_inicio || "") : "",
+    hora_fin: modo === "horario" ? (data?.hora_fin || "") : "",
+    cantidad_horas_extra_50: data?.cantidad_horas_extra_50 || "",
+    cantidad_horas_extra_100: fecha && !esSabado(fecha) ? "" : (data?.cantidad_horas_extra_100 || ""),
+    observaciones: data?.observaciones || "",
+    es_prestada: esPrestada,
+    grupo_origen_id: esPrestada ? (data?.grupo_origen_id || "") : "",
+    grupo_destino_id: esPrestada ? (data?.grupo_destino_id || "") : "",
+  }
+}
+
+const getRangoDiaEfectivo = (dia) => {
+  if (!dia || dia.tieneMultiplesRegistros) return dia
+  if (dia.personalizado) {
+    return normalizeRangoEditableData(dia, dia.fecha)
+  }
+
+  return normalizeRangoEditableData({
+    ...dia,
+    ...getPlantillaRangoActual(dia.fecha),
+  }, dia.fecha)
+}
+
+const setPersonalizacionDiaRango = (index, personalizado) => {
+  const fila = rangoDias.value[index]
+  if (!fila || fila.tieneMultiplesRegistros) return
+
+  if (personalizado) {
+    rangoDias.value[index] = {
+      ...fila,
+      ...getRangoDiaEfectivo(fila),
+      personalizado: true,
+    }
+    return
+  }
+
+  rangoDias.value[index] = {
+    ...fila,
+    personalizado: false,
+  }
+}
+
+const aplicarPlantillaATodosLosDias = () => {
+  rangoDias.value = rangoDias.value.map((fila) => {
+    if (fila.tieneMultiplesRegistros) return fila
+    return {
+      ...fila,
+      personalizado: false,
+    }
+  })
+}
+
+const getResumenDiaRango = (dia) => {
+  const fila = getRangoDiaEfectivo(dia)
+  if (!fila) return ""
+
+  const partes = []
+
+  if (isEmpleadoAdministrativo(formRango.value.empleado_id)) {
+    partes.push(getNombreObra(fila.obra_id))
+  } else {
+    const nombreObra = getNombreObra(fila.obra_id)
+    const nombreCliente = getNombreCliente(fila.cliente_id)
+    partes.push(nombreCliente === "Sin cliente" ? nombreObra : `${nombreCliente} / ${nombreObra}`)
+  }
+
+  if (fila.modo === "horario") {
+    partes.push(fila.hora_inicio && fila.hora_fin ? `${fila.hora_inicio} a ${fila.hora_fin}` : "Horario incompleto")
+  } else {
+    partes.push(fila.cantidad_horas ? `${fila.cantidad_horas} hs` : "Horas sin completar")
+  }
+
+  if (fila.cantidad_horas_extra_50) {
+    partes.push(`Extra 50: ${fila.cantidad_horas_extra_50}`)
+  }
+
+  if (fila.cantidad_horas_extra_100) {
+    partes.push(`Extra 100: ${fila.cantidad_horas_extra_100}`)
+  }
+
+  if (fila.es_prestada) {
+    partes.push(`Prestada: ${getNombreGrupo(fila.grupo_origen_id)} -> ${getNombreGrupo(fila.grupo_destino_id)}`)
+  }
+
+  if (fila.observaciones) {
+    partes.push(fila.observaciones)
+  }
+
+  return partes.join(" · ")
+}
+
+const prepararDiasRango = async () => {
+  const empleadoId = formRango.value.empleado_id
+  const fechaDesde = formRango.value.fecha_desde
+  const fechaHasta = formRango.value.fecha_hasta
+
+  if (!showFormRango.value || !empleadoId || !fechaDesde || !fechaHasta) {
+    rangoDias.value = []
+    return
+  }
+
+  const inicio = parseLocalDate(fechaDesde)
+  const fin = parseLocalDate(fechaHasta)
+  if (!inicio || !fin || inicio > fin) {
+    rangoDias.value = []
+    return
+  }
+
+  const requestToken = ++rangoDiasRequestToken
+  loadingRangoDias.value = true
+
+  try {
+    const meses = getMesesEnRango(fechaDesde, fechaHasta)
+    const respuestas = await Promise.all(
+      meses.map(({ mes, anio }) => api.getHoras(mes, anio, empleadoId))
+    )
+
+    if (requestToken !== rangoDiasRequestToken) return
+
+    const registros = respuestas.flatMap((respuesta) => respuesta?.data || [])
+    const plantilla = getPlantillaEmpleadoRango(empleadoId)
+
+    if (plantillaRangoEmpleadoId !== String(empleadoId)) {
+      hidratarPlantillaRango(plantilla)
+      plantillaRangoEmpleadoId = String(empleadoId)
+    } else if (isPlantillaRangoVacia()) {
+      hidratarPlantillaRango(plantilla)
+    }
+
+    rangoDias.value = getDiasRango(fechaDesde, fechaHasta).map((fecha) => {
+      const resumenExistente = getResumenExistentePorFecha(registros, fecha, empleadoId)
+
+      if (resumenExistente?.tieneMultiplesRegistros) {
+        return {
+          ...buildRangoDiaBase({ fecha, empleadoId, existentes: registros.filter((item) => String(item.empleado_id) === String(empleadoId) && String(item.fecha) === String(fecha)) }),
+          incluir: false,
+          tieneMultiplesRegistros: true,
+          tieneRegistrosExistentes: true,
+          existenteIds: resumenExistente.existenteIds || [],
+          personalizado: false,
+        }
+      }
+
+      const baseDia = buildRangoDiaBase({
+        fecha,
+        empleadoId,
+        base: resumenExistente || null,
+        existentes: registros.filter((item) => String(item.empleado_id) === String(empleadoId) && String(item.fecha) === String(fecha)),
+      })
+
+      return {
+        ...baseDia,
+        personalizado: Boolean(resumenExistente),
+      }
+    })
+  } catch (err) {
+    if (requestToken !== rangoDiasRequestToken) return
+    rangoDias.value = []
+    error.value = `No se pudieron preparar los días del rango: ${err?.response?.data?.error || err?.message || "Error desconocido"}`
+  } finally {
+    if (requestToken === rangoDiasRequestToken) {
+      loadingRangoDias.value = false
+    }
+  }
+}
+
+const copiarDiaAnteriorRango = (index) => {
+  if (index <= 0) return
+  const filaAnterior = getRangoDiaEfectivo(rangoDias.value[index - 1])
+  const filaActual = rangoDias.value[index]
+  if (!filaAnterior || !filaActual || filaActual.tieneMultiplesRegistros) return
+
+  rangoDias.value[index] = {
+    ...filaActual,
+    personalizado: true,
+    cliente_id: filaAnterior.cliente_id,
+    obra_id: filaAnterior.obra_id,
+    modo: filaAnterior.modo,
+    cantidad_horas: filaAnterior.cantidad_horas,
+    hora_inicio: filaAnterior.hora_inicio,
+    hora_fin: filaAnterior.hora_fin,
+    cantidad_horas_extra_50: filaAnterior.cantidad_horas_extra_50,
+    cantidad_horas_extra_100: esSabado(filaActual.fecha) ? filaAnterior.cantidad_horas_extra_100 : "",
+    observaciones: filaAnterior.observaciones,
+    es_prestada: filaAnterior.es_prestada,
+    grupo_origen_id: filaAnterior.grupo_origen_id,
+    grupo_destino_id: filaAnterior.grupo_destino_id,
+  }
+}
+
+const aplicarPrimerDiaATodos = () => {
+  const filaModeloBase = rangoDias.value.find((item) => item.incluir && !item.tieneMultiplesRegistros)
+  const filaModelo = getRangoDiaEfectivo(filaModeloBase)
+  if (!filaModelo) return
+
+  hidratarPlantillaRango(filaModelo)
+  aplicarPlantillaATodosLosDias()
 }
 
 const parseNumeroHoras = (value) => {
-  if (value === "" || value === null || value === undefined) return null
-  if (typeof value === "number") return Number.isFinite(value) ? value : null
-  const raw = String(value).trim()
-  if (!raw) return null
-  const normalizado = raw.includes(",")
-    ? raw.replace(/\./g, "").replace(",", ".")
-    : raw
-  const numero = Number(normalizado)
-  return Number.isFinite(numero) ? numero : null
+  return parseHoursInput(value)
 }
+
+const formatearHoras = (value) => formatHoursAsClock(value)
 
 const parseLocalDate = (dateStr) => {
   if (!dateStr) return null
@@ -587,6 +997,30 @@ watch(showFormRango, (visible) => {
   }
 })
 
+const syncFilaRangoObraPorEmpleado = (fila) => {
+  if (!isEmpleadoAdministrativo(formRango.value.empleado_id)) return fila
+  const obraAdmin = getObraAdministrativaParaEmpleado(formRango.value.empleado_id)
+  return {
+    ...fila,
+    cliente_id: "",
+    obra_id: obraAdmin?.id || "",
+  }
+}
+
+const handleFilaRangoClienteChange = (fila) => {
+  const obraActual = obras.value.find((obra) => String(obra.id) === String(fila.obra_id))
+  if (obraActual && fila.cliente_id && String(obraActual.cliente_id) !== String(fila.cliente_id)) {
+    fila.obra_id = ""
+  }
+}
+
+const handleFilaRangoObraChange = (fila) => {
+  const obra = obras.value.find((item) => String(item.id) === String(fila.obra_id))
+  if (obra?.cliente_id) {
+    fila.cliente_id = obra.cliente_id
+  }
+}
+
 const isEditableTarget = (target) => {
   const tagName = String(target?.tagName || "").toUpperCase()
   return ["INPUT", "TEXTAREA", "SELECT"].includes(tagName) || target?.isContentEditable === true
@@ -677,8 +1111,14 @@ const saveHoraDiaria = async () => {
     return
   }
 
+  const horasNormalesDiaria = parseNumeroHoras(formDiaria.value.cantidad_horas)
+  if (modoDiaria.value === "cantidad" && (!Number.isFinite(horasNormalesDiaria) || horasNormalesDiaria <= 0)) {
+    error.value = "Ingresá una cantidad de horas válida en formato hora real (hh.mm)"
+    return
+  }
+
   const totalHorasDiaria = modoDiaria.value === "cantidad"
-    ? (parseNumeroHoras(formDiaria.value.cantidad_horas) || 0)
+    ? (horasNormalesDiaria || 0)
     : calcularHorasDesdeHorario(formDiaria.value.hora_inicio, formDiaria.value.hora_fin)
 
   const horasExtra50Diaria = parseNumeroHoras(formDiaria.value.cantidad_horas_extra_50) || 0
@@ -707,7 +1147,7 @@ const saveHoraDiaria = async () => {
       cliente_id: formDiaria.value.cliente_id || null,
       obra_id: formDiaria.value.obra_id,
       fecha: formDiaria.value.fecha,
-      cantidad_horas: modoDiaria.value === "cantidad" ? parseNumeroHoras(formDiaria.value.cantidad_horas) : null,
+      cantidad_horas: modoDiaria.value === "cantidad" ? horasNormalesDiaria : null,
       cantidad_horas_extra: totalExtraDiaria > 0 ? totalExtraDiaria : null,
       cantidad_horas_extra_50: horasExtra50Diaria > 0 ? horasExtra50Diaria : null,
       cantidad_horas_extra_100: horasExtra100Diaria > 0 ? horasExtra100Diaria : null,
@@ -748,27 +1188,8 @@ const saveHoraDiaria = async () => {
 // Guardar horas por rango
 const saveHoraRango = async () => {
   error.value = ""
-  const esEmpleadoAdmin = isEmpleadoAdministrativo(formRango.value.empleado_id)
-
-  // Asegurar que la obra esté sincronizada para empleados administrativos
-  if (esEmpleadoAdmin && !formRango.value.obra_id) {
-    const obraAdmin = getObraAdministrativaParaEmpleado(formRango.value.empleado_id)
-    if (obraAdmin?.id) {
-      formRango.value.obra_id = obraAdmin.id
-    }
-  }
-
   if (!formRango.value.empleado_id || !formRango.value.fecha_desde || !formRango.value.fecha_hasta) {
     error.value = "Empleado y fechas son obligatorios"
-    return
-  }
-
-  if (modoRango.value === "cantidad" && (!formRango.value.horas_por_dia || formRango.value.horas_por_dia <= 0)) {
-    error.value = "Ingresá las horas por día (mayor a 0)"
-    return
-  }
-  if (modoRango.value === "horario" && (!formRango.value.hora_inicio || !formRango.value.hora_fin)) {
-    error.value = "Ingresá hora de inicio y hora de fin"
     return
   }
 
@@ -780,72 +1201,107 @@ const saveHoraRango = async () => {
     return
   }
 
-  if (formRango.value.es_prestada && (!formRango.value.grupo_origen_id || !formRango.value.grupo_destino_id)) {
-    error.value = "Selecciona grupo origen y destino para horas prestadas"
+  const filasEditables = rangoDias.value.filter((fila) => fila.incluir && !fila.tieneMultiplesRegistros)
+  if (!filasEditables.length) {
+    error.value = "No hay días editables para guardar en el rango seleccionado"
     return
   }
 
-  const totalHorasRango = modoRango.value === "cantidad"
-    ? (parseNumeroHoras(formRango.value.horas_por_dia) || 0)
-    : calcularHorasDesdeHorario(formRango.value.hora_inicio, formRango.value.hora_fin)
+  const esEmpleadoAdmin = isEmpleadoAdministrativo(formRango.value.empleado_id)
+  const payloads = []
 
-  const horasExtra50Rango = parseNumeroHoras(formRango.value.cantidad_horas_extra_50) || 0
-  const horasExtra100Rango = parseNumeroHoras(formRango.value.cantidad_horas_extra_100) || 0
-  const totalExtraRango = Math.round((horasExtra50Rango + horasExtra100Rango) * 100) / 100
+  for (const filaOriginal of filasEditables) {
+    const fila = getRangoDiaEfectivo(filaOriginal)
+    const obraAdmin = esEmpleadoAdmin ? getObraAdministrativaParaEmpleado(formRango.value.empleado_id) : null
+    const obraIdFila = esEmpleadoAdmin ? (obraAdmin?.id || "") : fila.obra_id
 
-  const errorHorasExtraRango = validarDistribucionHorasExtra(
-    totalHorasRango,
-    formRango.value.cantidad_horas_extra_50,
-    formRango.value.cantidad_horas_extra_100
-  )
-  if (errorHorasExtraRango) {
-    error.value = errorHorasExtraRango
-    return
-  }
+    if (fila.es_prestada && (!fila.grupo_origen_id || !fila.grupo_destino_id)) {
+      error.value = `Completa grupo origen y destino en ${formatearFecha(fila.fecha)}`
+      return
+    }
 
-  if (horasExtra100Rango > 0) {
-    error.value = "La carga por rango genera días hábiles (lunes a viernes). Las horas al 100% del sábado cargalas desde Carga diaria."
-    return
+    if (fila.modo === "cantidad" && !fila.cantidad_horas) {
+      error.value = `Ingresá las horas de ${formatearFecha(fila.fecha)}`
+      return
+    }
+
+    if (fila.modo === "horario" && (!fila.hora_inicio || !fila.hora_fin)) {
+      error.value = `Ingresá horario completo en ${formatearFecha(fila.fecha)}`
+      return
+    }
+
+    const horasNormales = fila.modo === "cantidad"
+      ? parseNumeroHoras(fila.cantidad_horas)
+      : null
+
+    if (fila.modo === "cantidad" && (!Number.isFinite(horasNormales) || horasNormales <= 0)) {
+      error.value = `Las horas de ${formatearFecha(fila.fecha)} no tienen un formato válido`
+      return
+    }
+
+    const totalHorasFila = fila.modo === "cantidad"
+      ? (horasNormales || 0)
+      : calcularHorasDesdeHorario(fila.hora_inicio, fila.hora_fin)
+
+    const horasExtra50 = parseNumeroHoras(fila.cantidad_horas_extra_50) || 0
+    const horasExtra100 = parseNumeroHoras(fila.cantidad_horas_extra_100) || 0
+    const totalExtra = Math.round((horasExtra50 + horasExtra100) * 100) / 100
+
+    const errorExtras = validarDistribucionHorasExtra(
+      totalHorasFila,
+      fila.cantidad_horas_extra_50,
+      fila.cantidad_horas_extra_100
+    )
+
+    if (errorExtras) {
+      error.value = `${formatearFecha(fila.fecha)}: ${errorExtras}`
+      return
+    }
+
+    if (horasExtra100 > 0 && !esSabado(fila.fecha)) {
+      error.value = `Las horas al 100% solo corresponden a sábado. Revisá ${formatearFecha(fila.fecha)}`
+      return
+    }
+
+    payloads.push({
+      fila: filaOriginal,
+      payload: {
+        empleado_id: formRango.value.empleado_id,
+        cliente_id: esEmpleadoAdmin ? null : (fila.cliente_id || null),
+        obra_id: obraIdFila || null,
+        fecha: fila.fecha,
+        cantidad_horas: fila.modo === "cantidad" ? horasNormales : null,
+        cantidad_horas_extra: totalExtra > 0 ? totalExtra : null,
+        cantidad_horas_extra_50: horasExtra50 > 0 ? horasExtra50 : null,
+        cantidad_horas_extra_100: horasExtra100 > 0 ? horasExtra100 : null,
+        hora_inicio: fila.modo === "horario" ? fila.hora_inicio || null : null,
+        hora_fin: fila.modo === "horario" ? fila.hora_fin || null : null,
+        es_hora_extra: totalExtra > 0,
+        tipo_hora_extra: horasExtra100 > 0 && horasExtra50 === 0 ? "100" : (totalExtra > 0 ? "50" : null),
+        observaciones: fila.observaciones || "",
+        es_prestada: fila.es_prestada,
+        grupo_origen_id: fila.es_prestada ? fila.grupo_origen_id : null,
+        grupo_destino_id: fila.es_prestada ? fila.grupo_destino_id : null,
+      }
+    })
   }
 
   saving.value = true
   try {
-    // Generar registros de horas automáticamente
-    const fechaInicio = parseLocalDate(formRango.value.fecha_desde)
-    const fechaFin = parseLocalDate(formRango.value.fecha_hasta)
-    let fechaActual = new Date(fechaInicio)
-
-    while (fechaActual <= fechaFin) {
-      const fechaStr = formatLocalDate(fechaActual)
-      // Solo registrar de lunes a viernes (día 1-5)
-      const dia = fechaActual.getDay()
-      if (dia !== 0 && dia !== 6) {
-        // no es domingo ni sábado
-        await api.createHora({
-          empleado_id: formRango.value.empleado_id,
-          cliente_id: formRango.value.cliente_id || null,
-          obra_id: formRango.value.obra_id,
-          fecha: fechaStr,
-          cantidad_horas: modoRango.value === "cantidad" ? parseNumeroHoras(formRango.value.horas_por_dia) : null,
-          cantidad_horas_extra: totalExtraRango > 0 ? totalExtraRango : null,
-          cantidad_horas_extra_50: horasExtra50Rango > 0 ? horasExtra50Rango : null,
-          cantidad_horas_extra_100: horasExtra100Rango > 0 ? horasExtra100Rango : null,
-          hora_inicio: modoRango.value === "horario" ? formRango.value.hora_inicio || null : null,
-          hora_fin: modoRango.value === "horario" ? formRango.value.hora_fin || null : null,
-          es_hora_extra: totalExtraRango > 0,
-          tipo_hora_extra: totalExtraRango > 0 ? "50" : null,
-          es_prestada: formRango.value.es_prestada,
-          grupo_origen_id: formRango.value.es_prestada ? formRango.value.grupo_origen_id : null,
-          grupo_destino_id: formRango.value.es_prestada ? formRango.value.grupo_destino_id : null
-        })
+    for (const item of payloads) {
+      if (item.fila.tieneRegistrosExistentes && item.fila.existenteIds.length > 0) {
+        for (const id of item.fila.existenteIds) {
+          await api.deleteHora(id)
+        }
       }
-      fechaActual.setDate(fechaActual.getDate() + 1)
+
+      await api.createHora(item.payload)
     }
 
     guardarUltimaCargaRapida({
-      empleado_id: formRango.value.empleado_id,
-      cliente_id: formRango.value.cliente_id || null,
-      obra_id: formRango.value.obra_id || null,
+      empleado_id: payloads[payloads.length - 1]?.payload.empleado_id,
+      cliente_id: payloads[payloads.length - 1]?.payload.cliente_id,
+      obra_id: payloads[payloads.length - 1]?.payload.obra_id,
       fecha: formRango.value.fecha_hasta,
     })
 
@@ -1113,12 +1569,16 @@ onUnmounted(() => {
 
         <!-- Modalidad: Carga diaria -->
         <div v-if="modalidadCarga === 'diaria'" class="modalidad-content">
-          <!-- Header -->
-          <div class="horas-header">
-            <button class="btn-primary" @click="openModalDiaria()">
+          <section class="horas-topbar">
+            <div class="horas-topbar-copy">
+              <span class="section-kicker">Registro operativo</span>
+              <h2>Carga diaria</h2>
+              <p>Controlá las horas trabajadas por empleado, filtrá por período y mantené el seguimiento más ordenado.</p>
+            </div>
+            <button class="btn-primary horas-main-btn" @click="openModalDiaria()">
               + Registrar hora
             </button>
-          </div>
+          </section>
 
           <div class="atajos-bar">
             <span><strong>⌨️ Atajos:</strong></span>
@@ -1199,7 +1659,7 @@ onUnmounted(() => {
                   </div>
                   <div class="acordeon-meta">
                     <span>{{ grupo.registros.length }} registros</span>
-                    <span>{{ grupo.totalHoras.toFixed(2) }} hs</span>
+                    <span>{{ formatearHoras(grupo.totalHoras) }} hs</span>
                     <span v-if="grupo.ultimaFecha">Último: {{ formatearFecha(grupo.ultimaFecha) }}</span>
                   </div>
                 </button>
@@ -1226,9 +1686,14 @@ onUnmounted(() => {
                     </thead>
                     <tbody>
                       <tr v-for="hora in grupo.registros" :key="hora.id">
-                        <td>{{ hora.obra_id ? getNombreObraRegistro(hora) : getNombreCliente(hora.cliente_id) }}</td>
-                        <td>{{ formatearFecha(hora.fecha) }}</td>
-                        <td>{{ getCantidadHoras(hora).toFixed(2) }}</td>
+                        <td>
+                          <div class="hora-main-cell">
+                            <strong>{{ hora.obra_id ? getNombreObraRegistro(hora) : getNombreCliente(hora.cliente_id) }}</strong>
+                            <small>{{ hora.observaciones || "Sin observaciones" }}</small>
+                          </div>
+                        </td>
+                        <td class="hora-date-cell">{{ formatearFecha(hora.fecha) }}</td>
+                        <td class="hora-total-cell">{{ formatearHoras(getCantidadHoras(hora)) }}</td>
                         <td>
                           <span
                             v-if="hora.es_hora_extra"
@@ -1242,7 +1707,7 @@ onUnmounted(() => {
                           <span v-else class="badge badge-normal">Normal</span>
                         </td>
                         <td>
-                          <div class="acciones">
+                          <div class="acciones acciones-horas">
                             <button class="btn-edit" @click="openModalDiaria(hora)">
                               Editar
                             </button>
@@ -1275,14 +1740,19 @@ onUnmounted(() => {
 
         <!-- Modalidad: Carga por rango -->
         <div v-if="modalidadCarga === 'rango'" class="modalidad-content">
-          <div class="rango-info">
-            <p>📅 Registra horas para un rango de fechas. El sistema generará automáticamente un registro por cada día hábil (lunes a viernes).</p>
-          </div>
-
-          <div class="horas-header">
-            <button class="btn-primary" @click="showFormRango = true">
+          <section class="horas-topbar">
+            <div class="horas-topbar-copy">
+              <span class="section-kicker">Carga masiva</span>
+              <h2>Carga por rango</h2>
+              <p>Generá varios registros en una sola operación para acelerar la carga de semanas completas.</p>
+            </div>
+            <button class="btn-primary horas-main-btn" @click="showFormRango = true">
               + Nueva carga por rango
             </button>
+          </section>
+
+          <div class="rango-info">
+            <p>📅 Registra horas para un rango de fechas. El sistema generará automáticamente un registro por cada día hábil (lunes a viernes).</p>
           </div>
 
           <div v-if="error" class="error-alert">
@@ -1293,11 +1763,16 @@ onUnmounted(() => {
 
       <!-- Tab: Resumen -->
       <div v-if="activeTab === 'resumen'" class="tab-content">
-        <div class="resumen-header-acciones">
-          <button class="btn-primary" @click="generarResumenPdf">
+        <section class="horas-topbar resumen-topbar">
+          <div class="horas-topbar-copy">
+            <span class="section-kicker">Vista analítica</span>
+            <h2>Resumen mensual</h2>
+            <p>Consolidá horas por empleado, obra, grupo y préstamos para revisar el período completo con una lectura más clara.</p>
+          </div>
+          <button class="btn-primary horas-main-btn" @click="generarResumenPdf">
             Generar resumen PDF
           </button>
-        </div>
+        </section>
 
         <!-- Filtros para resumen -->
         <div class="filtros">
@@ -1343,7 +1818,7 @@ onUnmounted(() => {
               <tbody>
                 <tr v-for="(emp, idx) in resumenEmpleadoOrdenado" :key="idx">
                   <td>{{ emp.empleado || "-" }}</td>
-                  <td>{{ emp.total_horas?.toFixed(2) || 0 }}</td>
+                  <td>{{ formatearHoras(emp.total_horas) }}</td>
                 </tr>
               </tbody>
             </table>
@@ -1365,7 +1840,7 @@ onUnmounted(() => {
               <tbody>
                 <tr v-for="(obra, idx) in resumenObraOrdenado" :key="idx">
                   <td>{{ getEtiquetaObraClienteResumen(obra) }}</td>
-                  <td>{{ obra.total_horas?.toFixed(2) || 0 }}</td>
+                  <td>{{ formatearHoras(obra.total_horas) }}</td>
                 </tr>
               </tbody>
             </table>
@@ -1387,7 +1862,7 @@ onUnmounted(() => {
               <tbody>
                 <tr v-for="(grupo, idx) in resumenGrupoOrdenado" :key="idx">
                   <td>{{ getNombreGrupo(grupo.grupo_id) }}</td>
-                  <td>{{ grupo.total_horas?.toFixed(2) || 0 }}</td>
+                  <td>{{ formatearHoras(grupo.total_horas) }}</td>
                 </tr>
               </tbody>
             </table>
@@ -1411,7 +1886,7 @@ onUnmounted(() => {
                 </div>
                 <div class="prestada-meta">
                   <span>{{ grupo.registros.length }} registros</span>
-                  <span>{{ grupo.totalHoras.toFixed(2) }} hs</span>
+                  <span>{{ formatearHoras(grupo.totalHoras) }} hs</span>
                 </div>
               </button>
 
@@ -1430,7 +1905,7 @@ onUnmounted(() => {
                       <td>{{ formatearFecha(prest.fecha) }}</td>
                       <td>{{ prest.grupo_origen }}</td>
                       <td>{{ prest.grupo_destino }}</td>
-                      <td>{{ Number(prest.cantidad_horas || 0).toFixed(2) }}</td>
+                      <td>{{ formatearHoras(prest.cantidad_horas) }}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -1449,7 +1924,11 @@ onUnmounted(() => {
       <div v-if="showFormDiaria" class="modal-overlay" @click.self="closeModalDiaria">
         <div class="modal">
           <div class="modal-header">
-            <h3>{{ editingId ? "Editar hora" : "Registrar hora diaria" }}</h3>
+            <div class="modal-header-copy">
+              <span class="section-kicker modal-kicker">Registro diario</span>
+              <h3>{{ editingId ? "Editar hora" : "Registrar hora diaria" }}</h3>
+              <p>Cargá la jornada con sus horas normales, extras o prestadas dentro del mismo flujo operativo.</p>
+            </div>
             <button class="btn-close" @click="closeModalDiaria">×</button>
           </div>
 
@@ -1511,7 +1990,7 @@ onUnmounted(() => {
                 v-model="formDiaria.cantidad_horas"
                 type="text"
                 inputmode="decimal"
-                placeholder="Ej: 8"
+                placeholder="Ej: 8.30"
               />
             </label>
 
@@ -1533,7 +2012,7 @@ onUnmounted(() => {
                   v-model="formDiaria.cantidad_horas_extra_50"
                   type="text"
                   inputmode="decimal"
-                  placeholder="Ej: 1"
+                  placeholder="Ej: 0.30"
                 />
               </label>
 
@@ -1543,12 +2022,13 @@ onUnmounted(() => {
                   v-model="formDiaria.cantidad_horas_extra_100"
                   type="text"
                   inputmode="decimal"
-                  placeholder="Ej: 2"
+                  placeholder="Ej: 0.30"
                 />
               </label>
             </div>
 
             <div class="info-rango">
+              <div>Formato de carga: <strong>hora real</strong>. Ejemplos: <strong>8.30</strong> = 8 horas y media, <strong>0.30</strong> = media hora.</div>
               <template v-if="esSabadoDiaria">
                 Podés separar en la misma carga cuántas horas van al <strong>50%</strong> y cuántas al <strong>100%</strong>.
               </template>
@@ -1607,9 +2087,13 @@ onUnmounted(() => {
 
       <!-- Modal: Carga por rango -->
       <div v-if="showFormRango" class="modal-overlay" @click.self="closeModalRango">
-        <div class="modal">
+        <div class="modal modal-rango">
           <div class="modal-header">
-            <h3>Registrar horas por rango de fechas</h3>
+            <div class="modal-header-copy">
+              <span class="section-kicker modal-kicker">Registro por rango</span>
+              <h3>Registrar horas por rango de fechas</h3>
+              <p>Prepará una plantilla para varios días y resolvé la carga masiva con menos pasos manuales.</p>
+            </div>
             <button class="btn-close" @click="closeModalRango">×</button>
           </div>
 
@@ -1660,86 +2144,276 @@ onUnmounted(() => {
               </label>
             </div>
 
-            <div class="modo-selector">
-              <label :class="['modo-btn', { active: modoRango === 'cantidad' }]">
-                <input type="radio" v-model="modoRango" value="cantidad" hidden />
-                Horas por día
-              </label>
-              <label :class="['modo-btn', { active: modoRango === 'horario' }]">
-                <input type="radio" v-model="modoRango" value="horario" hidden />
-                De hora a hora
-              </label>
-            </div>
-
-            <label v-if="modoRango === 'cantidad'" class="form-group">
-              <span>Horas por día *</span>
-              <input
-                v-model="formRango.horas_por_dia"
-                type="text"
-                inputmode="decimal"
-                placeholder="Ej: 8"
-              />
-            </label>
-
-            <div v-if="modoRango === 'horario'" class="form-row">
-              <label class="form-group">
-                <span>Hora inicio *</span>
-                <input v-model="formRango.hora_inicio" type="time" />
-              </label>
-              <label class="form-group">
-                <span>Hora fin *</span>
-                <input v-model="formRango.hora_fin" type="time" />
-              </label>
-            </div>
-
-            <label class="form-group">
-              <span>Horas extra al 50% por día</span>
-              <input
-                v-model="formRango.cantidad_horas_extra_50"
-                type="text"
-                inputmode="decimal"
-                placeholder="Ej: 1"
-              />
-            </label>
-
             <div class="info-rango">
-              En <strong>carga por rango</strong> solo se habilitan horas extra al <strong>50%</strong>. Las horas al <strong>100%</strong> del sábado cargalas desde <strong>Carga diaria</strong>.
+              <div>Definí una plantilla general y usala para todo el rango. Después sólo abrís excepciones en los días que cambian.</div>
+              <div>Formato de carga: <strong>hora real</strong>. Ejemplos: <strong>8.30</strong> = 8 horas y media, <strong>0.30</strong> = media hora.</div>
+              <div>Los domingos se omiten automáticamente. Si un día ya tenía varios registros, queda bloqueado para no pisar información mezclada.</div>
             </div>
 
-            <label class="form-group checkbox">
-              <input v-model="formRango.es_prestada" type="checkbox" />
-              <span>Es hora prestada (entre grupos)</span>
-            </label>
+            <div v-if="loadingRangoDias" class="loading-rango-dias">
+              Preparando días del rango...
+            </div>
 
-            <template v-if="formRango.es_prestada">
-              <label class="form-group">
-                <span>Grupo origen *</span>
-                <select v-model="formRango.grupo_origen_id" required>
-                  <option value="">Seleccionar grupo...</option>
-                  <option v-for="grupo in grupos" :key="grupo.id" :value="grupo.id">
-                    {{ grupo.nombre }}
-                  </option>
-                </select>
-              </label>
+            <div v-else-if="rangoDias.length > 0" class="rango-grid-wrapper">
+              <div class="rango-template-card">
+                <div class="rango-grid-header">
+                  <strong>Plantilla general</strong>
+                  <div class="rango-template-actions">
+                    <button type="button" class="btn-secondary btn-small" @click="aplicarPrimerDiaATodos">
+                      Tomar primer día como plantilla
+                    </button>
+                    <button type="button" class="btn-secondary btn-small" @click="aplicarPlantillaATodosLosDias">
+                      Aplicar plantilla a todos
+                    </button>
+                  </div>
+                </div>
 
-              <label class="form-group">
-                <span>Grupo destino *</span>
-                <select v-model="formRango.grupo_destino_id" required>
-                  <option value="">Seleccionar grupo...</option>
-                  <option v-for="grupo in grupos" :key="grupo.id" :value="grupo.id">
-                    {{ grupo.nombre }}
-                  </option>
-                </select>
-              </label>
-            </template>
+                <label v-if="!isEmpleadoAdministrativo(formRango.empleado_id)" class="form-group compact">
+                  <span>Cliente</span>
+                  <select v-model="formRango.cliente_id">
+                    <option value="">Sin cliente</option>
+                    <option v-for="cliente in clientesOrdenados" :key="cliente.id" :value="cliente.id">
+                      {{ cliente.empresa || cliente.razon_social }}
+                    </option>
+                  </select>
+                </label>
 
-            <div class="info-rango">
-              Se generarán registros automáticamente para cada día hábil (lunes a viernes) en el rango seleccionado.
+                <label v-if="!isEmpleadoAdministrativo(formRango.empleado_id)" class="form-group compact">
+                  <span>Obra</span>
+                  <select v-model="formRango.obra_id">
+                    <option value="">Sin obra</option>
+                    <option v-for="obra in obrasDisponiblesRango" :key="obra.id" :value="obra.id">
+                      {{ obra.nombre }}
+                    </option>
+                  </select>
+                </label>
+
+                <div v-else class="info-rango compact">
+                  Obra: <strong>Administracion</strong>
+                </div>
+
+                <div class="modo-selector compact">
+                  <label :class="['modo-btn', { active: modoRango === 'cantidad' }]">
+                    <input v-model="modoRango" type="radio" value="cantidad" hidden />
+                    Cantidad
+                  </label>
+                  <label :class="['modo-btn', { active: modoRango === 'horario' }]">
+                    <input v-model="modoRango" type="radio" value="horario" hidden />
+                    Horario
+                  </label>
+                </div>
+
+                <label v-if="modoRango === 'cantidad'" class="form-group compact">
+                  <span>Horas de la plantilla</span>
+                  <input v-model="formRango.cantidad_horas" type="text" inputmode="decimal" placeholder="Ej: 8.30" />
+                </label>
+
+                <div v-else class="form-row compact-row">
+                  <label class="form-group compact">
+                    <span>Inicio</span>
+                    <input v-model="formRango.hora_inicio" type="time" />
+                  </label>
+                  <label class="form-group compact">
+                    <span>Fin</span>
+                    <input v-model="formRango.hora_fin" type="time" />
+                  </label>
+                </div>
+
+                <div class="form-row compact-row">
+                  <label class="form-group compact">
+                    <span>Extra 50%</span>
+                    <input v-model="formRango.cantidad_horas_extra_50" type="text" inputmode="decimal" placeholder="0.30" />
+                  </label>
+                  <label class="form-group compact">
+                    <span>Extra 100% para sábados</span>
+                    <input v-model="formRango.cantidad_horas_extra_100" type="text" inputmode="decimal" placeholder="0.30" />
+                  </label>
+                </div>
+
+                <label class="form-group checkbox compact">
+                  <input v-model="formRango.es_prestada" type="checkbox" />
+                  <span>Hora prestada</span>
+                </label>
+
+                <div v-if="formRango.es_prestada" class="form-row compact-row">
+                  <label class="form-group compact">
+                    <span>Grupo origen</span>
+                    <select v-model="formRango.grupo_origen_id">
+                      <option value="">Seleccionar grupo...</option>
+                      <option v-for="grupo in grupos" :key="grupo.id" :value="grupo.id">
+                        {{ grupo.nombre }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="form-group compact">
+                    <span>Grupo destino</span>
+                    <select v-model="formRango.grupo_destino_id">
+                      <option value="">Seleccionar grupo...</option>
+                      <option v-for="grupo in grupos" :key="grupo.id" :value="grupo.id">
+                        {{ grupo.nombre }}
+                      </option>
+                    </select>
+                  </label>
+                </div>
+
+                <label class="form-group compact">
+                  <span>Observación</span>
+                  <input v-model="formRango.observaciones" type="text" placeholder="Opcional para todo el rango" />
+                </label>
+              </div>
+
+              <div class="rango-grid-header">
+                <strong>{{ rangoDias.length }} días en el rango</strong>
+                <span class="rango-grid-hint">Personalizá sólo los días distintos.</span>
+              </div>
+
+              <div class="rango-grid">
+                <div
+                  v-for="(dia, index) in rangoDias"
+                  :key="dia.key"
+                  class="rango-day-card"
+                  :class="{ bloqueado: dia.tieneMultiplesRegistros }"
+                >
+                  <div class="rango-day-top">
+                    <div>
+                      <strong>{{ formatearFecha(dia.fecha) }}</strong>
+                      <div class="rango-day-date-raw">{{ dia.fecha }}</div>
+                    </div>
+                    <div class="rango-day-badges">
+                      <span v-if="!dia.tieneMultiplesRegistros" :class="['badge', dia.personalizado ? 'badge-warning' : 'badge-normal']">
+                        {{ dia.personalizado ? 'Excepción' : 'Plantilla' }}
+                      </span>
+                      <span v-if="dia.tieneRegistrosExistentes && !dia.tieneMultiplesRegistros" class="badge badge-warning">Ya cargado</span>
+                      <span v-if="dia.tieneMultiplesRegistros" class="badge badge-danger">Varios registros</span>
+                      <span v-if="esSabado(dia.fecha)" class="badge badge-extra-100">Sábado</span>
+                    </div>
+                  </div>
+
+                  <label class="form-group checkbox compact">
+                    <input v-model="dia.incluir" type="checkbox" :disabled="dia.tieneMultiplesRegistros" />
+                    <span>Incluir este día</span>
+                  </label>
+
+                  <div v-if="dia.tieneMultiplesRegistros" class="info-rango warning">
+                    Este día ya tiene varios registros. Para no mezclar datos distintos, editá ese caso desde <strong>Carga diaria</strong>.
+                  </div>
+
+                  <template v-else>
+                    <div class="rango-day-actions">
+                      <button type="button" class="btn-secondary btn-small" @click="setPersonalizacionDiaRango(index, !dia.personalizado)">
+                        {{ dia.personalizado ? 'Usar plantilla' : 'Personalizar día' }}
+                      </button>
+                      <button type="button" class="btn-secondary btn-small" @click="copiarDiaAnteriorRango(index)" :disabled="index === 0">
+                        Copiar día anterior
+                      </button>
+                    </div>
+
+                    <div class="rango-day-summary">
+                      {{ getResumenDiaRango(dia) }}
+                    </div>
+
+                    <div v-if="dia.personalizado" class="rango-day-editor">
+                      <label v-if="!isEmpleadoAdministrativo(formRango.empleado_id)" class="form-group compact">
+                        <span>Cliente</span>
+                        <select v-model="dia.cliente_id" @change="handleFilaRangoClienteChange(dia)">
+                          <option value="">Sin cliente</option>
+                          <option v-for="cliente in clientesOrdenados" :key="cliente.id" :value="cliente.id">
+                            {{ cliente.empresa || cliente.razon_social }}
+                          </option>
+                        </select>
+                      </label>
+
+                      <label v-if="!isEmpleadoAdministrativo(formRango.empleado_id)" class="form-group compact">
+                        <span>Obra</span>
+                        <select v-model="dia.obra_id" @change="handleFilaRangoObraChange(dia)">
+                          <option value="">Sin obra</option>
+                          <option v-for="obra in getObrasDisponiblesFilaRango(dia.cliente_id)" :key="obra.id" :value="obra.id">
+                            {{ obra.nombre }}
+                          </option>
+                        </select>
+                      </label>
+
+                      <div v-else class="info-rango compact">
+                        Obra: <strong>Administracion</strong>
+                      </div>
+
+                      <div class="modo-selector compact">
+                        <label :class="['modo-btn', { active: dia.modo === 'cantidad' }]">
+                          <input type="radio" v-model="dia.modo" value="cantidad" hidden />
+                          Cantidad
+                        </label>
+                        <label :class="['modo-btn', { active: dia.modo === 'horario' }]">
+                          <input type="radio" v-model="dia.modo" value="horario" hidden />
+                          Horario
+                        </label>
+                      </div>
+
+                      <label v-if="dia.modo === 'cantidad'" class="form-group compact">
+                        <span>Horas</span>
+                        <input v-model="dia.cantidad_horas" type="text" inputmode="decimal" placeholder="Ej: 8.30" />
+                      </label>
+
+                      <div v-else class="form-row compact-row">
+                        <label class="form-group compact">
+                          <span>Inicio</span>
+                          <input v-model="dia.hora_inicio" type="time" />
+                        </label>
+                        <label class="form-group compact">
+                          <span>Fin</span>
+                          <input v-model="dia.hora_fin" type="time" />
+                        </label>
+                      </div>
+
+                      <div class="form-row compact-row">
+                        <label class="form-group compact">
+                          <span>Extra 50%</span>
+                          <input v-model="dia.cantidad_horas_extra_50" type="text" inputmode="decimal" placeholder="0.30" />
+                        </label>
+                        <label class="form-group compact" v-if="esSabado(dia.fecha)">
+                          <span>Extra 100%</span>
+                          <input v-model="dia.cantidad_horas_extra_100" type="text" inputmode="decimal" placeholder="0.30" />
+                        </label>
+                      </div>
+
+                      <label class="form-group checkbox compact">
+                        <input v-model="dia.es_prestada" type="checkbox" />
+                        <span>Hora prestada</span>
+                      </label>
+
+                      <div v-if="dia.es_prestada" class="form-row compact-row">
+                        <label class="form-group compact">
+                          <span>Grupo origen</span>
+                          <select v-model="dia.grupo_origen_id">
+                            <option value="">Seleccionar grupo...</option>
+                            <option v-for="grupo in grupos" :key="grupo.id" :value="grupo.id">
+                              {{ grupo.nombre }}
+                            </option>
+                          </select>
+                        </label>
+                        <label class="form-group compact">
+                          <span>Grupo destino</span>
+                          <select v-model="dia.grupo_destino_id">
+                            <option value="">Seleccionar grupo...</option>
+                            <option v-for="grupo in grupos" :key="grupo.id" :value="grupo.id">
+                              {{ grupo.nombre }}
+                            </option>
+                          </select>
+                        </label>
+                      </div>
+
+                      <label class="form-group compact">
+                        <span>Observación</span>
+                        <input v-model="dia.observaciones" type="text" placeholder="Opcional" />
+                      </label>
+                    </div>
+                  </template>
+                </div>
+              </div>
             </div>
 
             <div class="modal-actions">
               <button type="submit" class="btn-primary" :disabled="saving">
-                {{ saving ? "Generando..." : "Generar registros" }}
+                {{ saving ? "Guardando..." : "Guardar días del rango" }}
               </button>
               <button type="button" class="btn-secondary" @click="closeModalRango">
                 Cancelar
@@ -1783,66 +2457,239 @@ onUnmounted(() => {
   border-color: #3b82f6;
   color: white;
 }
+
+.modo-selector.compact {
+  margin-bottom: 0.75rem;
+}
+
+.btn-small {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.8rem;
+}
+
+.loading-rango-dias {
+  padding: 1rem 1.25rem;
+  border-radius: 0.5rem;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  color: #cbd5e1;
+}
+
+.rango-grid-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.rango-grid-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.rango-grid-hint {
+  color: #94a3b8;
+  font-size: 0.9rem;
+}
+
+.rango-template-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  background: rgba(15, 23, 42, 0.78);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 0.9rem;
+}
+
+.rango-template-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.rango-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-height: 55vh;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+.rango-day-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 0.75rem;
+}
+
+.rango-day-card.bloqueado {
+  border-color: rgba(239, 68, 68, 0.45);
+  background: rgba(69, 10, 10, 0.22);
+}
+
+.rango-day-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.rango-day-date-raw {
+  margin-top: 0.2rem;
+  color: #94a3b8;
+  font-size: 0.8rem;
+}
+
+.rango-day-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.35rem;
+}
+
+.rango-day-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.rango-day-summary {
+  color: #cbd5e1;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.rango-day-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.compact {
+  margin-bottom: 0;
+}
+
+.compact-row {
+  gap: 0.75rem;
+}
+
+.info-rango.compact {
+  margin-bottom: 0;
+  padding: 0.75rem 1rem;
+}
+
+.info-rango.warning {
+  background-color: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #fecaca;
+}
+
+@media (max-width: 720px) {
+  .rango-grid-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .rango-template-actions,
+  .rango-day-actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .rango-template-actions .btn-small,
+  .rango-day-actions .btn-small {
+    flex: 1 1 100%;
+  }
+}
 .horas-container {
   padding: 1.5rem;
+  display: grid;
+  gap: 1.6rem;
+}
+
+.section-kicker {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #7dd3fc;
 }
 
 .tabs {
   display: flex;
-  gap: 1rem;
-  margin-bottom: 2rem;
-  border-bottom: 2px solid rgba(148, 163, 184, 0.2);
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+  padding: 0.55rem;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 1rem;
+  box-shadow: 0 18px 38px rgba(15, 23, 42, 0.28);
 }
 
 .tab {
-  padding: 0.75rem 1.5rem;
-  background: none;
-  border: none;
+  padding: 0.82rem 1.2rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 0.8rem;
   color: #94a3b8;
-  font-weight: 500;
+  font-weight: 700;
   cursor: pointer;
-  border-bottom: 3px solid transparent;
   transition: all 0.2s;
 }
 
 .tab:hover {
   color: #cbd5e1;
+  background: rgba(30, 41, 59, 0.68);
 }
 
 .tab.active {
-  color: #3b82f6;
-  border-bottom-color: #3b82f6;
+  color: #eff6ff;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.95), rgba(37, 99, 235, 0.95));
+  border-color: rgba(96, 165, 250, 0.4);
+  box-shadow: 0 10px 20px rgba(37, 99, 235, 0.22);
 }
 
 .subtabs {
   display: flex;
   gap: 0.5rem;
-  margin-bottom: 2rem;
-  padding-bottom: 1rem;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+  margin-bottom: 1.5rem;
+  padding: 0.45rem;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 0.9rem;
 }
 
 .subtab {
-  padding: 0.5rem 1rem;
-  background-color: rgba(30, 41, 59, 0.5);
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  padding: 0.72rem 1rem;
+  background-color: transparent;
+  border: 1px solid transparent;
   color: #94a3b8;
-  font-weight: 500;
+  font-weight: 700;
   font-size: 0.875rem;
   cursor: pointer;
-  border-radius: 0.375rem;
+  border-radius: 0.7rem;
   transition: all 0.2s;
 }
 
 .subtab:hover {
-  background-color: rgba(30, 41, 59, 0.8);
-  border-color: rgba(148, 163, 184, 0.3);
+  background-color: rgba(30, 41, 59, 0.72);
+  border-color: rgba(148, 163, 184, 0.24);
 }
 
 .subtab.active {
-  background-color: #3b82f6;
-  border-color: #3b82f6;
-  color: white;
+  background: rgba(59, 130, 246, 0.16);
+  border-color: rgba(96, 165, 250, 0.34);
+  color: #dbeafe;
 }
 
 .tab-content,
@@ -1861,36 +2708,73 @@ onUnmounted(() => {
 
 .rango-info {
   padding: 1rem 1.5rem;
-  background-color: rgba(59, 130, 246, 0.1);
-  border: 1px solid rgba(59, 130, 246, 0.3);
-  border-radius: 0.5rem;
+  background: linear-gradient(180deg, rgba(30, 64, 175, 0.16), rgba(15, 23, 42, 0.72));
+  border: 1px solid rgba(96, 165, 250, 0.26);
+  border-radius: 0.9rem;
   color: #93c5fd;
-  margin-bottom: 2rem;
+  margin-bottom: 1.2rem;
   font-size: 0.9375rem;
 }
 
-.resumen-header-acciones {
+.horas-topbar,
+.filtros,
+.atajos-bar,
+.empty-state,
+.resumen-seccion,
+.prestada-item,
+.acordeon-item {
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(15, 23, 42, 0.78));
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  box-shadow: 0 18px 38px rgba(15, 23, 42, 0.32);
+}
+
+.horas-topbar {
   display: flex;
-  justify-content: flex-end;
-  margin-bottom: 1rem;
+  justify-content: space-between;
+  align-items: end;
+  gap: 1.2rem;
+  flex-wrap: wrap;
+  padding: 1.4rem 1.5rem;
+  margin-bottom: 1.2rem;
+  border-radius: 1rem;
+}
+
+.horas-topbar-copy {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.horas-topbar-copy h2 {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 1.45rem;
+}
+
+.horas-topbar-copy p {
+  margin: 0;
+  color: #94a3b8;
+  max-width: 64ch;
+  line-height: 1.45;
+}
+
+.horas-main-btn {
+  white-space: nowrap;
 }
 
 .horas-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 2rem;
+  margin-bottom: 1.2rem;
 }
 
 .filtros {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 1rem;
-  margin-bottom: 2rem;
+  margin-bottom: 1.35rem;
   padding: 1.5rem;
-  background-color: rgba(15, 23, 42, 0.6);
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.5rem;
+  border-radius: 1rem;
 }
 
 .filtro-grupo {
@@ -1900,19 +2784,29 @@ onUnmounted(() => {
 }
 
 .filtro-grupo label {
-  font-size: 0.875rem;
-  font-weight: 500;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: #cbd5e1;
 }
 
 .filtro-grupo select,
 .filtro-grupo input {
-  padding: 0.5rem;
-  background-color: rgba(30, 41, 59, 0.8);
-  border: 1px solid rgba(148, 163, 184, 0.3);
-  border-radius: 0.375rem;
+  min-height: 3rem;
+  padding: 0.78rem 0.9rem;
+  background-color: rgba(15, 23, 42, 0.86);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 0.85rem;
   color: #e2e8f0;
-  font-size: 0.875rem;
+  font-size: 0.95rem;
+}
+
+.filtro-grupo select:focus,
+.filtro-grupo input:focus {
+  outline: none;
+  border-color: rgba(56, 189, 248, 0.6);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
 }
 
 .error-alert {
@@ -1932,20 +2826,18 @@ onUnmounted(() => {
 }
 
 .acordeon-item {
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.5rem;
+  border-radius: 0.9rem;
   overflow: hidden;
-  background-color: rgba(15, 23, 42, 0.55);
 }
 
 .acordeon-header {
   width: 100%;
-  padding: 0.65rem 1rem;
+  padding: 0.85rem 1rem;
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 0.75rem;
-  background: rgba(30, 41, 59, 0.7);
+  background: rgba(30, 41, 59, 0.56);
 }
 
 .acordeon-toggle {
@@ -2011,13 +2903,17 @@ onUnmounted(() => {
 }
 
 .acordeon-body {
-  padding: 1rem;
+  padding: 1.1rem;
   border-top: 1px solid rgba(148, 163, 184, 0.2);
 }
 
 .horas-table {
   overflow-x: auto;
-  margin-bottom: 2rem;
+  margin-bottom: 0.25rem;
+  padding: 0.15rem;
+  background: rgba(8, 14, 30, 0.45);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 0.9rem;
 }
 
 table {
@@ -2025,7 +2921,8 @@ table {
   border-collapse: collapse;
   background-color: rgba(15, 23, 42, 0.6);
   border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.5rem;
+  border-radius: 0.8rem;
+  overflow: hidden;
 }
 
 thead {
@@ -2056,6 +2953,37 @@ td {
   padding: 1rem;
   color: #cbd5e1;
   font-size: 0.9375rem;
+  vertical-align: middle;
+}
+
+.hora-main-cell {
+  display: grid;
+  gap: 0.22rem;
+  min-width: 280px;
+}
+
+.hora-main-cell strong {
+  color: #f8fafc;
+  font-size: 0.98rem;
+  font-weight: 600;
+}
+
+.hora-main-cell small {
+  color: #94a3b8;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.hora-date-cell {
+  white-space: nowrap;
+  color: #e2e8f0;
+}
+
+.hora-total-cell {
+  white-space: nowrap;
+  color: #93c5fd;
+  font-weight: 700;
+  font-size: 1rem;
 }
 
 .badge {
@@ -2092,32 +3020,43 @@ td {
   gap: 0.5rem;
 }
 
+.acciones-horas {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
 .btn-edit,
 .btn-delete {
-  padding: 0.4rem 0.8rem;
-  border: none;
-  border-radius: 0.375rem;
-  font-size: 0.875rem;
+  min-height: 2.2rem;
+  padding: 0.45rem 0.82rem;
+  border: 1px solid transparent;
+  border-radius: 0.65rem;
+  font-size: 0.82rem;
+  font-weight: 700;
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .btn-edit {
-  background-color: rgba(59, 130, 246, 0.2);
-  color: #60a5fa;
+  background-color: rgba(30, 64, 175, 0.36);
+  color: #bfdbfe;
+  border-color: rgba(96, 165, 250, 0.22);
 }
 
 .btn-edit:hover {
-  background-color: rgba(59, 130, 246, 0.3);
+  background-color: rgba(30, 64, 175, 0.54);
+  border-color: rgba(147, 197, 253, 0.42);
 }
 
 .btn-delete {
-  background-color: rgba(239, 68, 68, 0.2);
-  color: #fca5a5;
+  background-color: rgba(127, 29, 29, 0.32);
+  color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.18);
 }
 
 .btn-delete:hover {
-  background-color: rgba(239, 68, 68, 0.3);
+  background-color: rgba(153, 27, 27, 0.5);
+  border-color: rgba(252, 165, 165, 0.32);
 }
 
 .atajos-bar {
@@ -2127,9 +3066,7 @@ td {
   align-items: center;
   padding: 0.85rem 1rem;
   margin-bottom: 1rem;
-  background: rgba(15, 23, 42, 0.6);
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.5rem;
+  border-radius: 0.9rem;
   color: #cbd5e1;
   font-size: 0.85rem;
 }
@@ -2148,9 +3085,7 @@ td {
 .empty-state {
   text-align: center;
   padding: 3rem 2rem;
-  background-color: rgba(15, 23, 42, 0.6);
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.5rem;
+  border-radius: 1rem;
   color: #94a3b8;
 }
 
@@ -2169,9 +3104,7 @@ td {
 .resumen-seccion {
   margin-bottom: 2rem;
   padding: 1.5rem;
-  background-color: rgba(15, 23, 42, 0.6);
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.5rem;
+  border-radius: 1rem;
 }
 
 .resumen-seccion h3 {
@@ -2202,10 +3135,8 @@ td {
 }
 
 .prestada-item {
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.5rem;
+  border-radius: 0.9rem;
   overflow: hidden;
-  background-color: rgba(15, 23, 42, 0.45);
 }
 
 .prestada-header {
@@ -2250,7 +3181,9 @@ td {
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: rgba(0, 0, 0, 0.7);
+  padding: 1.5rem;
+  background: rgba(2, 6, 23, 0.78);
+  backdrop-filter: blur(10px);
   display: flex;
   justify-content: center;
   align-items: center;
@@ -2258,46 +3191,77 @@ td {
 }
 
 .modal {
-  background-color: #0f172a;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(15, 23, 42, 0.94));
   border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.75rem;
+  border-radius: 1.15rem;
   width: 90%;
   max-width: 600px;
-  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 34px 80px rgba(2, 6, 23, 0.58);
   max-height: 90vh;
   overflow-y: auto;
+}
+
+.modal-rango {
+  width: min(96vw, 980px);
+  max-width: 980px;
 }
 
 .modal-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  padding: 1.5rem;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1.45rem 1.6rem 1.1rem;
   border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.modal-header-copy {
+  display: grid;
+  gap: 0.28rem;
+}
+
+.modal-kicker {
+  color: #93c5fd;
 }
 
 .modal-header h3 {
   margin: 0;
-  color: #e2e8f0;
-  font-size: 1.25rem;
+  color: #f8fafc;
+  font-size: 1.45rem;
+}
+
+.modal-header p {
+  margin: 0;
+  color: #94a3b8;
+  line-height: 1.45;
 }
 
 .btn-close {
-  background: none;
-  border: none;
+  width: 2.5rem;
+  height: 2.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 999px;
   color: #94a3b8;
   font-size: 2rem;
   cursor: pointer;
   padding: 0;
-  transition: color 0.2s;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: all 0.2s;
 }
 
 .btn-close:hover {
-  color: #cbd5e1;
+  color: #e2e8f0;
+  border-color: rgba(147, 197, 253, 0.34);
+  background: rgba(30, 41, 59, 0.95);
 }
 
 .modal-form {
-  padding: 1.5rem;
+  padding: 1.3rem 1.6rem 1.6rem;
   display: flex;
   flex-direction: column;
   gap: 1rem;
@@ -2310,28 +3274,31 @@ td {
 }
 
 .form-group span {
-  font-size: 0.875rem;
-  font-weight: 500;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: #cbd5e1;
 }
 
 .form-group input,
 .form-group select {
-  padding: 0.75rem;
-  background-color: rgba(30, 41, 59, 0.8);
-  border: 1px solid rgba(148, 163, 184, 0.3);
-  border-radius: 0.375rem;
+  min-height: 3rem;
+  padding: 0.78rem 0.9rem;
+  background-color: rgba(15, 23, 42, 0.86);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 0.8rem;
   color: #e2e8f0;
-  font-size: 0.9375rem;
+  font-size: 0.94rem;
   transition: all 0.2s;
 }
 
 .form-group input:focus,
 .form-group select:focus {
   outline: none;
-  border-color: #3b82f6;
-  background-color: rgba(30, 41, 59, 1);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  border-color: rgba(96, 165, 250, 0.9);
+  background-color: rgba(15, 23, 42, 0.98);
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.12);
 }
 
 .form-group select option {
@@ -2363,7 +3330,7 @@ td {
   padding: 0.75rem 1rem;
   background-color: rgba(34, 197, 94, 0.1);
   border: 1px solid rgba(34, 197, 94, 0.3);
-  border-radius: 0.375rem;
+  border-radius: 0.8rem;
   color: #86efac;
   font-size: 0.875rem;
   text-align: center;
@@ -2372,17 +3339,18 @@ td {
 .modal-actions {
   display: flex;
   gap: 1rem;
-  margin-top: 1rem;
+  margin-top: 0.15rem;
 }
 
 .btn-primary {
   flex: 1;
+  min-height: 3rem;
   padding: 0.75rem;
-  background-color: #3b82f6;
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
   color: white;
   border: none;
-  border-radius: 0.375rem;
-  font-weight: 500;
+  border-radius: 0.8rem;
+  font-weight: 700;
   cursor: pointer;
   transition: all 0.2s;
 }
@@ -2398,12 +3366,13 @@ td {
 
 .btn-secondary {
   flex: 1;
+  min-height: 3rem;
   padding: 0.75rem;
   background-color: transparent;
   color: #cbd5e1;
   border: 1px solid rgba(148, 163, 184, 0.3);
-  border-radius: 0.375rem;
-  font-weight: 500;
+  border-radius: 0.8rem;
+  font-weight: 700;
   cursor: pointer;
   transition: all 0.2s;
 }

@@ -5,7 +5,13 @@
   "main": "auth.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node server.js",
+    "backup:now": "node -e \"import('./services/backup-service.js').then((m) => m.runBackupNow('manual_cli'))\"",
+    "validate:caja-db": "node ops/validate-caja-constraints.mjs",
+    "repair:hours-clock": "node ops/repair-hours-clock-period.mjs",
+    "sync:liquidaciones": "node ops/sync-liquidaciones-period.mjs",
+    "inspect:hours-period": "node ops/inspect-hours-period.mjs",
+    "revert:hours-clock-batch": "node ops/revert-hours-clock-batch.mjs"
   },
   "keywords": [],
   "author": "",

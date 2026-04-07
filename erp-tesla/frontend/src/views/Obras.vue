@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, computed } from "vue"
 import api, { extractApiErrorMessage } from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
+import { formatHoursAsClock } from "../utils/hourFormat"
 
 // Estado
 const obras = ref([])
@@ -17,6 +18,7 @@ const editingId = ref(null)
 const vistaActual = ref("lista") // "lista" o "detalle"
 const obraSeleccionada = ref(null)
 const filtroCliente = ref("")
+const filtroBusqueda = ref("")
 
 // Formulario
 const form = ref({
@@ -211,18 +213,40 @@ const totalHorasObra = computed(() => {
 const ADMIN_REGEX = /admin/i
 
 const obrasFiltradas = computed(() => {
+  const termino = filtroBusqueda.value.trim().toLowerCase()
+
   const lista = filtroCliente.value
     ? obras.value.filter((o) => String(o.cliente_id) === String(filtroCliente.value))
     : obras.value
+
   return lista.filter((o) => {
     if (ADMIN_REGEX.test(String(o.nombre || ""))) return false
     const grupo = grupos.value.find((g) => g.id === o.grupo_id)
-    return !ADMIN_REGEX.test(String(grupo?.nombre || ""))
+
+    if (ADMIN_REGEX.test(String(grupo?.nombre || ""))) return false
+
+    if (!termino) return true
+
+    const cliente = clientes.value.find((c) => c.id === o.cliente_id)
+    const searchable = [
+      o.nombre,
+      o.estado,
+      cliente?.empresa,
+      cliente?.razon_social,
+      grupo?.nombre,
+      o.fecha_inicio,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+
+    return searchable.includes(termino)
   })
 })
 
 const obrasActivas = computed(() => obrasFiltradas.value.filter((o) => o.estado === "activa"))
 const obrasFinalizadas = computed(() => obrasFiltradas.value.filter((o) => o.estado === "finalizada"))
+const obrasConInicio = computed(() => obrasFiltradas.value.filter((o) => o.fecha_inicio))
 
 // Obtener nombre del cliente
 const getNombreCliente = (clienteId) => {
@@ -248,8 +272,7 @@ const formatearMonto = (valor) => {
 }
 
 const formatearHoras = (valor) => {
-  const numero = Number(valor)
-  return Number.isFinite(numero) ? numero.toFixed(2) : "0.00"
+  return formatHoursAsClock(valor)
 }
 
 onMounted(async () => {
@@ -272,17 +295,62 @@ onUnmounted(() => {
   >
     <div class="obras-container">
       <!-- VISTA: LISTA DE OBRAS -->
-      <div v-if="vistaActual === 'lista'">
-        <!-- Encabezado: botón + filtro -->
-        <div class="obras-header">
-          <button class="btn-primary" @click="openForm()">+ Nueva obra</button>
-          <select v-model="filtroCliente" class="filtro-cliente">
-            <option value="">Todos los clientes</option>
-            <option v-for="c in clientes" :key="c.id" :value="c.id">
-              {{ c.empresa || c.razon_social }}
-            </option>
-          </select>
-        </div>
+      <div v-if="vistaActual === 'lista'" class="obras-list-view">
+        <section class="obras-topbar">
+          <div class="obras-topbar-copy">
+            <span class="section-kicker">Base operativa</span>
+            <h2>Gestión de obras</h2>
+          </div>
+          <button class="btn-primary obras-new-btn" @click="openForm()">+ Nueva obra</button>
+        </section>
+
+        <section class="obras-stats">
+          <article class="obras-stat-card obras-stat-card-active">
+            <span>Total visibles</span>
+            <strong>{{ obrasFiltradas.length }}</strong>
+            <small>Obras disponibles según los filtros actuales.</small>
+          </article>
+          <article class="obras-stat-card">
+            <span>Activas</span>
+            <strong>{{ obrasActivas.length }}</strong>
+            <small>Frentes en ejecución o todavía abiertos.</small>
+          </article>
+          <article class="obras-stat-card obras-stat-card-muted">
+            <span>Finalizadas</span>
+            <strong>{{ obrasFinalizadas.length }}</strong>
+            <small>Obras cerradas y listas para consulta histórica.</small>
+          </article>
+          <article class="obras-stat-card">
+            <span>Con inicio cargado</span>
+            <strong>{{ obrasConInicio.length }}</strong>
+            <small>Registros con fecha de arranque ya documentada.</small>
+          </article>
+        </section>
+
+        <section class="obras-toolbar">
+          <label class="obras-search-field">
+            <span>Buscar en tiempo real</span>
+            <input
+              v-model="filtroBusqueda"
+              type="text"
+              placeholder="Nombre de obra, cliente, grupo, estado o fecha"
+            />
+          </label>
+
+          <label class="obras-filter-field">
+            <span>Filtrar por cliente</span>
+            <select v-model="filtroCliente" class="filtro-cliente">
+              <option value="">Todos los clientes</option>
+              <option v-for="c in clientes" :key="c.id" :value="c.id">
+                {{ c.empresa || c.razon_social }}
+              </option>
+            </select>
+          </label>
+
+          <div class="obras-toolbar-count">
+            Mostrando {{ obrasFiltradas.length }} obra<span v-if="obrasFiltradas.length !== 1">s</span>
+          </div>
+        </section>
 
         <!-- Mensaje de error -->
         <div v-if="error" class="error-alert">{{ error }}</div>
@@ -292,8 +360,13 @@ onUnmounted(() => {
 
         <template v-if="!loading">
           <!-- OBRAS ACTIVAS -->
-          <div class="seccion-obras">
-            <h3 class="seccion-titulo activas">Obras activas <span class="badge-count">{{ obrasActivas.length }}</span></h3>
+          <section class="seccion-obras obras-table-shell">
+            <div class="obras-table-header-row">
+              <div>
+                <span class="section-kicker">Seguimiento</span>
+                <h3 class="seccion-titulo activas">Obras activas <span class="badge-count">{{ obrasActivas.length }}</span></h3>
+              </div>
+            </div>
             <div v-if="obrasActivas.length > 0" class="obras-table">
               <table>
                 <thead>
@@ -319,11 +392,16 @@ onUnmounted(() => {
               </table>
             </div>
             <div v-else class="empty-seccion">No hay obras activas</div>
-          </div>
+          </section>
 
           <!-- OBRAS FINALIZADAS -->
-          <div class="seccion-obras">
-            <h3 class="seccion-titulo finalizadas">Obras finalizadas <span class="badge-count">{{ obrasFinalizadas.length }}</span></h3>
+          <section class="seccion-obras obras-table-shell">
+            <div class="obras-table-header-row">
+              <div>
+                <span class="section-kicker">Historial</span>
+                <h3 class="seccion-titulo finalizadas">Obras finalizadas <span class="badge-count">{{ obrasFinalizadas.length }}</span></h3>
+              </div>
+            </div>
             <div v-if="obrasFinalizadas.length > 0" class="obras-table">
               <table>
                 <thead>
@@ -349,6 +427,13 @@ onUnmounted(() => {
               </table>
             </div>
             <div v-else class="empty-seccion">No hay obras finalizadas</div>
+          </section>
+
+          <div v-if="obras.length > 0 && obrasFiltradas.length === 0" class="empty-state empty-state-search">
+            <p>No hay coincidencias para la búsqueda o el cliente seleccionado</p>
+            <button class="btn-secondary" @click="filtroBusqueda = ''; filtroCliente = ''">
+              Limpiar filtros
+            </button>
           </div>
         </template>
       </div>
@@ -415,7 +500,7 @@ onUnmounted(() => {
           <div class="total-horas">
             <div class="horas-stat">
               <span class="horas-label">Horas totales:</span>
-              <span class="horas-value">{{ totalHorasObra.toFixed(2) }}</span>
+              <span class="horas-value">{{ formatearHoras(totalHorasObra) }}</span>
             </div>
             <div class="horas-stat">
               <span class="horas-label">Registro de horas:</span>
@@ -504,12 +589,17 @@ onUnmounted(() => {
       <div v-if="showForm" class="modal-overlay" @click.self="closeForm">
         <div class="modal">
           <div class="modal-header">
-            <h3>{{ editingId ? "Editar obra" : "Nueva obra" }}</h3>
+            <div class="modal-header-copy">
+              <span class="section-kicker modal-kicker">Ficha de obra</span>
+              <h3>{{ editingId ? "Editar obra" : "Nueva obra" }}</h3>
+              <p>Definí los datos base del proyecto para dejarlo listo dentro del circuito operativo.</p>
+            </div>
             <button class="btn-close" @click="closeForm">×</button>
           </div>
 
           <form @submit.prevent="saveObra" class="modal-form">
-            <label class="form-group">
+            <div class="modal-form-grid">
+            <label class="form-group form-group-full">
               <span>Nombre *</span>
               <input
                 v-model="form.nombre"
@@ -551,6 +641,7 @@ onUnmounted(() => {
               <span>Fecha de inicio</span>
               <input v-model="form.fecha_inicio" type="date" />
             </label>
+            </div>
 
             <div class="modal-actions">
               <button type="submit" class="btn-primary" :disabled="loading">
@@ -570,33 +661,167 @@ onUnmounted(() => {
 <style scoped>
 .obras-container {
   padding: 1.5rem;
+  display: grid;
+  gap: 1.75rem;
 }
 
-.obras-header {
+.obras-list-view {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.section-kicker {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #7dd3fc;
+}
+
+.obras-topbar,
+.obras-toolbar,
+.obras-table-shell,
+.obras-stat-card,
+.empty-state,
+.empty-seccion {
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(15, 23, 42, 0.78));
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  box-shadow: 0 18px 38px rgba(15, 23, 42, 0.45);
+}
+
+.obras-topbar {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 1.5rem;
-  gap: 1rem;
+  align-items: end;
+  gap: 1.2rem;
+  flex-wrap: wrap;
+  padding: 1.4rem 1.5rem;
+  border-radius: 1rem;
 }
 
+.obras-topbar-copy {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.obras-topbar-copy h2,
+.obras-table-header-row h3 {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 1.45rem;
+}
+
+.obras-topbar-copy p {
+  margin: 0;
+  color: #94a3b8;
+  max-width: 60ch;
+  line-height: 1.45;
+}
+
+.obras-new-btn {
+  white-space: nowrap;
+}
+
+.obras-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1.35rem;
+}
+
+.obras-stat-card {
+  padding: 1.15rem 1.2rem;
+  border-radius: 0.95rem;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.obras-stat-card span {
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.obras-stat-card strong {
+  font-size: 1.55rem;
+  color: #f8fafc;
+}
+
+.obras-stat-card small {
+  color: #94a3b8;
+  line-height: 1.35;
+}
+
+.obras-stat-card-active {
+  border-color: rgba(96, 165, 250, 0.28);
+}
+
+.obras-stat-card-muted strong {
+  color: #cbd5e1;
+}
+
+.obras-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 1.15rem;
+  flex-wrap: wrap;
+  padding: 1.1rem 1.2rem;
+  border-radius: 1rem;
+}
+
+.obras-search-field,
+.obras-filter-field {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.obras-search-field {
+  flex: 1 1 320px;
+}
+
+.obras-filter-field {
+  min-width: min(100%, 260px);
+}
+
+.obras-search-field span,
+.obras-filter-field span {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #cbd5e1;
+}
+
+.obras-search-field input,
 .filtro-cliente {
-  padding: 0.5rem 0.75rem;
-  background-color: rgba(30, 41, 59, 0.8);
-  border: 1px solid rgba(148, 163, 184, 0.3);
-  border-radius: 0.375rem;
+  width: 100%;
+  min-height: 3rem;
+  padding: 0.78rem 0.9rem;
+  background-color: rgba(15, 23, 42, 0.86);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 0.85rem;
   color: #e2e8f0;
-  font-size: 0.875rem;
-  min-width: 200px;
+  font-size: 0.95rem;
 }
 
+.obras-search-field input:focus,
 .filtro-cliente:focus {
   outline: none;
-  border-color: #3b82f6;
+  border-color: rgba(56, 189, 248, 0.6);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
+}
+
+.obras-toolbar-count {
+  color: #94a3b8;
+  font-size: 0.88rem;
+  white-space: nowrap;
 }
 
 .seccion-obras {
-  margin-bottom: 2rem;
+  margin-bottom: 0;
 }
 
 .seccion-titulo {
@@ -605,9 +830,9 @@ onUnmounted(() => {
   gap: 0.75rem;
   font-size: 1rem;
   font-weight: 600;
-  margin-bottom: 0.75rem;
-  padding-bottom: 0.5rem;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+  margin: 0;
+  padding: 0;
+  border-bottom: 0;
 }
 
 .seccion-titulo.activas { color: #86efac; }
@@ -623,12 +848,11 @@ onUnmounted(() => {
 }
 
 .empty-seccion {
-  padding: 1rem 1.25rem;
-  background-color: rgba(15, 23, 42, 0.4);
-  border: 1px solid rgba(148, 163, 184, 0.1);
-  border-radius: 0.5rem;
+  padding: 1rem 1.25rem 1.2rem;
+  border-radius: 0.85rem;
   color: #64748b;
   font-size: 0.875rem;
+  margin: 0 1rem 1rem;
 }
 
 .error-alert {
@@ -642,6 +866,23 @@ onUnmounted(() => {
 
 .obras-table {
   overflow-x: auto;
+  padding: 0 1rem 1rem;
+}
+
+.obras-table-shell {
+  border-radius: 1rem;
+  overflow: hidden;
+}
+
+.obras-table-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 1.15rem 0.75rem;
+}
+
+.obras-table-header-row h3 {
+  font-size: 1.1rem;
 }
 
 table {
@@ -649,7 +890,8 @@ table {
   border-collapse: collapse;
   background-color: rgba(15, 23, 42, 0.6);
   border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.5rem;
+  border-radius: 0.85rem;
+  overflow: hidden;
 }
 
 thead {
@@ -764,9 +1006,7 @@ td {
 .empty-state {
   text-align: center;
   padding: 3rem 2rem;
-  background-color: rgba(15, 23, 42, 0.6);
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.5rem;
+  border-radius: 1rem;
   color: #94a3b8;
 }
 
@@ -1018,7 +1258,9 @@ td {
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: rgba(0, 0, 0, 0.7);
+  padding: 1.5rem;
+  background: rgba(2, 6, 23, 0.78);
+  backdrop-filter: blur(10px);
   display: flex;
   justify-content: center;
   align-items: center;
@@ -1026,80 +1268,117 @@ td {
 }
 
 .modal {
-  background-color: #0f172a;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.75rem;
-  width: 130%;
-  max-width: 530px;
-  max-height: 96vh;
+  width: min(760px, 100%);
+  max-height: min(88vh, 920px);
   overflow-y: auto;
-  box-shadow: 0 40px 25px -5px rgba(0, 0, 0, 0.5);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(15, 23, 42, 0.94));
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 1.15rem;
+  box-shadow: 0 34px 80px rgba(2, 6, 23, 0.58);
 }
 
 .modal-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  padding: 1.5rem;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1.45rem 1.6rem 1.1rem;
   border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.modal-header-copy {
+  display: grid;
+  gap: 0.28rem;
+}
+
+.modal-kicker {
+  color: #93c5fd;
 }
 
 .modal-header h3 {
   margin: 0;
-  color: #e2e8f0;
-  font-size: 1.25rem;
+  color: #f8fafc;
+  font-size: 1.45rem;
+}
+
+.modal-header p {
+  margin: 0;
+  color: #94a3b8;
+  line-height: 1.45;
 }
 
 .btn-close {
-  background: none;
-  border: none;
+  width: 2.5rem;
+  height: 2.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 999px;
   color: #94a3b8;
-  font-size: 2rem;
+  font-size: 1.7rem;
+  line-height: 1;
   cursor: pointer;
   padding: 0;
-  transition: color 0.2s;
+  flex-shrink: 0;
+  transition: all 0.2s;
 }
 
 .btn-close:hover {
-  color: #cbd5e1;
+  color: #e2e8f0;
+  border-color: rgba(147, 197, 253, 0.34);
+  background: rgba(30, 41, 59, 0.95);
 }
 
 .modal-form {
-  padding: 1.5rem;
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
+  padding: 1.3rem 1.6rem 1.6rem;
+  display: grid;
+  gap: 1.25rem;
+}
+
+.modal-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem 1.1rem;
 }
 
 .form-group {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.48rem;
+}
+
+.form-group-full {
+  grid-column: 1 / -1;
 }
 
 .form-group span {
-  font-size: 0.875rem;
-  font-weight: 500;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: #cbd5e1;
 }
 
 .form-group input,
 .form-group select {
-  padding: 0.75rem;
-  background-color: rgba(30, 41, 59, 0.8);
-  border: 1px solid  rgba(148, 163, 184, 0.3);
-  border-radius: 0.375rem;
+  min-height: 3rem;
+  padding: 0.78rem 0.9rem;
+  background-color: rgba(15, 23, 42, 0.86);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 0.8rem;
   color: #e2e8f0;
-  font-size: 0.9375rem;
+  font-size: 0.94rem;
   transition: all 0.2s;
 }
 
 .form-group input:focus,
 .form-group select:focus {
   outline: none;
-  border-color: #3b82f6;
-  background-color: rgba(30, 41, 59, 1);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  border-color: rgba(96, 165, 250, 0.9);
+  background-color: rgba(15, 23, 42, 0.98);
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.12);
 }
 
 .form-group select option {
@@ -1110,7 +1389,14 @@ td {
 .modal-actions {
   display: flex;
   gap: 1rem;
-  margin-top: 1rem;
+  margin-top: 0.15rem;
+}
+
+.modal-actions .btn-primary,
+.modal-actions .btn-secondary {
+  min-height: 3rem;
+  border-radius: 0.8rem;
+  font-weight: 700;
 }
 
 .btn-primary {
@@ -1149,6 +1435,48 @@ td {
 .btn-secondary:hover {
   background-color: rgba(148, 163, 184, 0.1);
   border-color: rgba(148, 163, 184, 0.5);
+}
+
+@media (max-width: 760px) {
+  .obras-topbar,
+  .obras-toolbar,
+  .detalle-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .obras-toolbar-count {
+    white-space: normal;
+  }
+
+  .modal-overlay {
+    padding: 1rem;
+    align-items: flex-start;
+  }
+
+  .modal {
+    width: 100%;
+    margin-top: 1rem;
+  }
+
+  .modal-header,
+  .modal-form {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .modal-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .form-group-full {
+    grid-column: auto;
+  }
+
+  .modal-actions,
+  .detalle-acciones {
+    flex-direction: column;
+  }
 }
 </style>
 

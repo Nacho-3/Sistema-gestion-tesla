@@ -1,8 +1,9 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from "vue"
+import { computed, ref, onMounted, onUnmounted } from "vue"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
+import { formatHoursAsClock } from "../utils/hourFormat"
 
 const grupos = ref([])
 const loading = ref(false)
@@ -13,6 +14,7 @@ const resumen = ref(null)
 const showForm = ref(false)
 const showConfirmRename = ref(false)
 const editingId = ref(null)
+const filtroBusqueda = ref("")
 
 const formGrupo = ref({ nombre: "", descripcion: "" })
 
@@ -99,6 +101,21 @@ const normalizeEstado = (estado = "") => {
   return estado || "-"
 }
 
+const gruposFiltrados = computed(() => {
+  const termino = filtroBusqueda.value.trim().toLowerCase()
+  if (!termino) return grupos.value
+
+  return grupos.value.filter((grupo) => {
+    const searchable = [grupo.nombre, grupo.descripcion]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+    return searchable.includes(termino)
+  })
+})
+
+const gruposConDescripcion = computed(() => grupos.value.filter((grupo) => String(grupo.descripcion || "").trim()).length)
+
 onMounted(() => {
   loadGrupos()
   socket.on('grupos:changed', loadGrupos)
@@ -113,17 +130,61 @@ onUnmounted(() => {
     <div class="grupos-container">
 
       <!-- VISTA LISTA -->
-      <div v-if="vistaActual === 'lista'">
-        <div class="grupos-header">
-          <button class="btn-primary" @click="abrirFormNuevo">+ Nuevo grupo</button>
-        </div>
+      <div v-if="vistaActual === 'lista'" class="grupos-list-view">
+        <section class="grupos-topbar">
+          <div class="grupos-topbar-copy">
+            <span class="section-kicker">Base de equipos</span>
+            <h2>Gestión de grupos</h2>
+          </div>
+          <button class="btn-primary grupos-new-btn" @click="abrirFormNuevo">+ Nuevo grupo</button>
+        </section>
+
+        <section class="grupos-stats">
+          <article class="grupo-stat-card grupo-stat-card-primary">
+            <span>Total de grupos</span>
+            <strong>{{ grupos.length }}</strong>
+            <small>Equipos registrados actualmente en el sistema.</small>
+          </article>
+          <article class="grupo-stat-card">
+            <span>Con descripción</span>
+            <strong>{{ gruposConDescripcion }}</strong>
+            <small>Grupos con información descriptiva cargada.</small>
+          </article>
+          <article class="grupo-stat-card grupo-stat-card-muted">
+            <span>Visibles</span>
+            <strong>{{ gruposFiltrados.length }}</strong>
+            <small>Resultados que coinciden con la búsqueda actual.</small>
+          </article>
+        </section>
+
+        <section class="grupos-toolbar">
+          <label class="grupos-search-field">
+            <span>Buscar en tiempo real</span>
+            <input
+              v-model="filtroBusqueda"
+              type="text"
+              placeholder="Nombre del grupo o descripción"
+            />
+          </label>
+          <div class="grupos-toolbar-count">
+            Mostrando {{ gruposFiltrados.length }} de {{ grupos.length }} grupos
+          </div>
+        </section>
 
         <div v-if="error" class="error-alert">{{ error }}</div>
         <div v-if="loading" class="loading">Cargando...</div>
 
-        <div v-if="!loading && grupos.length > 0" class="grupos-grid">
+        <div v-if="!loading && gruposFiltrados.length > 0" class="grupos-grid-shell">
+          <div class="grupos-grid-header">
+            <div>
+              <span class="section-kicker">Listado</span>
+              <h3>Grupos registrados</h3>
+            </div>
+          </div>
+
+          <div class="grupos-grid">
           <div
-            v-for="grupo in grupos"
+            v-for="grupo in gruposFiltrados"
             :key="grupo.id"
             class="grupo-card"
           >
@@ -135,9 +196,15 @@ onUnmounted(() => {
             <button class="btn-detalle" @click="verDetalle(grupo)">📋 Ver resumen</button>
           </div>
         </div>
+        </div>
 
         <div v-if="!loading && grupos.length === 0" class="empty-state">
           <p>No hay grupos registrados</p>
+        </div>
+
+        <div v-if="!loading && grupos.length > 0 && gruposFiltrados.length === 0" class="empty-state empty-state-search">
+          <p>No hay coincidencias para la búsqueda actual</p>
+          <button class="btn-secondary" @click="filtroBusqueda = ''">Limpiar búsqueda</button>
         </div>
       </div>
 
@@ -175,7 +242,7 @@ onUnmounted(() => {
             <span class="stat-label">Obras finalizadas</span>
           </div>
           <div class="stat-card horas">
-            <span class="stat-value">{{ resumen.resumen.totalHoras.toFixed(1) }}</span>
+            <span class="stat-value">{{ formatHoursAsClock(resumen.resumen.totalHoras) }}</span>
             <span class="stat-label">Horas registradas</span>
           </div>
         </div>
@@ -239,19 +306,25 @@ onUnmounted(() => {
       <div v-if="showForm" class="modal-overlay" @click.self="showForm = false">
         <div class="modal">
           <div class="modal-header">
-            <h3>{{ editingId ? "Editar grupo" : "Nuevo grupo" }}</h3>
+            <div class="modal-header-copy">
+              <span class="section-kicker modal-kicker">Equipo de trabajo</span>
+              <h3>{{ editingId ? "Editar grupo" : "Nuevo grupo" }}</h3>
+              <p>Definí el nombre del equipo y agregá una descripción breve para dejarlo mejor identificado.</p>
+            </div>
             <button class="btn-close" @click="showForm = false">×</button>
           </div>
           <form @submit.prevent="guardarGrupo" class="modal-form">
             <div v-if="error" class="error-alert">{{ error }}</div>
-            <label class="form-group">
-              <span>Nombre *</span>
-              <input v-model="formGrupo.nombre" type="text" placeholder="Nombre del grupo" required />
-            </label>
-            <label class="form-group">
-              <span>Descripción</span>
-              <input v-model="formGrupo.descripcion" type="text" placeholder="Descripción opcional" />
-            </label>
+            <div class="modal-form-grid">
+              <label class="form-group form-group-full">
+                <span>Nombre *</span>
+                <input v-model="formGrupo.nombre" type="text" placeholder="Nombre del grupo" required />
+              </label>
+              <label class="form-group form-group-full">
+                <span>Descripción</span>
+                <input v-model="formGrupo.descripcion" type="text" placeholder="Descripción opcional" />
+              </label>
+            </div>
             <div class="modal-actions">
               <button type="submit" class="btn-primary" :disabled="loading">
                 {{ loading ? "Guardando..." : "Guardar" }}
@@ -269,13 +342,152 @@ onUnmounted(() => {
 <style scoped>
 .grupos-container {
   padding: 1.5rem;
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  display: grid;
+  gap: 1.75rem;
 }
 
-.grupos-header {
+.grupos-list-view {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.section-kicker {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #7dd3fc;
+}
+
+.grupos-topbar,
+.grupos-toolbar,
+.grupos-grid-shell,
+.grupo-stat-card,
+.empty-state {
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(15, 23, 42, 0.78));
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  box-shadow: 0 18px 38px rgba(15, 23, 42, 0.45);
+}
+
+.grupos-topbar {
   display: flex;
-  justify-content: flex-end;
-  margin-bottom: 2rem;
+  justify-content: space-between;
+  align-items: end;
+  gap: 1.2rem;
+  flex-wrap: wrap;
+  padding: 1.4rem 1.5rem;
+  border-radius: 1rem;
+}
+
+.grupos-topbar-copy {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.grupos-topbar-copy h2,
+.grupos-grid-header h3 {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 1.45rem;
+}
+
+.grupos-topbar-copy p {
+  margin: 0;
+  color: #94a3b8;
+  max-width: 60ch;
+  line-height: 1.45;
+}
+
+.grupos-new-btn {
+  white-space: nowrap;
+}
+
+.grupos-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1.35rem;
+}
+
+.grupo-stat-card {
+  padding: 1.15rem 1.2rem;
+  border-radius: 0.95rem;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.grupo-stat-card span {
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.grupo-stat-card strong {
+  font-size: 1.55rem;
+  color: #f8fafc;
+}
+
+.grupo-stat-card small {
+  color: #94a3b8;
+  line-height: 1.35;
+}
+
+.grupo-stat-card-primary {
+  border-color: rgba(96, 165, 250, 0.28);
+}
+
+.grupo-stat-card-muted strong {
+  color: #cbd5e1;
+}
+
+.grupos-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 1.15rem;
+  flex-wrap: wrap;
+  padding: 1.1rem 1.2rem;
+  border-radius: 1rem;
+}
+
+.grupos-search-field {
+  display: grid;
+  gap: 0.45rem;
+  flex: 1;
+  min-width: min(100%, 420px);
+}
+
+.grupos-search-field span {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #cbd5e1;
+}
+
+.grupos-search-field input {
+  width: 100%;
+  min-height: 3rem;
+  padding: 0.85rem 0.95rem;
+  background: rgba(15, 23, 42, 0.86);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 0.85rem;
+  color: #e2e8f0;
+  font-size: 0.95rem;
+}
+
+.grupos-search-field input:focus {
+  outline: none;
+  border-color: rgba(56, 189, 248, 0.6);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
+}
+
+.grupos-toolbar-count {
+  color: #94a3b8;
+  font-size: 0.88rem;
+  white-space: nowrap;
 }
 
 .error-alert {
@@ -294,26 +506,40 @@ onUnmounted(() => {
 }
 
 /* Cards en lista */
+.grupos-grid-shell {
+  border-radius: 1rem;
+  overflow: hidden;
+}
+
+.grupos-grid-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 1.15rem 0.75rem;
+}
+
 .grupos-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 1.5rem;
+  padding: 0 1rem 1rem;
 }
 
 .grupo-card {
-  background: rgba(15, 23, 42, 0.6);
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.75rem;
+  background: rgba(15, 23, 42, 0.68);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 1rem;
   padding: 1.5rem;
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
-  transition: border-color 0.2s, transform 0.15s;
+  gap: 0.9rem;
+  transition: border-color 0.2s, transform 0.15s, box-shadow 0.2s;
 }
 
 .grupo-card:hover {
   border-color: rgba(59, 130, 246, 0.4);
   transform: translateY(-2px);
+  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.3);
 }
 
 .grupo-card-header {
@@ -330,17 +556,23 @@ onUnmounted(() => {
 }
 
 .btn-edit-inline {
-  background: none;
-  border: none;
+  width: 2rem;
+  height: 2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid rgba(148, 163, 184, 0.12);
   cursor: pointer;
   font-size: 1rem;
-  padding: 0.2rem 0.4rem;
-  border-radius: 0.25rem;
-  transition: background 0.15s;
+  padding: 0;
+  border-radius: 999px;
+  transition: background 0.15s, border-color 0.15s;
 }
 
 .btn-edit-inline:hover {
   background: rgba(148, 163, 184, 0.15);
+  border-color: rgba(148, 163, 184, 0.28);
 }
 
 .grupo-desc {
@@ -368,9 +600,7 @@ onUnmounted(() => {
 .empty-state {
   text-align: center;
   padding: 3rem 2rem;
-  background: rgba(15, 23, 42, 0.6);
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.5rem;
+  border-radius: 1rem;
   color: #94a3b8;
   font-size: 1.1rem;
 }
@@ -498,6 +728,9 @@ table {
   width: 100%;
   border-collapse: collapse;
   background: rgba(15, 23, 42, 0.5);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 0.85rem;
+  overflow: hidden;
 }
 
 thead {
@@ -551,91 +784,137 @@ td {
 .modal-overlay {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0, 0, 0, 0.7);
+  padding: 1.5rem;
+  background: rgba(2, 6, 23, 0.78);
+  backdrop-filter: blur(10px);
   display: flex;
   justify-content: center;
   align-items: center;
   z-index: 1000;
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 .modal {
-  background: #0f172a;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.75rem;
-  width: 130%;
-  max-width: 480px;
-  max-height: 96vh;
+  width: min(720px, 100%);
+  max-height: min(88vh, 920px);
   overflow-y: auto;
-  box-shadow: 0 40px 25px -5px rgba(0, 0, 0, 0.5);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(15, 23, 42, 0.94));
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 1.15rem;
+  box-shadow: 0 34px 80px rgba(2, 6, 23, 0.58);
 }
 
 .modal-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  padding: 1.5rem;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1.45rem 1.6rem 1.1rem;
   border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.modal-header-copy {
+  display: grid;
+  gap: 0.28rem;
+}
+
+.modal-kicker {
+  color: #93c5fd;
 }
 
 .modal-header h3 {
   margin: 0;
-  color: #e2e8f0;
-  font-size: 1.25rem;
+  color: #f8fafc;
+  font-size: 1.45rem;
+}
+
+.modal-header p {
+  margin: 0;
+  color: #94a3b8;
+  line-height: 1.45;
 }
 
 .btn-close {
-  background: none;
-  border: none;
+  width: 2.5rem;
+  height: 2.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 999px;
   color: #94a3b8;
-  font-size: 2rem;
+  font-size: 1.7rem;
   cursor: pointer;
   padding: 0;
-  transition: color 0.2s;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: all 0.2s;
 }
-.btn-close:hover { color: #cbd5e1; }
+.btn-close:hover {
+  color: #e2e8f0;
+  border-color: rgba(147, 197, 253, 0.34);
+  background: rgba(30, 41, 59, 0.95);
+}
 
 .modal-form {
-  padding: 1.5rem;
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
+  padding: 1.3rem 1.6rem 1.6rem;
+  display: grid;
+  gap: 1.25rem;
+}
+
+.modal-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem 1.1rem;
 }
 
 .form-group {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.48rem;
+}
+
+.form-group-full {
+  grid-column: 1 / -1;
 }
 
 .form-group span {
-  font-size: 0.875rem;
-  font-weight: 500;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: #cbd5e1;
 }
 
 .form-group input {
-  padding: 0.75rem;
-  background: rgba(30, 41, 59, 0.8);
-  border: 1px solid rgba(148, 163, 184, 0.3);
-  border-radius: 0.375rem;
+  min-height: 3rem;
+  padding: 0.78rem 0.9rem;
+  background: rgba(15, 23, 42, 0.86);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 0.8rem;
   color: #e2e8f0;
-  font-size: 0.9375rem;
-  font-family: inherit;
+  font-size: 0.94rem;
   transition: all 0.2s;
 }
 
 .form-group input:focus {
   outline: none;
-  border-color: #3b82f6;
-  background: rgba(30, 41, 59, 1);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  border-color: rgba(96, 165, 250, 0.9);
+  background: rgba(15, 23, 42, 0.98);
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.12);
 }
 
 .modal-actions {
   display: flex;
   gap: 1rem;
-  margin-top: 0.5rem;
+  margin-top: 0.15rem;
+}
+
+.modal-actions .btn-primary,
+.modal-actions .btn-secondary {
+  min-height: 3rem;
+  border-radius: 0.8rem;
+  font-weight: 700;
 }
 
 .btn-primary {
@@ -668,5 +947,47 @@ td {
 .btn-secondary:hover {
   background: rgba(148, 163, 184, 0.1);
   border-color: rgba(148, 163, 184, 0.5);
+}
+
+@media (max-width: 760px) {
+  .grupos-topbar,
+  .grupos-toolbar,
+  .detalle-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .grupos-toolbar-count {
+    white-space: normal;
+  }
+
+  .modal-overlay {
+    padding: 1rem;
+    align-items: flex-start;
+  }
+
+  .modal {
+    width: 100%;
+    margin-top: 1rem;
+  }
+
+  .modal-header,
+  .modal-form {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .modal-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .form-group-full {
+    grid-column: auto;
+  }
+
+  .modal-actions,
+  .detalle-header {
+    gap: 0.9rem;
+  }
 }
 </style>

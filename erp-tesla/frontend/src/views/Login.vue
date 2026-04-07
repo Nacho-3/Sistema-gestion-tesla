@@ -3,6 +3,8 @@ import { ref } from "vue"
 import api from "../api"
 import { useRouter } from "vue-router"
 import logoTesla from "../assets/logo.png"
+import { connectAuthenticatedSocket } from "../socket.js"
+import { setStoredSession } from "../session"
 
 const router = useRouter()
 
@@ -18,7 +20,12 @@ const login = async () => {
   try {
     const res = await api.login(email.value, password.value)
 
-    localStorage.setItem("session", JSON.stringify(res.data.session))
+    setStoredSession({
+      token_type: res.data?.session?.token_type || "cookie",
+      expires_in: res.data?.session?.expires_in || 43200,
+      user: res.data?.session?.user || null,
+    })
+    connectAuthenticatedSocket()
     router.push("/dashboard")
   } catch (err) {
     error.value = "Credenciales incorrectas"

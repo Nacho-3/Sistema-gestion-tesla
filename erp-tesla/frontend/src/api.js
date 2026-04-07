@@ -1,4 +1,5 @@
 import axios from "axios"
+import { clearStoredSession } from "./session"
 
 const isViteDevServer = window.location.port === "5173"
 const DEFAULT_API_BASE_URL = isViteDevServer
@@ -8,8 +9,22 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL
 
 const api = axios.create({
   baseURL: API_BASE_URL,
+  withCredentials: true,
   timeout: 10000 // 10 segundos
 })
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error?.response?.status === 401) {
+      clearStoredSession()
+      if (window.location.pathname !== "/") {
+        window.location.href = "/"
+      }
+    }
+    return Promise.reject(error)
+  }
+)
 
 export const extractApiErrorMessage = (err, fallback = "Ocurrio un error inesperado") => {
   const responseData = err?.response?.data
@@ -41,9 +56,32 @@ export const withApiErrorMessage = (err, fallback) => ({
 })
 
 export default {
+  getDashboardResumen(mes, anio) {
+    const params = new URLSearchParams()
+    if (mes) params.append("mes", mes)
+    if (anio) params.append("anio", anio)
+    return api.get(`/dashboard/resumen?${params.toString()}`)
+  },
+
   // Auth
   login(email, password) {
     return api.post("/auth/login", { email, password })
+  },
+
+  logout() {
+    return api.post("/auth/logout")
+  },
+
+  me() {
+    return api.get("/auth/me")
+  },
+
+  createBackup() {
+    return api.post("/auth/backup")
+  },
+
+  getHealth() {
+    return api.get("/health")
   },
 
   // Clientes
@@ -237,19 +275,21 @@ export default {
   },
 
   // Caja
-  getMovimientosCaja(fecha_inicio, fecha_fin, tipo) {
+  getMovimientosCaja(fecha_inicio, fecha_fin, tipo, caja_codigo) {
     const params = new URLSearchParams()
     if (fecha_inicio) params.append("fecha_inicio", fecha_inicio)
     if (fecha_fin) params.append("fecha_fin", fecha_fin)
     if (tipo) params.append("tipo", tipo)
+    if (caja_codigo) params.append("caja_codigo", caja_codigo)
     return api.get(`/caja?${params.toString()}`)
   },
 
-  getResumenCajaPdf(fecha_inicio, fecha_fin, tipo) {
+  getResumenCajaPdf(fecha_inicio, fecha_fin, tipo, caja_codigo) {
     const params = new URLSearchParams()
     if (fecha_inicio) params.append("fecha_inicio", fecha_inicio)
     if (fecha_fin) params.append("fecha_fin", fecha_fin)
     if (tipo) params.append("tipo", tipo)
+    if (caja_codigo) params.append("caja_codigo", caja_codigo)
     return api.get(`/caja/resumen/pdf?${params.toString()}`, { responseType: "blob" })
   },
 

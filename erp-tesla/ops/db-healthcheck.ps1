@@ -1,15 +1,28 @@
 $ErrorActionPreference = "Stop"
 
+$repoRoot = Split-Path $PSScriptRoot -Parent
+$envPath = Join-Path $repoRoot "backend\.env"
+
+if (Test-Path $envPath) {
+  Get-Content $envPath | ForEach-Object {
+    if ($_ -match '^\s*#' -or $_ -match '^\s*$') { return }
+    $parts = $_ -split '=', 2
+    if ($parts.Count -eq 2) {
+      [System.Environment]::SetEnvironmentVariable($parts[0].Trim(), $parts[1].Trim(), 'Process')
+    }
+  }
+}
+
 $serviceName = "postgresql-x64-18"
-$pgBin = "C:\Program Files\PostgreSQL\18\bin"
+$pgBin = if ($env:PG_BIN) { $env:PG_BIN } else { "C:\Program Files\PostgreSQL\18\bin" }
 $psql = Join-Path $pgBin "psql.exe"
 $pgIsReady = Join-Path $pgBin "pg_isready.exe"
 
-$dbHost = "localhost"
-$dbPort = 5432
-$dbName = "erp_tesla"
-$dbUser = "postgres"
-$dbPassword = "Admin"
+$dbHost = if ($env:DB_HOST) { $env:DB_HOST } else { "localhost" }
+$dbPort = if ($env:DB_PORT) { $env:DB_PORT } else { 5432 }
+$dbName = if ($env:DB_NAME) { $env:DB_NAME } else { "erp_tesla" }
+$dbUser = if ($env:DB_USER) { $env:DB_USER } else { "postgres" }
+$dbPassword = if ($env:DB_PASSWORD) { $env:DB_PASSWORD } else { "" }
 
 Write-Host "== PostgreSQL healthcheck =="
 

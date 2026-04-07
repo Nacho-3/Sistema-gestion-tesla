@@ -5,11 +5,13 @@ import { getIo } from '../socket.js'
 import PDFDocument from "pdfkit"
 import path from "path"
 import { fileURLToPath } from "url"
+import { sanitizeFileText } from "../pdf/premiumTheme.js"
 
 const router = express.Router()
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const LOGO_PATH = path.join(__dirname, "..", "assets", "logo.png")
 const LOGO_PRESUPUESTO_PATH = path.join(__dirname, "..", "assets", "logo_presupuesto.png")
+const PRESUPUESTOS_BASE_FOLDER = path.join("C:\\Users\\usuario\\Desktop\\GESTION TESLA", "Presupuestos")
 
 const formatoMoneda = (valor) => {
 	const numero = Number(valor) || 0
@@ -79,6 +81,39 @@ const calcularTotales = ({ materiales, manoObra, aplicaIva, ivaPorcentaje, subto
 	}
 }
 
+const validarClienteObraRelacion = async (client, clienteId, obraId) => {
+	const clienteNumero = Number(clienteId)
+	const obraNumero = Number(obraId)
+
+	if (!Number.isInteger(clienteNumero) || clienteNumero <= 0) {
+		return { ok: false, status: 400, error: "cliente_id invalido" }
+	}
+
+	if (!Number.isInteger(obraNumero) || obraNumero <= 0) {
+		return { ok: false, status: 400, error: "obra_id invalido" }
+	}
+
+	const clienteResult = await client.query(`SELECT id FROM clientes WHERE id = $1 LIMIT 1`, [clienteNumero])
+	const obraResult = await client.query(`SELECT id, cliente_id FROM obras WHERE id = $1 LIMIT 1`, [obraNumero])
+
+	const clienteExiste = clienteResult.rowCount > 0
+	const obra = obraResult.rows[0]
+
+	if (!clienteExiste) {
+		return { ok: false, status: 404, error: "Cliente no encontrado" }
+	}
+
+	if (!obra) {
+		return { ok: false, status: 404, error: "Obra no encontrada" }
+	}
+
+	if (Number(obra.cliente_id) !== clienteNumero) {
+		return { ok: false, status: 400, error: "La obra seleccionada no pertenece al cliente indicado" }
+	}
+
+	return { ok: true, clienteId: clienteNumero, obraId: obraNumero }
+}
+
 const getNextNumero = async (client) => {
 	const lockRes = await client.query(
 		`
@@ -111,7 +146,10 @@ const getPresupuestoCompleto = async (id) => {
 		`
 			SELECT
 				p.*,
+				c.empresa AS cliente_empresa,
 				c.razon_social AS cliente_razon_social,
+				c.cuit AS cliente_cuit,
+				c.iva AS cliente_iva,
 				c.direccion AS cliente_direccion,
 				c.telefono AS cliente_telefono,
 				c.email AS cliente_email,
@@ -141,6 +179,307 @@ const getPresupuestoCompleto = async (id) => {
 		...cabeceraQuery.rows[0],
 		items: itemsQuery.rows,
 	}
+}
+
+const getPresupuestoEmpresaNombre = (presupuesto = {}) => {
+	return sanitizeFileText(presupuesto.cliente_empresa || presupuesto.cliente_razon_social || "Cliente") || "Cliente"
+}
+
+const getPresupuestoPdfFileName = (presupuesto = {}) => {
+	const numero = sanitizeFileText(String(presupuesto.numero || "SinNumero")) || "SinNumero"
+	const empresa = getPresupuestoEmpresaNombre(presupuesto)
+	return `Presupuesto ${numero} - ${empresa}.pdf`
+}
+
+const getPresupuestoPdfFolderPath = (presupuesto = {}) => {
+	return path.join(PRESUPUESTOS_BASE_FOLDER, `Presupuestos ${getPresupuestoEmpresaNombre(presupuesto)}`)
+}
+
+const getPresupuestoPdfFilePath = (presupuesto = {}) => {
+	return path.join(getPresupuestoPdfFolderPath(presupuesto), getPresupuestoPdfFileName(presupuesto))
+}
+
+const removeStoredPresupuestoPdf = async (presupuesto = {}) => {
+	const filePath = getPresupuestoPdfFilePath(presupuesto)
+	if (fs.existsSync(filePath)) {
+		await fs.promises.unlink(filePath)
+	}
+	return filePath
+}
+
+const renderPresupuestoPdfBuffer = async (presupuesto) => {
+	return new Promise((resolve, reject) => {
+		try {
+			const itemsMateriales = presupuesto.items.filter((item) => item.tipo === "material")
+			const itemsManoObra = presupuesto.items.filter((item) => item.tipo === "mano_obra")
+
+			const doc = new PDFDocument({ size: "A4", margin: 45 })
+			const chunks = []
+
+			doc.on("data", (chunk) => chunks.push(chunk))
+			doc.on("end", () => resolve(Buffer.concat(chunks)))
+			doc.on("error", reject)
+
+			const left = 45
+			const pageWidth = doc.page.width
+			const right = pageWidth - 45
+			const width = right - left
+			const top = 34
+			const lineColor = "#1f1f1f"
+			const muted = "#5b5b5b"
+
+			const getSafe = (value) => {
+				const text = String(value ?? "").trim()
+				return text ? text : "-"
+			}
+
+			const clienteEmpresa = getSafe(presupuesto.cliente_empresa)
+			const clienteCuit = getSafe(presupuesto.cliente_cuit)
+			const clienteIva = getSafe(presupuesto.cliente_iva)
+			const clienteDireccion = getSafe(presupuesto.cliente_direccion)
+			const clienteTelefono = getSafe(presupuesto.cliente_telefono)
+
+			const sectionHeader = (title, y) => {
+				doc.font("Helvetica-Bold").fontSize(9.6).fillColor("#111")
+				doc.text(String(title || "").toUpperCase(), left, y)
+				doc.strokeColor(lineColor).lineWidth(0.8).moveTo(left, y + 12).lineTo(right, y + 12).stroke()
+				return y + 19
+			}
+
+			const pageBottomLimit = doc.page.height - 98
+			const drawContinuationHeader = () => {
+				let y = top + 2
+				doc.font("Helvetica-Bold").fontSize(12).fillColor("#111")
+				doc.text(`PRESUPUESTO Nro ${presupuesto.numero} - CONTINUACION`, left, y)
+				doc.strokeColor(lineColor).lineWidth(0.8).moveTo(left, y + 16).lineTo(right, y + 16).stroke()
+				return y + 24
+			}
+
+			const drawTable = ({ yStart, sectionTitle, columns, rows, rowHeight = 16, subtotalLabel = null, subtotalValue = null }) => {
+				let y = yStart
+
+				const drawHeaderRow = () => {
+					doc.rect(left, y, width, rowHeight).fillAndStroke("#f3f3f3", lineColor)
+					let x = left
+					columns.forEach((col, idx) => {
+						doc.font("Helvetica-Bold").fontSize(8.5).fillColor("#111")
+						doc.text(col.label, x + 6, y + 4, { width: col.width - 12, align: col.align || "left" })
+						x += col.width
+						if (idx < columns.length - 1) {
+							doc.moveTo(x, y).lineTo(x, y + rowHeight).strokeColor(lineColor).lineWidth(0.6).stroke()
+						}
+					})
+					y += rowHeight
+				}
+
+				drawHeaderRow()
+
+				rows.forEach((row, rowIdx) => {
+					if (y + rowHeight > pageBottomLimit) {
+						doc.addPage()
+						y = drawContinuationHeader()
+						y = sectionHeader(`${sectionTitle} (continuacion)`, y)
+						drawHeaderRow()
+					}
+
+					if (rowIdx % 2 === 0) {
+						doc.rect(left, y, width, rowHeight).fill("#fbfbfb")
+					}
+					doc.rect(left, y, width, rowHeight).lineWidth(0.5).strokeColor("#6b6b6b").stroke()
+					let cellX = left
+					columns.forEach((col, idx) => {
+						doc.font("Helvetica").fontSize(8.6).fillColor("#111")
+						doc.text(String(row[idx] ?? "-"), cellX + 6, y + 4, {
+							width: col.width - 12,
+							align: col.align || "left",
+						})
+						cellX += col.width
+						if (idx < columns.length - 1) {
+							doc.moveTo(cellX, y).lineTo(cellX, y + rowHeight).strokeColor("#808080").lineWidth(0.35).stroke()
+						}
+					})
+					y += rowHeight
+				})
+
+				if (subtotalLabel !== null && subtotalValue !== null) {
+					if (y + rowHeight > pageBottomLimit) {
+						doc.addPage()
+						y = drawContinuationHeader()
+						y = sectionHeader(`${sectionTitle} (continuacion)`, y)
+						drawHeaderRow()
+					}
+
+					doc.rect(left, y, width, rowHeight).fillAndStroke("#efede8", lineColor)
+					doc.font("Helvetica-Bold").fontSize(8.7).fillColor("#111")
+					const subtotalText = `${String(subtotalLabel)}: ${String(subtotalValue)}`
+					doc.text(subtotalText, left + 6, y + 4, {
+						width: width - 12,
+						align: "right",
+						lineBreak: false,
+					})
+					y += rowHeight
+				}
+
+				return y + 8
+			}
+
+			const logoToUse = fs.existsSync(LOGO_PRESUPUESTO_PATH) ? LOGO_PRESUPUESTO_PATH : LOGO_PATH
+			let y = top
+
+			doc.strokeColor(lineColor).lineWidth(1).moveTo(left, y + 58).lineTo(right, y + 58).stroke()
+			doc.strokeColor("#7a7a7a").lineWidth(0.6).moveTo(left, y + 62).lineTo(right, y + 62).stroke()
+			doc.font("Helvetica-Bold").fontSize(34).fillColor("#111")
+			doc.text("PRESUPUESTO", left, y + 19)
+
+			const infoBoxW = 142
+			doc.rect(right - infoBoxW, y + 5, infoBoxW, 40).lineWidth(0.8).strokeColor(lineColor).stroke()
+			doc.font("Helvetica").fontSize(8.4).fillColor(muted)
+			doc.text("Numero", right - infoBoxW + 8, y + 11)
+			doc.text("Fecha", right - infoBoxW + 8, y + 25)
+			doc.font("Helvetica-Bold").fontSize(8.8).fillColor("#111")
+			doc.text(String(presupuesto.numero), right - 58, y + 11, { width: 48, align: "right" })
+			doc.text(formatoFecha(presupuesto.fecha), right - 90, y + 25, { width: 80, align: "right" })
+
+			y += 74
+			const blockGap = 12
+			const blockW = (width - blockGap) / 2
+			const blockH = 108
+			const logoBandW = 82
+
+			doc.rect(left, y, blockW, blockH).lineWidth(0.8).strokeColor(lineColor).stroke()
+			if (fs.existsSync(logoToUse)) {
+				doc.image(logoToUse, left + blockW - logoBandW - 4, y + 20, { fit: [78, 56], align: "center", valign: "center" })
+			}
+			const empresaTextW = blockW - logoBandW - 14
+			doc.font("Helvetica-Bold").fontSize(9).fillColor("#111").text("EMPRESA", left + 8, y + 6)
+			doc.font("Helvetica").fontSize(8.1).fillColor("#111")
+			doc.text("Tesla Montajes Electricos", left + 8, y + 21, { width: empresaTextW, lineBreak: false })
+			doc.text("CUIT: 30-71712557-2", left + 8, y + 34, { width: empresaTextW, lineBreak: false })
+			doc.text("IVA: Responsable Inscripto", left + 8, y + 47, { width: empresaTextW, lineBreak: false })
+			doc.text("Echeverria 197 - San Francisco (Cba.)", left + 8, y + 60, { width: empresaTextW, lineBreak: false })
+			doc.text("teslamontajeselectricos@hotmail.com", left + 8, y + 73, { width: empresaTextW, lineBreak: false })
+			doc.text("www.teslamontajeselectricos.com.ar", left + 8, y + 86, { width: empresaTextW, lineBreak: false })
+
+			const rightBoxX = left + blockW + blockGap
+			doc.rect(rightBoxX, y, blockW, blockH).lineWidth(0.8).strokeColor(lineColor).stroke()
+			doc.font("Helvetica-Bold").fontSize(9).fillColor("#111").text("CLIENTE", rightBoxX + 8, y + 6)
+			doc.font("Helvetica").fontSize(8.4)
+			doc.text(`Empresa: ${clienteEmpresa}`, rightBoxX + 8, y + 21, { width: blockW - 16, lineBreak: false })
+			doc.text(`CUIT: ${clienteCuit}`, rightBoxX + 8, y + 34, { width: blockW - 16, lineBreak: false })
+			doc.text(`IVA: ${clienteIva}`, rightBoxX + 8, y + 47, { width: blockW - 16, lineBreak: false })
+			doc.text(`Direccion: ${clienteDireccion}`, rightBoxX + 8, y + 60, { width: blockW - 16, lineBreak: false })
+			doc.text(`Telefono: ${clienteTelefono}`, rightBoxX + 8, y + 73, { width: blockW - 16, lineBreak: false })
+
+			y += blockH + 12
+			doc.rect(left, y, width, 34).lineWidth(0.8).strokeColor(lineColor).stroke()
+			doc.font("Helvetica").fontSize(9).fillColor("#111")
+			doc.text(`Proyecto: ${getSafe(presupuesto.obra_nombre)}`, left + 8, y + 6, { width: width * 0.56 })
+			doc.text(`Validez: ${presupuesto.validez_dias || 15} dias`, left + width * 0.58, y + 6)
+			doc.text(`Forma de pago: ${(presupuesto.forma_pago || "Contado").toUpperCase()}`, left + 8, y + 20)
+
+			y += 46
+			y = sectionHeader("Detalle mano de obra", y)
+			const manoRows = itemsManoObra.map((item, idx) => [
+				`${idx + 1}. ${item.descripcion || "-"}`,
+			])
+			y = drawTable({
+				yStart: y,
+				sectionTitle: "Detalle mano de obra",
+				columns: [
+					{ label: "Descripcion", width },
+				],
+				rows: manoRows.length ? manoRows : [["Sin items"]],
+				subtotalLabel: "Subtotal mano de obra",
+				subtotalValue: formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)),
+			})
+
+			y = sectionHeader("Detalle materiales", y)
+			const materialRows = itemsMateriales.map((item, idx) => [
+				`${idx + 1}. ${item.descripcion || "-"}`,
+				String(Number(item.cantidad || 0)),
+				formatoMoneda(item.precio_unitario),
+				formatoMoneda(item.subtotal),
+			])
+			y = drawTable({
+				yStart: y,
+				sectionTitle: "Detalle materiales",
+				columns: [
+					{ label: "Descripcion", width: width - 290 },
+					{ label: "Cant.", width: 60, align: "right" },
+					{ label: "P. unitario", width: 115, align: "right" },
+					{ label: "Subtotal", width: 115, align: "right" },
+				],
+				rows: materialRows.length ? materialRows : [["Sin items", "0", formatoMoneda(0), formatoMoneda(0)]],
+				subtotalLabel: "Subtotal materiales",
+				subtotalValue: formatoMoneda(Number(presupuesto.subtotal_materiales || 0)),
+			})
+
+			const ivaMonto = Number(presupuesto.iva_monto || 0)
+			const totalGeneral = Number(presupuesto.total || 0)
+			const summaryBoxH = 84
+			const summaryLeftW = width - 182
+
+			if (y + summaryBoxH + 24 > pageBottomLimit) {
+				doc.addPage()
+				y = drawContinuationHeader()
+			}
+
+			doc.rect(left, y, summaryLeftW, summaryBoxH).lineWidth(0.8).strokeColor(lineColor).stroke()
+			doc.font("Helvetica-Bold").fontSize(8.8).text("Observaciones", left + 8, y + 6)
+			doc.font("Helvetica").fontSize(8.2).fillColor("#111")
+			doc.text(String(presupuesto.observaciones || "-"), left + 8, y + 18, {
+				width: summaryLeftW - 16,
+				height: summaryBoxH - 24,
+			})
+
+			const sumX = left + summaryLeftW
+			doc.rect(sumX, y, width - summaryLeftW, summaryBoxH).lineWidth(0.8).strokeColor(lineColor).stroke()
+			doc.font("Helvetica").fontSize(8.5).fillColor("#111")
+			doc.text("Subtotal mano de obra", sumX + 8, y + 8)
+			doc.text(formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)), right - 8 - 80, y + 8, { width: 80, align: "right" })
+			doc.text("Subtotal materiales", sumX + 8, y + 24)
+			doc.text(formatoMoneda(Number(presupuesto.subtotal_materiales || 0)), right - 8 - 80, y + 24, { width: 80, align: "right" })
+			doc.text(`IVA ${Number(presupuesto.iva_porcentaje || 21)}%`, sumX + 8, y + 40)
+			doc.text(formatoMoneda(ivaMonto), right - 8 - 80, y + 40, { width: 80, align: "right" })
+
+			doc.rect(sumX + 6, y + 57, width - summaryLeftW - 12, 21).fillAndStroke("#1f1f1f", lineColor)
+			doc.font("Helvetica-Bold").fontSize(9.8).fillColor("#ffffff")
+			doc.text("TOTAL", sumX + 12, y + 64)
+			doc.text(formatoMoneda(totalGeneral), right - 8 - 80, y + 64, { width: 80, align: "right" })
+
+			const firmaY = doc.page.height - 84
+			doc.strokeColor("#5a5a5a").lineWidth(0.6).moveTo(left + 10, firmaY).lineTo(left + 170, firmaY).stroke()
+			doc.strokeColor("#5a5a5a").lineWidth(0.6).moveTo(right - 170, firmaY).lineTo(right - 10, firmaY).stroke()
+			doc.font("Helvetica").fontSize(7.4).fillColor(muted)
+			doc.text("Firma cliente", left + 10, firmaY + 3)
+			doc.text("Firma empresa", right - 170, firmaY + 3)
+
+			doc.strokeColor(lineColor).lineWidth(0.8).moveTo(left, doc.page.height - 62).lineTo(right, doc.page.height - 62).stroke()
+			doc.font("Helvetica").fontSize(7.8).fillColor(muted)
+			doc.text("Tesla Montajes Electricos - Documento comercial", left, doc.page.height - 54)
+			doc.text(`Pagina 1`, left, doc.page.height - 54, { width, align: "right" })
+
+			doc.end()
+		} catch (error) {
+			reject(error)
+		}
+	})
+}
+
+const syncPresupuestoPdfStorage = async (presupuesto, previousPresupuesto = null) => {
+	const previousPath = previousPresupuesto ? getPresupuestoPdfFilePath(previousPresupuesto) : null
+	const folderPath = getPresupuestoPdfFolderPath(presupuesto)
+	const filePath = getPresupuestoPdfFilePath(presupuesto)
+	const buffer = await renderPresupuestoPdfBuffer(presupuesto)
+
+	await fs.promises.mkdir(folderPath, { recursive: true })
+	await fs.promises.writeFile(filePath, buffer)
+
+	if (previousPath && previousPath !== filePath && fs.existsSync(previousPath)) {
+		await fs.promises.unlink(previousPath)
+	}
+
+	return { buffer, filePath }
 }
 
 const recalcularCertificadosPorPresupuesto = async (client, presupuestoId) => {
@@ -283,7 +622,7 @@ router.get("/", async (req, res) => {
 					COALESCE(cert.total_certificado_con_iva, 0) AS total_certificado_con_iva,
 					COALESCE(cert.total_pagado_certificados, 0) AS total_pagado_certificados,
 					COALESCE(cert.tiene_pendientes, false) AS tiene_certificados_pendientes,
-					c.razon_social AS cliente,
+					COALESCE(NULLIF(TRIM(c.empresa), ''), c.razon_social) AS cliente,
 					c.telefono AS cliente_telefono,
 					o.nombre AS obra
 				FROM presupuestos p
@@ -342,6 +681,11 @@ router.post("/", async (req, res) => {
 			return res.status(400).json({ error: "cliente_id y obra_id son obligatorios" })
 		}
 
+		const validacionRelacion = await validarClienteObraRelacion(client, cliente_id, obra_id)
+		if (!validacionRelacion.ok) {
+			return res.status(validacionRelacion.status).json({ error: validacionRelacion.error })
+		}
+
 		const subtotalGeneralManoObra = Math.max(0, toNumber(subtotal_general_mano_obra, 0))
 		const materiales = normalizeItems(items_materiales, "material")
 		const manoObra = normalizeItems(items_mano_obra, "mano_obra")
@@ -374,8 +718,8 @@ router.post("/", async (req, res) => {
 			`,
 			[
 				numero,
-				Number(cliente_id),
-				Number(obra_id),
+				validacionRelacion.clienteId,
+				validacionRelacion.obraId,
 				fecha || null,
 				Number(validez_dias) || 15,
 				forma_pago || "Contado",
@@ -414,6 +758,11 @@ router.post("/", async (req, res) => {
 		await client.query("COMMIT")
 
 		const completo = await getPresupuestoCompleto(presupuesto.id)
+		try {
+			await syncPresupuestoPdfStorage(completo)
+		} catch (storageError) {
+			console.error("No se pudo guardar el PDF del presupuesto en disco", storageError)
+		}
 		getIo()?.emit('presupuestos:changed')
 		res.status(201).json(completo)
 	} catch (err) {
@@ -432,6 +781,7 @@ router.put("/:id", async (req, res) => {
 		if (!Number.isInteger(presupuestoId) || presupuestoId <= 0) {
 			return res.status(400).json({ error: "ID de presupuesto invalido" })
 		}
+		const presupuestoPrevio = await getPresupuestoCompleto(presupuestoId)
 
 		const {
 			cliente_id,
@@ -449,6 +799,11 @@ router.put("/:id", async (req, res) => {
 
 		if (!cliente_id || !obra_id) {
 			return res.status(400).json({ error: "cliente_id y obra_id son obligatorios" })
+		}
+
+		const validacionRelacion = await validarClienteObraRelacion(client, cliente_id, obra_id)
+		if (!validacionRelacion.ok) {
+			return res.status(validacionRelacion.status).json({ error: validacionRelacion.error })
 		}
 
 		const subtotalGeneralManoObra = Math.max(0, toNumber(subtotal_general_mano_obra, 0))
@@ -499,8 +854,8 @@ router.put("/:id", async (req, res) => {
 				WHERE id = $12
 			`,
 			[
-				Number(cliente_id),
-				Number(obra_id),
+				validacionRelacion.clienteId,
+				validacionRelacion.obraId,
 				fecha || null,
 				Number(validez_dias) || 15,
 				forma_pago || "Contado",
@@ -542,6 +897,11 @@ router.put("/:id", async (req, res) => {
 		await client.query("COMMIT")
 
 		const completo = await getPresupuestoCompleto(presupuestoId)
+		try {
+			await syncPresupuestoPdfStorage(completo, presupuestoPrevio)
+		} catch (storageError) {
+			console.error("No se pudo actualizar el PDF del presupuesto en disco", storageError)
+		}
 		getIo()?.emit('presupuestos:changed')
 		res.json(completo)
 	} catch (err) {
@@ -589,6 +949,8 @@ router.delete("/:id", async (req, res) => {
 			return res.status(400).json({ error: "ID de presupuesto invalido" })
 		}
 
+		const presupuestoPrevio = await getPresupuestoCompleto(presupuestoId)
+
 		const result = await pool.query(
 			`DELETE FROM presupuestos WHERE id = $1 RETURNING id`,
 			[presupuestoId]
@@ -596,6 +958,14 @@ router.delete("/:id", async (req, res) => {
 
 		if (result.rowCount === 0) {
 			return res.status(404).json({ error: "Presupuesto no encontrado" })
+		}
+
+		if (presupuestoPrevio) {
+			try {
+				await removeStoredPresupuestoPdf(presupuestoPrevio)
+			} catch (storageError) {
+				console.error("No se pudo eliminar el PDF del presupuesto del disco", storageError)
+			}
 		}
 
 		getIo()?.emit('presupuestos:changed')
@@ -615,263 +985,15 @@ router.get("/:id/pdf", async (req, res) => {
 			return res.status(404).json({ error: "Presupuesto no encontrado" })
 		}
 
-		const itemsMateriales = presupuesto.items.filter((item) => item.tipo === "material")
-		const itemsManoObra = presupuesto.items.filter((item) => item.tipo === "mano_obra")
-
-		const doc = new PDFDocument({ size: "A4", margin: 45 })
-		const chunks = []
-
-		doc.on("data", (chunk) => chunks.push(chunk))
-		doc.on("end", () => {
-			const buffer = Buffer.concat(chunks)
-			const nombreArchivo = `Presupuesto-${presupuesto.numero}.pdf`
-			res.setHeader("Content-Type", "application/pdf")
-			res.setHeader("Content-Disposition", `attachment; filename="${sanitizeFileText(nombreArchivo)}"`)
-			res.send(buffer)
-		})
-
-		const left = 45
-		const pageWidth = doc.page.width
-		const right = pageWidth - 45
-		const width = right - left
-		const top = 34
-		const lineColor = "#1f1f1f"
-		const muted = "#5b5b5b"
-
-		const getSafe = (value) => {
-			const text = String(value ?? "").trim()
-			return text ? text : "-"
-		}
-
-		const clienteNombre = getSafe(presupuesto.cliente_razon_social)
-		const clienteDireccion = getSafe(presupuesto.cliente_direccion)
-		const clienteLocalidad = "-"
-		const clienteTelefono = getSafe(presupuesto.cliente_telefono)
-		const clienteEmail = getSafe(presupuesto.cliente_email)
-
-		const sectionHeader = (title, y) => {
-			doc.font("Helvetica-Bold").fontSize(9.6).fillColor("#111")
-			doc.text(String(title || "").toUpperCase(), left, y)
-			doc.strokeColor(lineColor).lineWidth(0.8).moveTo(left, y + 12).lineTo(right, y + 12).stroke()
-			return y + 19
-		}
-
-		const pageBottomLimit = doc.page.height - 98
-		const drawContinuationHeader = () => {
-			let y = top + 2
-			doc.font("Helvetica-Bold").fontSize(12).fillColor("#111")
-			doc.text(`PRESUPUESTO Nro ${presupuesto.numero} - CONTINUACION`, left, y)
-			doc.strokeColor(lineColor).lineWidth(0.8).moveTo(left, y + 16).lineTo(right, y + 16).stroke()
-			return y + 24
-		}
-
-		const drawTable = ({ yStart, sectionTitle, columns, rows, rowHeight = 16, subtotalLabel = null, subtotalValue = null }) => {
-			let y = yStart
-
-			const drawHeaderRow = () => {
-				doc.rect(left, y, width, rowHeight).fillAndStroke("#f3f3f3", lineColor)
-				let x = left
-				columns.forEach((col, idx) => {
-					doc.font("Helvetica-Bold").fontSize(8.5).fillColor("#111")
-					doc.text(col.label, x + 6, y + 4, { width: col.width - 12, align: col.align || "left" })
-					x += col.width
-					if (idx < columns.length - 1) {
-						doc.moveTo(x, y).lineTo(x, y + rowHeight).strokeColor(lineColor).lineWidth(0.6).stroke()
-					}
-				})
-				y += rowHeight
-			}
-
-			drawHeaderRow()
-
-			rows.forEach((row, rowIdx) => {
-				if (y + rowHeight > pageBottomLimit) {
-					doc.addPage()
-					y = drawContinuationHeader()
-					y = sectionHeader(`${sectionTitle} (continuacion)`, y)
-					drawHeaderRow()
-				}
-
-				if (rowIdx % 2 === 0) {
-					doc.rect(left, y, width, rowHeight).fill("#fbfbfb")
-				}
-				doc.rect(left, y, width, rowHeight).lineWidth(0.5).strokeColor("#6b6b6b").stroke()
-				let cellX = left
-				columns.forEach((col, idx) => {
-					doc.font("Helvetica").fontSize(8.6).fillColor("#111")
-					doc.text(String(row[idx] ?? "-"), cellX + 6, y + 4, {
-						width: col.width - 12,
-						align: col.align || "left",
-					})
-					cellX += col.width
-					if (idx < columns.length - 1) {
-						doc.moveTo(cellX, y).lineTo(cellX, y + rowHeight).strokeColor("#808080").lineWidth(0.35).stroke()
-					}
-				})
-				y += rowHeight
-			})
-
-			if (subtotalLabel !== null && subtotalValue !== null) {
-				if (y + rowHeight > pageBottomLimit) {
-					doc.addPage()
-					y = drawContinuationHeader()
-					y = sectionHeader(`${sectionTitle} (continuacion)`, y)
-					drawHeaderRow()
-				}
-
-				doc.rect(left, y, width, rowHeight).fillAndStroke("#efede8", lineColor)
-				doc.font("Helvetica-Bold").fontSize(8.7).fillColor("#111")
-				const subtotalText = `${String(subtotalLabel)}: ${String(subtotalValue)}`
-				doc.text(subtotalText, left + 6, y + 4, {
-					width: width - 12,
-					align: "right",
-					lineBreak: false,
-				})
-				y += rowHeight
-			}
-
-			return y + 8
-		}
-
-		const logoToUse = fs.existsSync(LOGO_PRESUPUESTO_PATH) ? LOGO_PRESUPUESTO_PATH : LOGO_PATH
-		let y = top
-
-		doc.strokeColor(lineColor).lineWidth(1).moveTo(left, y + 58).lineTo(right, y + 58).stroke()
-		doc.strokeColor("#7a7a7a").lineWidth(0.6).moveTo(left, y + 62).lineTo(right, y + 62).stroke()
-		doc.font("Helvetica-Bold").fontSize(34).fillColor("#111")
-		doc.text("PRESUPUESTO", left, y + 19)
-
-		const infoBoxW = 142
-		doc.rect(right - infoBoxW, y + 5, infoBoxW, 40).lineWidth(0.8).strokeColor(lineColor).stroke()
-		doc.font("Helvetica").fontSize(8.4).fillColor(muted)
-		doc.text("Numero", right - infoBoxW + 8, y + 11)
-		doc.text("Fecha", right - infoBoxW + 8, y + 25)
-		doc.font("Helvetica-Bold").fontSize(8.8).fillColor("#111")
-		doc.text(String(presupuesto.numero), right - 58, y + 11, { width: 48, align: "right" })
-		doc.text(formatoFecha(presupuesto.fecha), right - 90, y + 25, { width: 80, align: "right" })
-
-		y += 74
-		const blockGap = 12
-		const blockW = (width - blockGap) / 2
-		const blockH = 96
-		const logoBandW = 82
-
-		doc.rect(left, y, blockW, blockH).lineWidth(0.8).strokeColor(lineColor).stroke()
-		if (fs.existsSync(logoToUse)) {
-			doc.image(logoToUse, left + blockW - logoBandW - 4, y + 20, { fit: [78, 56], align: "center", valign: "center" })
-		}
-		const empresaTextW = blockW - logoBandW - 14
-		doc.font("Helvetica-Bold").fontSize(9).fillColor("#111").text("EMPRESA", left + 8, y + 6)
-		doc.font("Helvetica").fontSize(8.1).fillColor("#111")
-		doc.text("Tesla Montajes Electricos", left + 8, y + 21, { width: empresaTextW, lineBreak: false })
-		doc.text("CUIT: 30-71712557-2", left + 8, y + 34, { width: empresaTextW, lineBreak: false })
-		doc.text("Echeverria 197 - San Francisco (Cba.)", left + 8, y + 47, { width: empresaTextW, lineBreak: false })
-		doc.text("teslamontajeselectricos@hotmail.com", left + 8, y + 60, { width: empresaTextW, lineBreak: false })
-		doc.text("www.teslamontajeselectricos.com.ar", left + 8, y + 73, { width: empresaTextW, lineBreak: false })
-
-		const rightBoxX = left + blockW + blockGap
-		doc.rect(rightBoxX, y, blockW, blockH).lineWidth(0.8).strokeColor(lineColor).stroke()
-		doc.font("Helvetica-Bold").fontSize(9).fillColor("#111").text("CLIENTE", rightBoxX + 8, y + 6)
-		doc.font("Helvetica").fontSize(8.4)
-		doc.text(`Nombre: ${clienteNombre}`, rightBoxX + 8, y + 21, { width: blockW - 16, lineBreak: false })
-		doc.text(`Direccion: ${clienteDireccion}`, rightBoxX + 8, y + 34, { width: blockW - 16, lineBreak: false })
-		doc.text(`Localidad: ${clienteLocalidad}`, rightBoxX + 8, y + 47, { width: blockW - 16, lineBreak: false })
-		doc.text(`Telefono: ${clienteTelefono}`, rightBoxX + 8, y + 60, { width: blockW - 16, lineBreak: false })
-		doc.text(`Email: ${clienteEmail}`, rightBoxX + 8, y + 73, { width: blockW - 16, lineBreak: false })
-
-		y += blockH + 12
-		doc.rect(left, y, width, 34).lineWidth(0.8).strokeColor(lineColor).stroke()
-		doc.font("Helvetica").fontSize(9).fillColor("#111")
-		doc.text(`Proyecto: ${getSafe(presupuesto.obra_nombre)}`, left + 8, y + 6, { width: width * 0.56 })
-		doc.text(`Validez: ${presupuesto.validez_dias || 15} dias`, left + width * 0.58, y + 6)
-		doc.text(`Forma de pago: ${(presupuesto.forma_pago || "Contado").toUpperCase()}`, left + 8, y + 20)
-
-		y += 46
-		y = sectionHeader("Detalle mano de obra", y)
-		const manoRows = itemsManoObra.map((item, idx) => [
-			`${idx + 1}. ${item.descripcion || "-"}`,
-		])
-		y = drawTable({
-			yStart: y,
-			sectionTitle: "Detalle mano de obra",
-			columns: [
-				{ label: "Descripcion", width },
-			],
-			rows: manoRows.length ? manoRows : [["Sin items"]],
-			subtotalLabel: "Subtotal mano de obra",
-			subtotalValue: formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)),
-		})
-
-		y = sectionHeader("Detalle materiales", y)
-		const materialRows = itemsMateriales.map((item, idx) => [
-			`${idx + 1}. ${item.descripcion || "-"}`,
-			String(Number(item.cantidad || 0)),
-			formatoMoneda(item.precio_unitario),
-			formatoMoneda(item.subtotal),
-		])
-		y = drawTable({
-			yStart: y,
-			sectionTitle: "Detalle materiales",
-			columns: [
-				{ label: "Descripcion", width: width - 290 },
-				{ label: "Cant.", width: 60, align: "right" },
-				{ label: "P. unitario", width: 115, align: "right" },
-				{ label: "Subtotal", width: 115, align: "right" },
-			],
-			rows: materialRows.length ? materialRows : [["Sin items", "0", formatoMoneda(0), formatoMoneda(0)]],
-			subtotalLabel: "Subtotal materiales",
-			subtotalValue: formatoMoneda(Number(presupuesto.subtotal_materiales || 0)),
-		})
-
-		const ivaMonto = Number(presupuesto.iva_monto || 0)
-		const totalGeneral = Number(presupuesto.total || 0)
-		const summaryBoxH = 84
-		const summaryLeftW = width - 182
-
-		if (y + summaryBoxH + 24 > pageBottomLimit) {
-			doc.addPage()
-			y = drawContinuationHeader()
-		}
-
-		doc.rect(left, y, summaryLeftW, summaryBoxH).lineWidth(0.8).strokeColor(lineColor).stroke()
-		doc.font("Helvetica-Bold").fontSize(8.8).text("Observaciones", left + 8, y + 6)
-		doc.font("Helvetica").fontSize(8.2).fillColor("#111")
-		doc.text(String(presupuesto.observaciones || "-"), left + 8, y + 18, {
-			width: summaryLeftW - 16,
-			height: summaryBoxH - 24,
-		})
-
-		const sumX = left + summaryLeftW
-		doc.rect(sumX, y, width - summaryLeftW, summaryBoxH).lineWidth(0.8).strokeColor(lineColor).stroke()
-		doc.font("Helvetica").fontSize(8.5).fillColor("#111")
-		doc.text("Subtotal mano de obra", sumX + 8, y + 8)
-		doc.text(formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)), right - 8 - 80, y + 8, { width: 80, align: "right" })
-		doc.text("Subtotal materiales", sumX + 8, y + 24)
-		doc.text(formatoMoneda(Number(presupuesto.subtotal_materiales || 0)), right - 8 - 80, y + 24, { width: 80, align: "right" })
-		doc.text(`IVA ${Number(presupuesto.iva_porcentaje || 21)}%`, sumX + 8, y + 40)
-		doc.text(formatoMoneda(ivaMonto), right - 8 - 80, y + 40, { width: 80, align: "right" })
-
-		doc.rect(sumX + 6, y + 57, width - summaryLeftW - 12, 21).fillAndStroke("#1f1f1f", lineColor)
-		doc.font("Helvetica-Bold").fontSize(9.8).fillColor("#ffffff")
-		doc.text("TOTAL", sumX + 12, y + 64)
-		doc.text(formatoMoneda(totalGeneral), right - 8 - 80, y + 64, { width: 80, align: "right" })
-
-		const firmaY = doc.page.height - 84
-		doc.strokeColor("#5a5a5a").lineWidth(0.6).moveTo(left + 10, firmaY).lineTo(left + 170, firmaY).stroke()
-		doc.strokeColor("#5a5a5a").lineWidth(0.6).moveTo(right - 170, firmaY).lineTo(right - 10, firmaY).stroke()
-		doc.font("Helvetica").fontSize(7.4).fillColor(muted)
-		doc.text("Firma cliente", left + 10, firmaY + 3)
-		doc.text("Firma empresa", right - 170, firmaY + 3)
-
-		doc.strokeColor(lineColor).lineWidth(0.8).moveTo(left, doc.page.height - 62).lineTo(right, doc.page.height - 62).stroke()
-		doc.font("Helvetica").fontSize(7.8).fillColor(muted)
-		doc.text("Tesla Montajes Electricos - Documento comercial", left, doc.page.height - 54)
-		doc.text(`Pagina 1`, left, doc.page.height - 54, { width, align: "right" })
-
-		doc.end()
+		const { buffer } = await syncPresupuestoPdfStorage(presupuesto)
+		const nombreArchivo = getPresupuestoPdfFileName(presupuesto)
+		res.setHeader("Content-Type", "application/pdf")
+		res.setHeader("Content-Disposition", `attachment; filename="${nombreArchivo}"`)
+		res.send(buffer)
 	} catch (err) {
 		res.status(500).json({ error: err.message })
 	}
 })
 
 export default router
+

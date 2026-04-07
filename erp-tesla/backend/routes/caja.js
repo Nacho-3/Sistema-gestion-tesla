@@ -8,7 +8,13 @@ import { drawPremiumHeader, setupPremiumFooter, drawPremiumSectionTitle, PDF_COL
 
 const router = express.Router()
 const MEDIOS_PAGO = ["efectivo", "transferencia", "cheque", "echeq", "retencion"]
+const CAJAS_DISPONIBLES = ["tesla", "teslita", "juani"]
 const CATEGORIAS_CAJA = ["mano_obra", "materiales"]
+const LABEL_CAJA = {
+  tesla: "Caja Tesla",
+  teslita: "Caja Teslita",
+  juani: "Caja Juani",
+}
 const LABEL_MEDIO = {
   efectivo: "Efectivo",
   transferencia: "Transferencia",
@@ -77,9 +83,13 @@ function normalizarMovimiento(movimiento) {
 
   return {
     ...movimiento,
+    caja_codigo: CAJAS_DISPONIBLES.includes(String(movimiento.caja_codigo || "").toLowerCase())
+      ? String(movimiento.caja_codigo).toLowerCase()
+      : "tesla",
     detalle: movimiento.detalle ?? movimiento.concepto ?? movimiento.descripcion ?? "",
     categoria: CATEGORIAS_CAJA.includes(String(movimiento.categoria || "")) ? movimiento.categoria : null,
     con_iva: Boolean(movimiento.con_iva),
+    destinatario: movimiento.destinatario || "",
     cliente_id: movimiento.cliente_id ?? null,
     presupuesto_id: movimiento.presupuesto_id ?? null,
     detalles_medio_pago: detallesNormalizados,
@@ -139,7 +149,27 @@ function normalizarDetalles(detalles) {
     .filter((item) => item.monto > 0)
 }
 
-async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo } = {}) {
+async function validarPresupuestoCliente(presupuestoId, clienteId) {
+  if (!presupuestoId) return null
+
+  const { data: presupuesto, error } = await db
+    .from("presupuestos")
+    .select("id, cliente_id")
+    .eq("id", presupuestoId)
+    .single()
+
+  if (error || !presupuesto) {
+    throw new Error("Presupuesto inválido")
+  }
+
+  if (clienteId && String(presupuesto.cliente_id) !== String(clienteId)) {
+    throw new Error("El presupuesto seleccionado no pertenece al cliente indicado")
+  }
+
+  return presupuesto
+}
+
+async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_codigo } = {}) {
   await getDetallesSchema()
 
   let query = db.from("movimientos_caja").select(`
@@ -159,6 +189,10 @@ async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo } = {}
 
   if (tipo) {
     query = query.eq("tipo", tipo)
+  }
+
+  if (caja_codigo) {
+    query = query.eq("caja_codigo", caja_codigo)
   }
 
   const { data, error } = await query.order("fecha", { ascending: false })
@@ -200,8 +234,18 @@ async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo } = {}
 // Listar movimientos de caja con filtros
 router.get("/", async (req, res) => {
   try {
-    const { fecha_inicio, fecha_fin, tipo } = req.query
-    const { movimientos, totales } = await obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo })
+    const { fecha_inicio, fecha_fin, tipo, caja_codigo } = req.query
+
+    if (caja_codigo && !CAJAS_DISPONIBLES.includes(String(caja_codigo).toLowerCase())) {
+      return res.status(400).json({ error: "Caja inválida" })
+    }
+
+    const { movimientos, totales } = await obtenerMovimientosYTotales({
+      fecha_inicio,
+      fecha_fin,
+      tipo,
+      caja_codigo: caja_codigo ? String(caja_codigo).toLowerCase() : undefined,
+    })
 
     res.json({
       movimientos,
@@ -214,8 +258,19 @@ router.get("/", async (req, res) => {
 
 router.get("/resumen/pdf", async (req, res) => {
   try {
-    const { fecha_inicio, fecha_fin, tipo } = req.query
-    const { movimientos, totales } = await obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo })
+    const { fecha_inicio, fecha_fin, tipo, caja_codigo } = req.query
+    const cajaCodigoNormalizada = caja_codigo ? String(caja_codigo).toLowerCase() : undefined
+
+    if (cajaCodigoNormalizada && !CAJAS_DISPONIBLES.includes(cajaCodigoNormalizada)) {
+      return res.status(400).json({ error: "Caja inválida" })
+    }
+
+    const { movimientos, totales } = await obtenerMovimientosYTotales({
+      fecha_inicio,
+      fecha_fin,
+      tipo,
+      caja_codigo: cajaCodigoNormalizada,
+    })
 
     const balance = (totales.totalIngresos || 0) - (totales.totalEgresos || 0)
     const cantidadMovimientos = movimientos.length
@@ -224,7 +279,8 @@ router.get("/resumen/pdf", async (req, res) => {
     const chunks = []
     const pageWidth = doc.page.width
     const fechaArchivo = new Date().toISOString().slice(0, 10)
-    const nombreArchivo = `Resumen Caja ${fechaArchivo}.pdf`
+    const sufijoCaja = cajaCodigoNormalizada ? ` ${LABEL_CAJA[cajaCodigoNormalizada]}` : ""
+    const nombreArchivo = `Resumen Caja${sufijoCaja} ${fechaArchivo}.pdf`
 
     doc.on("data", (chunk) => chunks.push(chunk))
     doc.on("end", () => {
@@ -241,6 +297,7 @@ router.get("/resumen/pdf", async (req, res) => {
     }
 
     const filtroPeriodo = [
+      cajaCodigoNormalizada ? LABEL_CAJA[cajaCodigoNormalizada] : "Todas las cajas",
       fecha_inicio ? `Desde ${formatoFecha(fecha_inicio)}` : "",
       fecha_fin ? `Hasta ${formatoFecha(fecha_fin)}` : "",
       tipo ? `Tipo ${tipo}` : "Todos los tipos",
@@ -248,7 +305,7 @@ router.get("/resumen/pdf", async (req, res) => {
 
     const headerBottom = drawPremiumHeader(doc, {
       title: "TESLA MONTAJES ELECTRICOS",
-      subtitle: "Resumen completo de caja",
+      subtitle: cajaCodigoNormalizada ? `Resumen ${LABEL_CAJA[cajaCodigoNormalizada]}` : "Resumen completo de caja",
       accentText: filtroPeriodo || "Sin filtros",
       logoPath: LOGO_PATH,
     })
@@ -312,8 +369,8 @@ router.get("/resumen/pdf", async (req, res) => {
       doc.rect(45, headerY, pageWidth - 90, 24).fill(PDF_COLORS.navy)
       doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(8.5)
       doc.text("FECHA", 50, headerY + 8, { width: 68 })
-      doc.text("TIPO", 120, headerY + 8, { width: 60 })
-      doc.text("DETALLE", 182, headerY + 8, { width: 170 })
+      doc.text("CAJA", 120, headerY + 8, { width: 72 })
+      doc.text("DETALLE", 194, headerY + 8, { width: 158 })
       doc.text("MEDIOS", 354, headerY + 8, { width: 100 })
       doc.text("MONTO", 456, headerY + 8, { width: 44, align: "right" })
       doc.fillColor(PDF_COLORS.ink)
@@ -345,8 +402,8 @@ router.get("/resumen/pdf", async (req, res) => {
 
         doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(8.5)
         doc.text(formatoFecha(mov.fecha), 50, yMov + 7, { width: 68 })
-        doc.text(mov.tipo === "ingreso" ? "Ingreso" : "Egreso", 120, yMov + 7, { width: 60 })
-        doc.text(String(mov.detalle || "-"), 182, yMov + 7, { width: 170, ellipsis: true })
+        doc.text(`${LABEL_CAJA[mov.caja_codigo] || mov.caja_codigo} / ${mov.tipo === "ingreso" ? "Ingreso" : "Egreso"}`, 120, yMov + 7, { width: 72, ellipsis: true })
+        doc.text(String(mov.detalle || mov.destinatario || "-"), 194, yMov + 7, { width: 158, ellipsis: true })
         doc.text(medios || "-", 354, yMov + 7, { width: 100, ellipsis: true })
         doc.text(formatoMoneda(mov.monto_total), 456, yMov + 7, { width: 44, align: "right" })
         yMov += 22
@@ -420,8 +477,13 @@ router.get("/:id/pdf", async (req, res) => {
     doc.text(movimiento.detalle || "-", 58, infoY + 66, { width: pageWidth - 116 })
 
     doc.font("Helvetica").fontSize(9).fillColor(PDF_COLORS.slate)
-    doc.text(`Categoria: ${LABEL_CATEGORIA[movimiento.categoria] || "-"}`, 58, infoY + 84, { width: 180 })
+    doc.text(`Caja: ${LABEL_CAJA[movimiento.caja_codigo] || "Caja Tesla"}`, 58, infoY + 84, { width: 180 })
     doc.text(`IVA: ${movimiento.con_iva ? "Con IVA" : "Sin IVA"}`, 250, infoY + 84, { width: 120 })
+    doc.text(`Categoria: ${LABEL_CATEGORIA[movimiento.categoria] || "-"}`, 390, infoY + 84, { width: 140, align: "right" })
+
+    if (movimiento.destinatario) {
+      doc.text(`Destinatario: ${movimiento.destinatario}`, 58, infoY + 104, { width: 472 })
+    }
     doc.text(`Cliente ID: ${movimiento.cliente_id || "-"}`, 360, infoY + 84, { width: 85 })
     doc.text(`Presupuesto ID: ${movimiento.presupuesto_id || "-"}`, 448, infoY + 84, { width: 90, align: "right" })
 
@@ -486,17 +548,32 @@ router.get("/:id", async (req, res) => {
 // Crear movimiento de caja
 router.post("/", async (req, res) => {
   try {
-    const { fecha, tipo, detalle, monto_total, desglose, categoria, con_iva, cliente_id, presupuesto_id } = req.body
+    const { fecha, caja_codigo, tipo, detalle, monto_total, desglose, categoria, con_iva, cliente_id, presupuesto_id, destinatario } = req.body
     const detalleColumn = await getDetalleColumn()
     const detallesSchema = await getDetallesSchema()
+    const cajaCodigoNormalizada = String(caja_codigo || "").toLowerCase()
+    const tipoNormalizado = String(tipo || "").toLowerCase()
+    const destinatarioNormalizado = String(destinatario || "").trim()
 
     // Validaciones
-    if (!fecha || !tipo || !detalle || !monto_total) {
-      return res.status(400).json({ error: "Campos requeridos: fecha, tipo, detalle, monto_total" })
+    if (!fecha || !cajaCodigoNormalizada || !tipoNormalizado || !detalle || !monto_total) {
+      return res.status(400).json({ error: "Campos requeridos: fecha, caja_codigo, tipo, detalle, monto_total" })
     }
 
-    if (!["ingreso", "egreso"].includes(tipo)) {
+    if (!CAJAS_DISPONIBLES.includes(cajaCodigoNormalizada)) {
+      return res.status(400).json({ error: "Caja inválida. Debe ser tesla, teslita o juani" })
+    }
+
+    if (!["ingreso", "egreso"].includes(tipoNormalizado)) {
       return res.status(400).json({ error: "Tipo debe ser 'ingreso' o 'egreso'" })
+    }
+
+    if (tipoNormalizado === "ingreso" && !categoria) {
+      return res.status(400).json({ error: "La categoría es obligatoria para ingresos" })
+    }
+
+    if (tipoNormalizado === "egreso" && !destinatarioNormalizado) {
+      return res.status(400).json({ error: "El destinatario es obligatorio para egresos" })
     }
 
     if (categoria && !CATEGORIAS_CAJA.includes(categoria)) {
@@ -520,19 +597,23 @@ router.post("/", async (req, res) => {
       })
     }
 
+    await validarPresupuestoCliente(presupuesto_id, cliente_id)
+
     // Crear movimiento (solo los campos básicos, sin desglose)
     const { data: movimiento, error: errorMovimiento } = await db
       .from("movimientos_caja")
       .insert([
         {
           fecha: fecha,
-          tipo: tipo,
+          caja_codigo: cajaCodigoNormalizada,
+          tipo: tipoNormalizado,
           [detalleColumn]: detalle,
           monto_total: parseFloat(monto_total),
-          categoria: categoria || null,
+          categoria: tipoNormalizado === "ingreso" ? (categoria || null) : null,
           con_iva: normalizarBoolean(con_iva, true),
-          cliente_id: cliente_id || null,
-          presupuesto_id: presupuesto_id || null,
+          destinatario: tipoNormalizado === "egreso" ? destinatarioNormalizado : null,
+          cliente_id: tipoNormalizado === "ingreso" ? (cliente_id || null) : null,
+          presupuesto_id: tipoNormalizado === "ingreso" ? (presupuesto_id || null) : null,
         }
       ])
       .select()
@@ -600,33 +681,76 @@ router.post("/", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params
-    const { fecha, tipo, detalle, monto_total, desglose, categoria, con_iva, cliente_id, presupuesto_id } = req.body
+    const { fecha, caja_codigo, tipo, detalle, monto_total, desglose, categoria, con_iva, cliente_id, presupuesto_id, destinatario } = req.body
     const detalleColumn = await getDetalleColumn()
     const detallesSchema = await getDetallesSchema()
+    const cajaCodigoNormalizada = caja_codigo !== undefined ? String(caja_codigo || "").toLowerCase() : undefined
+    const tipoNormalizado = tipo !== undefined ? String(tipo || "").toLowerCase() : undefined
+    const destinatarioNormalizado = destinatario !== undefined ? String(destinatario || "").trim() : undefined
+
+    const { data: movimientoActual } = await db
+      .from("movimientos_caja")
+      .select("*")
+      .eq("id", id)
+      .single()
+
+    if (!movimientoActual) {
+      return res.status(404).json({ error: "Movimiento no encontrado" })
+    }
+
+    const tipoFinal = tipoNormalizado || String(movimientoActual.tipo || "").toLowerCase()
 
     // Validaciones básicas
-    if (tipo && !["ingreso", "egreso"].includes(tipo)) {
+    if (tipoNormalizado && !["ingreso", "egreso"].includes(tipoNormalizado)) {
       return res.status(400).json({ error: "Tipo debe ser 'ingreso' o 'egreso'" })
+    }
+
+    if (cajaCodigoNormalizada && !CAJAS_DISPONIBLES.includes(cajaCodigoNormalizada)) {
+      return res.status(400).json({ error: "Caja inválida. Debe ser tesla, teslita o juani" })
     }
 
     if (monto_total && monto_total <= 0) {
       return res.status(400).json({ error: "Monto total debe ser mayor a 0" })
     }
 
+    if (tipoFinal === "ingreso" && categoria !== undefined && !categoria) {
+      return res.status(400).json({ error: "La categoría es obligatoria para ingresos" })
+    }
+
+    if (tipoFinal === "egreso" && destinatario !== undefined && !destinatarioNormalizado) {
+      return res.status(400).json({ error: "El destinatario es obligatorio para egresos" })
+    }
+
     if (categoria !== undefined && categoria !== null && categoria !== "" && !CATEGORIAS_CAJA.includes(categoria)) {
       return res.status(400).json({ error: "Categoria inválida. Debe ser 'mano_obra' o 'materiales'" })
     }
 
+    const clienteFinal = cliente_id !== undefined ? cliente_id : movimientoActual.cliente_id
+    const presupuestoFinal = presupuesto_id !== undefined ? presupuesto_id : movimientoActual.presupuesto_id
+    await validarPresupuestoCliente(presupuestoFinal, clienteFinal)
+
     // Actualizar movimiento
     const actualizaciones = {}
     if (fecha !== undefined) actualizaciones.fecha = fecha
-    if (tipo !== undefined) actualizaciones.tipo = tipo
+    if (caja_codigo !== undefined) actualizaciones.caja_codigo = cajaCodigoNormalizada || "tesla"
+    if (tipo !== undefined) actualizaciones.tipo = tipoNormalizado
     if (detalle !== undefined) actualizaciones[detalleColumn] = detalle
     if (monto_total !== undefined) actualizaciones.monto_total = monto_total
-    if (categoria !== undefined) actualizaciones.categoria = categoria || null
+    if (categoria !== undefined) actualizaciones.categoria = tipoFinal === "ingreso" ? (categoria || null) : null
     if (con_iva !== undefined) actualizaciones.con_iva = normalizarBoolean(con_iva, true)
-    if (cliente_id !== undefined) actualizaciones.cliente_id = cliente_id || null
-    if (presupuesto_id !== undefined) actualizaciones.presupuesto_id = presupuesto_id || null
+    if (destinatario !== undefined) actualizaciones.destinatario = tipoFinal === "egreso" ? destinatarioNormalizado : null
+    if (cliente_id !== undefined) actualizaciones.cliente_id = tipoFinal === "ingreso" ? (cliente_id || null) : null
+    if (presupuesto_id !== undefined) actualizaciones.presupuesto_id = tipoFinal === "ingreso" ? (presupuesto_id || null) : null
+
+    if (tipo !== undefined && tipoFinal === "egreso") {
+      actualizaciones.categoria = null
+      if (cliente_id === undefined) actualizaciones.cliente_id = null
+      if (presupuesto_id === undefined) actualizaciones.presupuesto_id = null
+    }
+
+    if (tipo !== undefined && tipoFinal === "ingreso" && destinatario === undefined) {
+      actualizaciones.destinatario = null
+    }
 
     const { data: movimientoActualizado, error: errorActualizacion } = await db
       .from("movimientos_caja")

@@ -11,6 +11,7 @@ import Caja from "./views/Caja.vue"
 import Presupuestos from "./views/Presupuestos.vue"
 import Certificados from "./views/Certificados.vue"
 import Facturas from "./views/Facturas.vue"
+import { hasStoredSession } from "./session"
 
 const routes = [
   { path: "/", component: Login },
@@ -33,7 +34,7 @@ const router = createRouter({
 })
 
 router.beforeEach((to, from, next) => {
-  const session = localStorage.getItem("session")
+  const session = hasStoredSession()
 
   if (to.path !== "/" && !session) {
     next("/")

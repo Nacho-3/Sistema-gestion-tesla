@@ -6,6 +6,21 @@ const roundMoney = (v) => {
   return Math.round(n * 100) / 100
 }
 
+const normalizeConceptosExtras = (raw = []) => {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .map((item) => ({
+      descripcion: String(item?.descripcion || item?.concepto || "").trim(),
+      monto: roundMoney(item?.monto ?? 0),
+      tipo: String(item?.tipo || item?.operacion || "suma").toLowerCase() === "resta" ? "resta" : "suma",
+    }))
+    .filter((item) => item.descripcion && item.monto > 0)
+}
+
+const getConceptosExtrasTotal = (items = []) => roundMoney(items.reduce((sum, item) => {
+  return sum + (item.tipo === "resta" ? -item.monto : item.monto)
+}, 0))
+
 const parseObservacionesData = (observacionesRaw) => {
   const raw = String(observacionesRaw || "").trim()
   if (!raw) return { nota: "", meta: {} }
@@ -43,6 +58,7 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
   const feriados = prefer(liq.feriados_cantidad, meta.feriados_cantidad)
   const diasNo = prefer(liq.dias_no_trabajados, meta.dias_no_trabajados)
   const adicional = prefer(liq.adicional, meta.adicional)
+  const conceptosExtra = normalizeConceptosExtras(meta.conceptos_extra || meta.conceptos_adicionales || [])
 
   const importeHorasExtra = roundMoney(horasExtra * valorHora * 1.5)
   const importeHorasExtra100 = roundMoney(horasExtra100 * valorHora * 2)
@@ -64,6 +80,8 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
     importe_feriados: importeFeriados,
     descuento_dias_no_trabajados: descuentoDias,
     adicional,
+    conceptos_extra: conceptosExtra,
+    ajuste_conceptos_extra: getConceptosExtrasTotal(conceptosExtra),
   }
 }
 
@@ -94,6 +112,7 @@ const recompute = async (id) => {
       conceptos.importe_horas_extra +
       conceptos.importe_horas_extra_100 +
       conceptos.importe_feriados +
+      conceptos.ajuste_conceptos_extra +
       conceptos.adicional -
       conceptos.adelantos -
       conceptos.descuento_dias_no_trabajados

@@ -47,11 +47,11 @@ const saveResumenHorasMes = async (mes, anio) => {
   content += `Total de registros: ${horasData.length}\n`;
   content += `\n--- Horas por empleado ---\n`;
   Object.entries(resumenPorEmpleado).forEach(([emp, hs]) => {
-    content += `  - ${emp}: ${hs.toFixed(2)} hs\n`;
+    content += `  - ${emp}: ${formatHoursAsClock(hs)} hs\n`;
   });
   content += `\n--- Horas por obra ---\n`;
   Object.entries(resumenPorObra).forEach(([obra, hs]) => {
-    content += `  - ${obra}: ${hs.toFixed(2)} hs\n`;
+    content += `  - ${obra}: ${formatHoursAsClock(hs)} hs\n`;
   });
   // Guardar archivo dentro de la carpeta del mes correspondiente
   const subfolder = path.join(HORAS_FOLDER, `${anioInt}_${String(mesInt).padStart(2, "0")}`);
@@ -67,6 +67,7 @@ import PDFDocument from "pdfkit"
 import path from "path"
 import { fileURLToPath } from "url"
 import { drawPremiumHeader, setupPremiumFooter, drawPremiumSectionTitle, PDF_COLORS, sanitizeFileText } from "../pdf/premiumTheme.js"
+import { formatHoursAsClock, parseHoursInput } from "../utils/hourFormat.js"
 
 const router = express.Router()
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -108,15 +109,7 @@ const normalizeNullableId = (value) => {
 }
 
 const parseFlexibleNumber = (value) => {
-  if (value === undefined || value === null || value === "") return null
-  if (typeof value === "number") return Number.isFinite(value) ? value : null
-  const raw = String(value).trim()
-  if (!raw) return null
-  const normalized = raw.includes(",")
-    ? raw.replace(/\./g, "").replace(",", ".")
-    : raw
-  const numberValue = Number(normalized)
-  return Number.isFinite(numberValue) ? numberValue : null
+  return parseHoursInput(value)
 }
 
 const resolveClienteObraRelacion = async ({ clienteId, obraId }) => {
@@ -428,8 +421,14 @@ router.get("/resumen/pdf", async (req, res) => {
 
     setupPremiumFooter(doc, { leftText: "Tesla Montajes Electricos - Resumen mensual de horas" })
 
+    const FOOTER_SAFE_SPACE = 42
+
+    const getBottomLimit = (requiredHeight = 0) => {
+      return doc.page.height - doc.page.margins.bottom - FOOTER_SAFE_SPACE - requiredHeight
+    }
+
     const ensureSpace = (minHeight = 90) => {
-      if (doc.y > doc.page.height - minHeight) {
+      if (doc.y > getBottomLimit(minHeight)) {
         doc.addPage()
         doc.y = 60
       }
@@ -472,7 +471,7 @@ router.get("/resumen/pdf", async (req, res) => {
       }
 
       items.forEach((it, idx) => {
-        if (y > doc.page.height - 70) {
+        if (y > getBottomLimit(20)) {
           doc.addPage()
           doc.y = 60
           drawTableHeader()
@@ -482,7 +481,7 @@ router.get("/resumen/pdf", async (req, res) => {
         doc.rect(45, y, pageWidth - 90, 20).fill(bg)
         doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9.5)
         doc.text(it.label, 55, y + 6, { width: 350, ellipsis: true, align: "left" })
-        doc.text(`${it.value.toFixed(2)} hs`, 410, y + 6, { width: 120, align: "right" })
+        doc.text(`${formatHoursAsClock(it.value)} hs`, 410, y + 6, { width: 120, align: "right" })
         y += 20
       })
       doc.y = y + 4
@@ -519,7 +518,7 @@ router.get("/resumen/pdf", async (req, res) => {
       }
 
       items.forEach((item, idx) => {
-        if (y > doc.page.height - 70) {
+        if (y > getBottomLimit(22)) {
           doc.addPage()
           doc.y = 60
           drawSectionTitle("Horas prestadas entre grupos", 140)
@@ -531,7 +530,7 @@ router.get("/resumen/pdf", async (req, res) => {
         doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9.4)
         doc.text(`${item.origen} prestó a ${item.destino}`, tableX + 10, y + 7, { width: detalleWidth - 20, align: "left", ellipsis: true })
         doc.font("Helvetica-Bold")
-        doc.text(`${item.horas.toFixed(2)} hs`, tableX + detalleWidth, y + 7, { width: horasWidth - 10, align: "right" })
+        doc.text(`${formatHoursAsClock(item.horas)} hs`, tableX + detalleWidth, y + 7, { width: horasWidth - 10, align: "right" })
         y += 22
       })
       doc.y = y + 4
@@ -560,8 +559,8 @@ router.get("/resumen/pdf", async (req, res) => {
 
     doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(14)
     doc.text(String(totalRegistros), 58, resumenY + 24, { width: 110 })
-    doc.text(`${totalPrestadas.toFixed(2)} hs`, 250, resumenY + 24, { width: 140 })
-    doc.text(`${totalHorasMes.toFixed(2)} hs`, 430, resumenY + 24, { width: 110, align: "right" })
+    doc.text(`${formatHoursAsClock(totalPrestadas)} hs`, 250, resumenY + 24, { width: 140 })
+    doc.text(`${formatHoursAsClock(totalHorasMes)} hs`, 430, resumenY + 24, { width: 110, align: "right" })
 
     doc.strokeColor(PDF_COLORS.line).lineWidth(0.8).moveTo(58, resumenY + 46).lineTo(pageWidth - 58, resumenY + 46).stroke()
 

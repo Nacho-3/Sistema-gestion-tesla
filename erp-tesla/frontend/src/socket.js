@@ -8,9 +8,28 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || DEFAULT_SOCKET_URL
 
 const socket = io(SOCKET_URL, {
   path: '/socket.io',
-  autoConnect: true,
+  autoConnect: false,
+  withCredentials: true,
   reconnectionAttempts: 10,
   reconnectionDelay: 2000,
 })
+
+socket.on('connect_error', (error) => {
+  if (String(error?.message || '').toLowerCase().includes('sesión')) {
+    socket.disconnect()
+  }
+})
+
+export const connectAuthenticatedSocket = () => {
+  if (!socket.connected) {
+    socket.connect()
+  }
+}
+
+export const disconnectSocket = () => {
+  if (socket.connected) {
+    socket.disconnect()
+  }
+}
 
 export default socket

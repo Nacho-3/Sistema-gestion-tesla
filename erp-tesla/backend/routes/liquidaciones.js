@@ -7,6 +7,7 @@ import PDFDocument from "pdfkit"
 import path from "path"
 import { fileURLToPath } from "url"
 import { drawPremiumHeader, setupPremiumFooter, sanitizeFileText, PDF_COLORS } from "../pdf/premiumTheme.js"
+import { formatHoursAsClock } from "../utils/hourFormat.js"
 
 const router = express.Router()
 
@@ -34,6 +35,7 @@ async function saveSueldoTxtPorEmpleadoMes(mes, anio) {
       const liq = (liquidaciones || []).find(l => l.empleado_id === emp.id)
       if (!liq) continue
       const pagosEmp = pagosPorLiq[liq.id] || []
+      const conceptosExtra = getConceptosExtrasFromLiquidacion(liq)
       const nombreEmp = `${emp.nombre || ''} ${emp.apellido || ''}`.trim() || `Empleado_${emp.id}`
       const nombreArchivo = `${nombreEmp.replace(/[^a-zA-Z0-9_\- ]/g, "_")}.txt`
       const subfolder = path.join(SUELDOS_BASE_FOLDER, `${anio}_${String(mes).padStart(2, "0")}`)
@@ -49,7 +51,15 @@ async function saveSueldoTxtPorEmpleadoMes(mes, anio) {
         }
       }
       content += `\n--- Detalle ---\n`
-      content += `  Horas: ${liq.total_horas}\n  Valor hora: $${liq.valor_hora}\n  Importe horas: $${liq.importe_horas}\n  Presentismo: $${liq.presentismo}\n  Horas extra 50%: $${liq.importe_horas_extra}\n  Horas extra 100%: $${liq.importe_horas_extra_100}\n  No remunerativo: $${liq.no_remunerativo}\n  Aguinaldo: $${liq.aguinaldo}\n  Vacaciones: $${liq.vacaciones}\n  Feriados: $${liq.importe_feriados}\n  Adelantos: $${liq.adelantos}\n  Días no trabajados: $${liq.dias_no_trabajados}\n  Descuento días no trabajados: $${liq.descuento_dias_no_trabajados}\n  Adicional: $${liq.adicional}\n\n  Observaciones: ${liq.observaciones || ""}\n`
+      content += `  Horas: ${liq.total_horas}\n  Valor hora: $${liq.valor_hora}\n  Importe horas: $${liq.importe_horas}\n  Presentismo: $${liq.presentismo}\n  Horas extra 50%: $${liq.importe_horas_extra}\n  Horas extra 100%: $${liq.importe_horas_extra_100}\n  No remunerativo: $${liq.no_remunerativo}\n  Aguinaldo: $${liq.aguinaldo}\n  Vacaciones: $${liq.vacaciones}\n  Feriados: $${liq.importe_feriados}\n  Adelantos: $${liq.adelantos}\n  Días no trabajados: $${liq.dias_no_trabajados}\n  Descuento días no trabajados: $${liq.descuento_dias_no_trabajados}\n  Adicional: $${liq.adicional}\n`
+      if (conceptosExtra.length > 0) {
+        content += `  Conceptos manuales:\n`
+        conceptosExtra.forEach((item) => {
+          const signo = item.tipo === "resta" ? "-" : "+"
+          content += `    - ${item.descripcion}: ${signo}$${item.monto}\n`
+        })
+      }
+      content += `\n  Observaciones: ${liq.observaciones || ""}\n`
       const filePath = path.join(subfolder, nombreArchivo)
       await fs.writeFile(filePath, content)
     }
@@ -85,7 +95,7 @@ const LOGO_PRESUPUESTO_PATH = path.join(__dirname, "..", "assets", "logo_presupu
 const LOGO_PATH = path.join(__dirname, "..", "assets", "logo.png")
 const PDF_LOGO_PATH = path.resolve(LOGO_PRESUPUESTO_PATH)
 
-const getPeriodo = (mes, anio) => {
+export const getPeriodo = (mes, anio) => {
   const mesInt = parseInt(mes)
   const anioInt = parseInt(anio)
   const inicio = new Date(anioInt, mesInt - 1, 1)
@@ -102,6 +112,24 @@ const roundMoney = (valor) => {
   const numero = Number(valor)
   if (!Number.isFinite(numero)) return 0
   return Math.round(numero * 100) / 100
+}
+
+const normalizeConceptosExtras = (raw = []) => {
+  if (!Array.isArray(raw)) return []
+
+  return raw
+    .map((item) => ({
+      descripcion: String(item?.descripcion || item?.concepto || "").trim(),
+      monto: roundMoney(item?.monto ?? 0),
+      tipo: String(item?.tipo || item?.operacion || "suma").toLowerCase() === "resta" ? "resta" : "suma",
+    }))
+    .filter((item) => item.descripcion && item.monto > 0)
+}
+
+const getConceptosExtrasTotal = (items = []) => {
+  return roundMoney(items.reduce((sum, item) => {
+    return sum + (item.tipo === "resta" ? -roundMoney(item.monto) : roundMoney(item.monto))
+  }, 0))
 }
 
 const parseObservacionesData = (observacionesRaw) => {
@@ -131,6 +159,19 @@ const buildObservacionesData = (nota = "", meta = {}) => JSON.stringify({
 
 const getLiquidacionMeta = (liq = {}) => parseObservacionesData(liq?.observaciones).meta || {}
 
+const getConceptosExtrasFromLiquidacion = (liq = {}) => {
+  const { meta } = parseObservacionesData(liq?.observaciones)
+  return normalizeConceptosExtras(meta?.conceptos_extra || meta?.conceptos_adicionales || [])
+}
+
+const getHorasExtraRegistradasFromLiquidacion = (liq = {}) => {
+  const { meta } = parseObservacionesData(liq?.observaciones)
+  return {
+    horas_extra_registradas_50: roundMoney(meta?.horas_extra_registradas_50 ?? 0),
+    horas_extra_registradas_100: roundMoney(meta?.horas_extra_registradas_100 ?? 0),
+  }
+}
+
 const getHorasComputadas = (registro = {}) => {
   const valor =
     registro.cantidad_horas ??
@@ -155,8 +196,10 @@ const getHorasTrabajadas = (registro = {}) => {
 
 const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
   const { meta } = parseObservacionesData(liq?.observaciones)
+  const horasExtraLiquidacionManual = meta?.horas_extra_liquidacion_manual === true
 
-  const preferColumn = (columnValue, metaValue, fallback = 0) => {
+  const preferColumn = (columnValue, metaValue, fallback = 0, options = {}) => {
+    const allowLegacyMetaWhenColumnZero = options.allowLegacyMetaWhenColumnZero !== false
     const hasColumn = columnValue !== undefined && columnValue !== null && columnValue !== ""
     const hasMeta = metaValue !== undefined && metaValue !== null && metaValue !== ""
 
@@ -165,7 +208,7 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
     if (hasColumn) {
       const col = roundMoney(columnValue)
       const met = hasMeta ? roundMoney(metaValue) : null
-      if (col === 0 && hasMeta && met !== 0) {
+      if (allowLegacyMetaWhenColumnZero && col === 0 && hasMeta && met !== 0) {
         return met
       }
       return col
@@ -181,8 +224,12 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
   const aguinaldo = preferColumn(liq.aguinaldo, meta.aguinaldo)
   const vacaciones = preferColumn(liq.vacaciones, meta.vacaciones)
   const adelantos = preferColumn(liq.adelantos, meta.adelantos, liq?.descuentos)
-  const horasExtraCantidad = preferColumn(liq.horas_extra_cantidad, meta.horas_extra_cantidad)
-  const horasExtra100Cantidad = preferColumn(liq.horas_extra_100_cantidad, meta.horas_extra_100_cantidad)
+  const horasExtraCantidad = horasExtraLiquidacionManual
+    ? preferColumn(liq.horas_extra_cantidad, meta.horas_extra_cantidad, 0, { allowLegacyMetaWhenColumnZero: false })
+    : 0
+  const horasExtra100Cantidad = horasExtraLiquidacionManual
+    ? preferColumn(liq.horas_extra_100_cantidad, meta.horas_extra_100_cantidad, 0, { allowLegacyMetaWhenColumnZero: false })
+    : 0
   const feriadosCantidad = preferColumn(liq.feriados_cantidad, meta.feriados_cantidad)
   const diasNoTrabajados = preferColumn(liq.dias_no_trabajados, meta.dias_no_trabajados)
   // Treat `adicional` as a standard column (fallback to 0). Do not prefer legacy meta.
@@ -192,6 +239,8 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
   const importeHorasExtra100 = roundMoney(horasExtra100Cantidad * valorHora * 2)
   const importeFeriados = roundMoney(feriadosCantidad * 8 * valorHora)
   const descuentoDiasNoTrabajados = roundMoney(diasNoTrabajados * 8 * valorHora)
+  const conceptosExtra = getConceptosExtrasFromLiquidacion(liq)
+  const ajusteConceptosExtra = getConceptosExtrasTotal(conceptosExtra)
 
   return {
     presentismo,
@@ -208,6 +257,8 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
     importe_feriados: importeFeriados,
     descuento_dias_no_trabajados: descuentoDiasNoTrabajados,
     adicional,
+    conceptos_extra: conceptosExtra,
+    ajuste_conceptos_extra: ajusteConceptosExtra,
   }
 }
 
@@ -220,6 +271,7 @@ const mapLiquidacion = (liq, totalPagado = 0) => {
   const totalHoras = Number(liq?.total_horas ?? 0)
   const valorHora = totalHoras > 0 ? importeHoras / totalHoras : 0
   const horasTrabajadasReales = roundMoney(meta?.horas_trabajadas_reales ?? totalHoras)
+  const horasRegistradas = getHorasExtraRegistradasFromLiquidacion(liq)
   const conceptos = getConceptosFromLiquidacion(liq, valorHora)
   const totalCalculado =
     importeHoras +
@@ -230,6 +282,7 @@ const mapLiquidacion = (liq, totalPagado = 0) => {
     conceptos.importe_horas_extra +
     conceptos.importe_horas_extra_100 +
     conceptos.importe_feriados +
+    conceptos.ajuste_conceptos_extra +
     conceptos.adicional -
     conceptos.adelantos -
     conceptos.descuento_dias_no_trabajados
@@ -254,6 +307,8 @@ const mapLiquidacion = (liq, totalPagado = 0) => {
     adelantos: conceptos.adelantos,
     horas_extra_cantidad: conceptos.horas_extra_cantidad,
     horas_extra_100_cantidad: conceptos.horas_extra_100_cantidad,
+    horas_extra_registradas_50: horasRegistradas.horas_extra_registradas_50,
+    horas_extra_registradas_100: horasRegistradas.horas_extra_registradas_100,
     feriados_cantidad: conceptos.feriados_cantidad,
     dias_no_trabajados: conceptos.dias_no_trabajados,
     importe_feriados: conceptos.importe_feriados,
@@ -263,6 +318,8 @@ const mapLiquidacion = (liq, totalPagado = 0) => {
     estado,
     observaciones: nota,
     adicional: conceptos.adicional,
+    conceptos_extra: conceptos.conceptos_extra,
+    ajuste_conceptos_extra: conceptos.ajuste_conceptos_extra,
   }
 }
 
@@ -275,8 +332,8 @@ const formatoMoneda = (valor) => {
   }).format(Number(valor || 0))
 }
 
-const formatoHoras = (valor) => roundMoney(valor).toFixed(2)
-const formatoCantidad = (valor) => String(Math.round(Number(valor || 0)))
+const formatoHoras = (valor) => formatHoursAsClock(roundMoney(valor))
+const formatoCantidad = (valor) => formatHoursAsClock(Number(valor || 0))
 
 const getCantidadHoras = (registro = {}) => {
   const valor =
@@ -289,7 +346,7 @@ const getCantidadHoras = (registro = {}) => {
   return Number.isFinite(numero) ? numero : 0
 }
 
-const syncLiquidacionesPeriodo = async (mes, anio) => {
+export const syncLiquidacionesPeriodo = async (mes, anio) => {
   try {
     if (!mes || !anio) return
 
@@ -351,7 +408,7 @@ const syncLiquidacionesPeriodo = async (mes, anio) => {
               adicional: 0,
               descuentos: 0,
               monto_neto: 0,
-              estado: "pendiente",
+              estado: "pagada",
               observaciones: "",
             },
           ])
@@ -390,12 +447,23 @@ const syncLiquidacionesPeriodo = async (mes, anio) => {
       const totalHoras = roundMoney(liq.total_horas || 0)
       const montoBruto = roundMoney(liq.monto_bruto || 0)
       const conceptos = getConceptosFromLiquidacion(liq, valorHora)
+      const horasExtraLiquidacionManual = metaActual?.horas_extra_liquidacion_manual === true
+      const horasExtra50Liquidadas = horasExtraLiquidacionManual
+        ? roundMoney(conceptos.horas_extra_cantidad)
+        : roundMoney(conceptos.horas_extra_cantidad) === horasExtra50Automaticas
+          ? 0
+          : roundMoney(conceptos.horas_extra_cantidad)
+      const horasExtra100Liquidadas = horasExtraLiquidacionManual
+        ? roundMoney(conceptos.horas_extra_100_cantidad)
+        : roundMoney(conceptos.horas_extra_100_cantidad) === horasExtra100Automaticas
+          ? 0
+          : roundMoney(conceptos.horas_extra_100_cantidad)
       const conceptosActualizados = {
         ...conceptos,
-        horas_extra_cantidad: horasExtra50Automaticas,
-        importe_horas_extra: roundMoney(horasExtra50Automaticas * valorHora * 1.5),
-        horas_extra_100_cantidad: horasExtra100Automaticas,
-        importe_horas_extra_100: roundMoney(horasExtra100Automaticas * valorHora * 2),
+        horas_extra_cantidad: horasExtra50Liquidadas,
+        importe_horas_extra: roundMoney(horasExtra50Liquidadas * valorHora * 1.5),
+        horas_extra_100_cantidad: horasExtra100Liquidadas,
+        importe_horas_extra_100: roundMoney(horasExtra100Liquidadas * valorHora * 2),
       }
       const montoNeto = roundMoney(Math.max(
         0,
@@ -406,6 +474,7 @@ const syncLiquidacionesPeriodo = async (mes, anio) => {
           conceptosActualizados.vacaciones +
           conceptosActualizados.importe_horas_extra +
           conceptosActualizados.importe_horas_extra_100 +
+          conceptosActualizados.ajuste_conceptos_extra +
           conceptosActualizados.adicional +
           conceptosActualizados.importe_feriados -
           conceptosActualizados.adelantos -
@@ -415,12 +484,20 @@ const syncLiquidacionesPeriodo = async (mes, anio) => {
       const estado = totalPagado >= montoNeto ? "pagada" : "pendiente"
 
       const { nota } = parseObservacionesData(liq.observaciones)
+      const metaSinHorasExtraLegacy = { ...metaActual }
+      delete metaSinHorasExtraLegacy.horas_extra_cantidad
+      delete metaSinHorasExtraLegacy.horas_extra_100_cantidad
+
       const observacionesActualizadas = buildObservacionesData(nota, {
-        ...metaActual,
+        ...metaSinHorasExtraLegacy,
         horas_trabajadas_reales: horasTrabajadas,
+        horas_extra_registradas_50: horasExtra50Automaticas,
+        horas_extra_registradas_100: horasExtra100Automaticas,
+        horas_extra_liquidacion_manual: horasExtraLiquidacionManual,
+        conceptos_extra: conceptosActualizados.conceptos_extra,
       })
 
-      await db
+      let updateQuery = db
         .from("liquidaciones")
         .update({
           total_horas: totalHoras,
@@ -444,7 +521,13 @@ const syncLiquidacionesPeriodo = async (mes, anio) => {
           estado,
           observaciones: observacionesActualizadas,
         })
-        .eq("id", liq.id)
+
+      updateQuery = updateQuery.eq("id", liq.id)
+      if (liq.updated_at) {
+        updateQuery = updateQuery.eq("updated_at", liq.updated_at)
+      }
+
+      await updateQuery
     }
   } catch (err) {
     console.error("⚠️ Error sincronizando liquidaciones del período:", err.message)
@@ -638,35 +721,44 @@ router.get("/:id/pdf", async (req, res) => {
       y += 18
 
       const rows = [
-        ["Presentismo", formatoMoneda(liquidacion.presentismo)],
-        [
-          `Horas extra 50% (${formatoCantidad(liquidacion.horas_extra_cantidad)} hs)`,
-          formatoMoneda(liquidacion.importe_horas_extra),
-        ],
-        [
-          `Horas extra 100% (${formatoCantidad(liquidacion.horas_extra_100_cantidad)} hs)`,
-          formatoMoneda(liquidacion.importe_horas_extra_100),
-        ],
-        [
-          `Feriados (${formatoCantidad(liquidacion.feriados_cantidad)} dias)`,
-          formatoMoneda(liquidacion.importe_feriados),
-        ],
-        ["No remunerativo", formatoMoneda(liquidacion.no_remunerativo)],
-        ["Aguinaldo", formatoMoneda(liquidacion.aguinaldo)],
-        ["Vacaciones", formatoMoneda(liquidacion.vacaciones)],
-        ["Adicional", formatoMoneda(liquidacion.adicional)],
-        ["Adelantos", `-${formatoMoneda(liquidacion.adelantos)}`],
-        [
-          `Dias no trabajados (${formatoCantidad(liquidacion.dias_no_trabajados)})`,
-          `-${formatoMoneda(liquidacion.descuento_dias_no_trabajados)}`,
-        ],
-      ]
+        { label: "Presentismo", amount: Number(liquidacion.presentismo || 0), negative: false },
+        {
+          label: `Horas extra 50% (${formatoCantidad(liquidacion.horas_extra_cantidad)} hs)`,
+          amount: Number(liquidacion.importe_horas_extra || 0),
+          negative: false,
+        },
+        {
+          label: `Horas extra 100% (${formatoCantidad(liquidacion.horas_extra_100_cantidad)} hs)`,
+          amount: Number(liquidacion.importe_horas_extra_100 || 0),
+          negative: false,
+        },
+        {
+          label: `Feriados (${formatoCantidad(liquidacion.feriados_cantidad)} dias)`,
+          amount: Number(liquidacion.importe_feriados || 0),
+          negative: false,
+        },
+        { label: "No remunerativo", amount: Number(liquidacion.no_remunerativo || 0), negative: false },
+        { label: "Aguinaldo", amount: Number(liquidacion.aguinaldo || 0), negative: false },
+        { label: "Vacaciones", amount: Number(liquidacion.vacaciones || 0), negative: false },
+        { label: "Adicional", amount: Number(liquidacion.adicional || 0), negative: false },
+        ...(liquidacion.conceptos_extra || []).map((item) => ({
+          label: `${item.descripcion}${item.tipo === "resta" ? " (resta)" : ""}`,
+          amount: Number(item.monto || 0),
+          negative: item.tipo === "resta",
+        })),
+        { label: "Adelantos", amount: Number(liquidacion.adelantos || 0), negative: true },
+        {
+          label: `Dias no trabajados (${formatoCantidad(liquidacion.dias_no_trabajados)})`,
+          amount: Number(liquidacion.descuento_dias_no_trabajados || 0),
+          negative: true,
+        },
+      ].filter((row) => Math.abs(Number(row.amount || 0)) > 0.009)
 
-      rows.forEach(([label, value]) => {
+      rows.forEach(({ label, amount, negative }) => {
         doc.rect(45, y, pageWidth - 90, 16).lineWidth(0.5).strokeColor(PDF_COLORS.line).stroke()
         doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9.4)
         doc.text(label, 52, y + 4, { width: 340 })
-        doc.text(value, pageWidth - 160, y + 4, { width: 108, align: "right" })
+        doc.text(`${negative ? "-" : ""}${formatoMoneda(amount)}`, pageWidth - 160, y + 4, { width: 108, align: "right" })
         y += 16
       })
 
@@ -821,10 +913,10 @@ router.post("/", async (req, res) => {
         total_horas,
         monto_bruto: importe_horas,
         presentismo: 0,
-        horas_extra_cantidad: roundMoney(horas_extra_cantidad),
-        importe_horas_extra: roundMoney(horas_extra_cantidad * Number(empleado.valor_hora || 0) * 1.5),
-        horas_extra_100_cantidad: roundMoney(horas_extra_100_cantidad),
-        importe_horas_extra_100: roundMoney(horas_extra_100_cantidad * Number(empleado.valor_hora || 0) * 2),
+        horas_extra_cantidad: 0,
+        importe_horas_extra: 0,
+        horas_extra_100_cantidad: 0,
+        importe_horas_extra_100: 0,
         no_remunerativo: 0,
         aguinaldo: 0,
         vacaciones: 0,
@@ -836,9 +928,12 @@ router.post("/", async (req, res) => {
         adicional: 0,
         descuentos: 0,
         monto_neto: importe_horas,
-        estado: "pendiente",
+        estado: "pagada",
         observaciones: buildObservacionesData("", {
           horas_trabajadas_reales: roundMoney(horas_trabajadas_reales),
+          horas_extra_registradas_50: roundMoney(horas_extra_cantidad),
+          horas_extra_registradas_100: roundMoney(horas_extra_100_cantidad),
+          horas_extra_liquidacion_manual: false,
         })
       }
     ]).select()
@@ -874,6 +969,7 @@ router.put("/:id", async (req, res) => {
       dias_no_trabajados,
       adelantos,
       adicional,
+      conceptos_extra,
       observaciones,
     } = req.body
 
@@ -916,7 +1012,10 @@ router.put("/:id", async (req, res) => {
       dias_no_trabajados: roundMoney(dias_no_trabajados ?? conceptosActuales.dias_no_trabajados),
       adelantos: roundMoney(adelantos ?? conceptosActuales.adelantos),
       adicional: roundMoney(adicional ?? conceptosActuales.adicional ?? 0),
+      conceptos_extra: normalizeConceptosExtras(conceptos_extra ?? conceptosActuales.conceptos_extra),
     }
+
+    conceptos.ajuste_conceptos_extra = getConceptosExtrasTotal(conceptos.conceptos_extra)
 
     const importeHorasExtra = roundMoney(conceptos.horas_extra_cantidad * valorHoraCalculado * 1.5)
     const importeHorasExtra100 = roundMoney(conceptos.horas_extra_100_cantidad * valorHoraCalculado * 2)
@@ -933,6 +1032,7 @@ router.put("/:id", async (req, res) => {
       importeHorasExtra +
       importeHorasExtra100 +
       importeFeriados +
+      conceptos.ajuste_conceptos_extra +
       conceptos.adicional -
       conceptos.adelantos -
       descuentoDiasNoTrabajados
@@ -942,12 +1042,18 @@ router.put("/:id", async (req, res) => {
     const observacionesFinal = String(observaciones ?? notaActual ?? "")
     // Evitar duplicar 'adicional' en meta cuando se guarda en columna
     const metaSanitized = { ...metaActual }
+    delete metaSanitized.horas_extra_cantidad
+    delete metaSanitized.horas_extra_100_cantidad
     const observacionesPayload = buildObservacionesData(observacionesFinal, {
       ...metaSanitized,
       base_manual: total_horas !== undefined || monto_bruto !== undefined
         ? true
         : metaSanitized?.base_manual === true,
       horas_trabajadas_reales: roundMoney(metaSanitized?.horas_trabajadas_reales ?? liquidacion.total_horas ?? 0),
+      horas_extra_liquidacion_manual: horas_extra_cantidad !== undefined || horas_extra_100_cantidad !== undefined
+        ? true
+        : metaSanitized?.horas_extra_liquidacion_manual === true,
+      conceptos_extra: conceptos.conceptos_extra,
     })
 
     const { data: pagosExistentes } = await db

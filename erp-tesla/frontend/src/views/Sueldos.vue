@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, computed, watch } from "vue"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
+import { formatHoursAsClock, parseHoursInput } from "../utils/hourFormat"
 
 // Estado - Lista
 const liquidaciones = ref([])
@@ -20,6 +21,7 @@ const tarifaEditando = ref("")
 const mesSeleccionado = ref(new Date().getMonth() + 1)
 const anioSeleccionado = ref(new Date().getFullYear())
 const filtroEmpleado = ref("")
+const filtroBusqueda = ref("")
 
 // Modal - Nuevo Pago
 const showFormPago = ref(false)
@@ -31,6 +33,18 @@ const formPago = ref({
 
 // Modal - Editar Conceptos
 const showFormConceptos = ref(false)
+const crearConceptoExtraVacio = () => ({ descripcion: "", monto: 0, tipo: "suma" })
+const normalizarConceptosExtra = (items = []) => {
+  if (!Array.isArray(items)) return []
+  return items
+    .map((item) => ({
+      descripcion: String(item?.descripcion || item?.concepto || "").trim(),
+      monto: toNumber(item?.monto),
+      tipo: String(item?.tipo || item?.operacion || "suma").toLowerCase() === "resta" ? "resta" : "suma",
+    }))
+    .filter((item) => item.descripcion || item.monto > 0)
+}
+
 const formConceptos = ref({
   total_horas: 0,
   monto_bruto: 0,
@@ -44,8 +58,10 @@ const formConceptos = ref({
   dias_no_trabajados: 0,
   adelantos: 0,
   observaciones: "",
-  adicional: 0
+  adicional: 0,
+  conceptos_extra: []
 })
+const formConceptosHorasInput = ref("0")
 
 const toNumber = (valor) => {
   const numero = Number(valor)
@@ -76,6 +92,8 @@ const normalizarLiquidacion = (liq = {}) => ({
   total: toNumber(liq.total),
   total_pagado: toNumber(liq.total_pagado),
   adicional: toNumber(liq.adicional),
+  ajuste_conceptos_extra: toNumber(liq.ajuste_conceptos_extra),
+  conceptos_extra: normalizarConceptosExtra(liq.conceptos_extra),
 })
 
 const normalizarPago = (pago = {}) => ({
@@ -83,41 +101,66 @@ const normalizarPago = (pago = {}) => ({
   monto: toNumber(pago.monto),
 })
 
-const formatearHoras = (valor) => toNumber(valor).toFixed(2)
-const formatearCantidad = (valor) => String(Math.round(toNumber(valor)))
+const crearFormularioConceptos = (liquidacion = {}, opciones = {}) => {
+  const reiniciarHorasExtra = opciones.reiniciarHorasExtra === true
+
+  return {
+    total_horas: liquidacion.total_horas || 0,
+    monto_bruto: liquidacion.monto_bruto || liquidacion.importe_horas || 0,
+    presentismo: liquidacion.presentismo || 0,
+    horas_extra_cantidad: reiniciarHorasExtra ? 0 : (liquidacion.horas_extra_cantidad || 0),
+    horas_extra_100_cantidad: reiniciarHorasExtra ? 0 : (liquidacion.horas_extra_100_cantidad || 0),
+    no_remunerativo: liquidacion.no_remunerativo || 0,
+    aguinaldo: liquidacion.aguinaldo || 0,
+    vacaciones: liquidacion.vacaciones || 0,
+    feriados_cantidad: liquidacion.feriados_cantidad || 0,
+    dias_no_trabajados: liquidacion.dias_no_trabajados || 0,
+    adelantos: liquidacion.adelantos || 0,
+    observaciones: liquidacion.observaciones || "",
+    adicional: liquidacion.adicional || 0,
+    conceptos_extra: normalizarConceptosExtra(liquidacion.conceptos_extra),
+  }
+}
+
+const formatearHoras = (valor) => formatHoursAsClock(valor)
+const formatearCantidad = (valor) => formatHoursAsClock(valor)
+
+const syncHorasInputConceptos = (valor) => {
+  formConceptosHorasInput.value = formatHoursAsClock(valor)
+}
+
+const actualizarHorasConceptosDesdeInput = (valorRaw) => {
+  formConceptosHorasInput.value = valorRaw
+  const parsed = parseHoursInput(valorRaw)
+  if (Number.isFinite(parsed)) {
+    formConceptos.value.total_horas = parsed
+  }
+}
+
+const normalizarHorasConceptosInput = () => {
+  const parsed = parseHoursInput(formConceptosHorasInput.value)
+  formConceptos.value.total_horas = Number.isFinite(parsed) ? parsed : 0
+  syncHorasInputConceptos(formConceptos.value.total_horas)
+}
 
 // Cargar liquidaciones
 const cargarLiquidaciones = async () => {
   loading.value = true
   error.value = ""
-  const hardStop = setTimeout(() => {
-    if (loading.value) {
-      loading.value = false
-      if (!error.value) {
-        error.value = "La carga de liquidaciones tardó demasiado. Reintentá con 'Actualizar automáticamente'."
-      }
-    }
-  }, 15000)
 
   try {
-    console.log("📋 Cargando liquidaciones para:", {
-      mes: mesSeleccionado.value,
-      anio: anioSeleccionado.value,
-      empleado_id: filtroEmpleado.value || "todos",
-    })
-    const res = await Promise.race([
-      api.getLiquidaciones(mesSeleccionado.value, anioSeleccionado.value, filtroEmpleado.value || undefined),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Tiempo de espera agotado al cargar liquidaciones")), 12000)),
-    ])
+    const res = await api.getLiquidaciones(
+      mesSeleccionado.value,
+      anioSeleccionado.value,
+      filtroEmpleado.value || undefined
+    )
 
     liquidaciones.value = (res?.data || []).map(normalizarLiquidacion)
-    console.log(`✅ ${liquidaciones.value.length} liquidaciones cargadas`)
   } catch (err) {
     console.error("❌ Error al cargar liquidaciones:", err)
     error.value = "Error al cargar liquidaciones: " + (err.response?.data?.error || err.message)
     liquidaciones.value = []
   } finally {
-    clearTimeout(hardStop)
     loading.value = false
   }
 }
@@ -150,21 +193,8 @@ const verDetalle = async (liquidacion) => {
     pagos.value = (resPagos.data || []).map(normalizarPago)
 
     // Cargar conceptos en el formulario usando el dato más fresco posible
-    formConceptos.value = {
-      total_horas: liquidacionActualizada.total_horas || 0,
-      monto_bruto: liquidacionActualizada.monto_bruto || liquidacionActualizada.importe_horas || 0,
-      presentismo: liquidacionActualizada.presentismo || 0,
-      horas_extra_cantidad: liquidacionActualizada.horas_extra_cantidad || 0,
-      horas_extra_100_cantidad: liquidacionActualizada.horas_extra_100_cantidad || 0,
-      no_remunerativo: liquidacionActualizada.no_remunerativo || 0,
-      aguinaldo: liquidacionActualizada.aguinaldo || 0,
-      vacaciones: liquidacionActualizada.vacaciones || 0,
-      feriados_cantidad: liquidacionActualizada.feriados_cantidad || 0,
-      dias_no_trabajados: liquidacionActualizada.dias_no_trabajados || 0,
-      adelantos: liquidacionActualizada.adelantos || 0,
-      observaciones: liquidacionActualizada.observaciones || "",
-      adicional: liquidacionActualizada.adicional || 0
-    }
+    formConceptos.value = crearFormularioConceptos(liquidacionActualizada)
+    syncHorasInputConceptos(formConceptos.value.total_horas)
   } catch (err) {
     console.error("Error al cargar detalle/pagos:", err)
     pagos.value = []
@@ -175,23 +205,19 @@ const verDetalle = async (liquidacion) => {
 }
 
 const abrirEdicionLiquidacion = (liquidacion) => {
-  liquidacionSeleccionada.value = liquidacion
-  formConceptos.value = {
-    total_horas: liquidacion.total_horas || 0,
-    monto_bruto: liquidacion.monto_bruto || liquidacion.importe_horas || 0,
-    presentismo: liquidacion.presentismo || 0,
-    horas_extra_cantidad: liquidacion.horas_extra_cantidad || 0,
-    horas_extra_100_cantidad: liquidacion.horas_extra_100_cantidad || 0,
-    no_remunerativo: liquidacion.no_remunerativo || 0,
-    aguinaldo: liquidacion.aguinaldo || 0,
-    vacaciones: liquidacion.vacaciones || 0,
-    feriados_cantidad: liquidacion.feriados_cantidad || 0,
-    dias_no_trabajados: liquidacion.dias_no_trabajados || 0,
-    adelantos: liquidacion.adelantos || 0,
-    observaciones: liquidacion.observaciones || "",
-    adicional: liquidacion.adicional || 0
-  }
+  const liquidacionNormalizada = normalizarLiquidacion(liquidacion)
+  liquidacionSeleccionada.value = liquidacionNormalizada
+  formConceptos.value = crearFormularioConceptos(liquidacionNormalizada, { reiniciarHorasExtra: true })
+  syncHorasInputConceptos(formConceptos.value.total_horas)
   showFormConceptos.value = true
+}
+
+const agregarConceptoExtra = () => {
+  formConceptos.value.conceptos_extra.push(crearConceptoExtraVacio())
+}
+
+const eliminarConceptoExtra = (index) => {
+  formConceptos.value.conceptos_extra.splice(index, 1)
 }
 
 const autocompletarSueldoBaseDesdeHoras = () => {
@@ -316,11 +342,10 @@ const eliminarLiquidacion = async (id) => {
   error.value = ""
   try {
     await api.deleteLiquidacion(id)
-    console.log("✅ Liquidación eliminada correctamente")
-    
+
     // Recargar la lista
     await cargarLiquidaciones()
-    
+
     // Volver a la lista principal
     vistaActual.value = "lista"
     liquidacionSeleccionada.value = null
@@ -370,6 +395,14 @@ const importeHorasExtra100Preview = computed(() => {
   return toNumber(formConceptos.value.horas_extra_100_cantidad) * valorHoraDetalle.value * 2
 })
 
+const horasExtraRegistradas50 = computed(() => {
+  return toNumber(liquidacionSeleccionada.value?.horas_extra_registradas_50)
+})
+
+const horasExtraRegistradas100 = computed(() => {
+  return toNumber(liquidacionSeleccionada.value?.horas_extra_registradas_100)
+})
+
 const importeFeriadosPreview = computed(() => {
   return toNumber(formConceptos.value.feriados_cantidad) * 8 * valorHoraDetalle.value
 })
@@ -377,6 +410,37 @@ const importeFeriadosPreview = computed(() => {
 const descuentoDiasNoTrabajadosPreview = computed(() => {
   return toNumber(formConceptos.value.dias_no_trabajados) * 8 * valorHoraDetalle.value
 })
+
+const totalConceptosExtrasPreview = computed(() => {
+  return normalizarConceptosExtra(formConceptos.value.conceptos_extra).reduce((sum, item) => {
+    return sum + (item.tipo === "resta" ? -toNumber(item.monto) : toNumber(item.monto))
+  }, 0)
+})
+
+const liquidacionesFiltradas = computed(() => {
+  const termino = filtroBusqueda.value.trim().toLowerCase()
+  if (!termino) return liquidaciones.value
+
+  return liquidaciones.value.filter((liquidacion) => {
+    const empleado = getNombreEmpleado(liquidacion.empleado_id)
+    const periodo = `${liquidacion.mes}/${liquidacion.anio}`
+    const searchable = [
+      empleado,
+      periodo,
+      liquidacion.estado,
+      formatearHoras(liquidacion.horas_computadas),
+      formatearMoneda(liquidacion.total),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+
+    return searchable.includes(termino)
+  })
+})
+
+const liquidacionesPagadasCount = computed(() => liquidaciones.value.filter((liq) => String(liq.estado) === "pagada").length)
+const liquidacionesPendientesCount = computed(() => liquidaciones.value.filter((liq) => String(liq.estado) !== "pagada").length)
 
 // Obtener nombre empleado
 const getNombreEmpleado = (empleadoId) => {
@@ -460,10 +524,42 @@ onUnmounted(() => {
   >
     <div class="sueldos-container">
       <!-- VISTA: LISTA DE LIQUIDACIONES -->
-      <div v-if="vistaActual === 'lista'">
-        <!-- Filtros y acciones -->
-        <div class="sueldos-header">
-          <div class="filtros">
+      <div v-if="vistaActual === 'lista'" class="sueldos-list-view">
+        <section class="sueldos-topbar">
+          <div class="sueldos-topbar-copy">
+            <span class="section-kicker">Gestión salarial</span>
+            <h2>Liquidaciones mensuales</h2>
+          </div>
+          <div class="header-actions">
+            <button class="btn-primary header-btn" @click="cargarLiquidaciones">
+              ↻ Actualizar automáticamente
+            </button>
+            <button class="btn-tarifas header-btn" @click="vistaActual = 'tarifas'">
+              💰 Configurar Tarifas
+            </button>
+          </div>
+        </section>
+
+        <section class="sueldos-stats">
+          <article class="sueldo-stat-card sueldo-stat-card-primary">
+            <span>Total liquidaciones</span>
+            <strong>{{ liquidaciones.length }}</strong>
+            <small>Registros del período actualmente consultado.</small>
+          </article>
+          <article class="sueldo-stat-card sueldo-stat-card-paid">
+            <span>Pagadas</span>
+            <strong>{{ liquidacionesPagadasCount }}</strong>
+            <small>Liquidaciones completamente cubiertas.</small>
+          </article>
+          <article class="sueldo-stat-card sueldo-stat-card-pending">
+            <span>Pendientes</span>
+            <strong>{{ liquidacionesPendientesCount }}</strong>
+            <small>Liquidaciones con saldo aún pendiente.</small>
+          </article>
+        </section>
+
+        <section class="sueldos-toolbar">
+          <div class="filtros filtros-sueldo">
             <div class="filtro-grupo">
               <label>Mes:</label>
               <select v-model.number="mesSeleccionado" @change="cargarLiquidaciones">
@@ -489,16 +585,19 @@ onUnmounted(() => {
                 </option>
               </select>
             </div>
+            <label class="sueldos-search-field">
+              <span>Buscar en tiempo real</span>
+              <input
+                v-model="filtroBusqueda"
+                type="text"
+                placeholder="Empleado, período, estado o total"
+              />
+            </label>
           </div>
-          <div class="header-actions">
-            <button class="btn-primary header-btn" @click="cargarLiquidaciones">
-              ↻ Actualizar automáticamente
-            </button>
-            <button class="btn-tarifas header-btn" @click="vistaActual = 'tarifas'">
-              💰 Configurar Tarifas
-            </button>
+          <div class="sueldos-toolbar-count">
+            Mostrando {{ liquidacionesFiltradas.length }} de {{ liquidaciones.length }} liquidaciones
           </div>
-        </div>
+        </section>
 
         <!-- Mensaje de error -->
         <div v-if="error" class="error-alert">
@@ -506,7 +605,15 @@ onUnmounted(() => {
         </div>
 
         <!-- Tabla de liquidaciones -->
-        <div v-if="!loading && liquidaciones.length > 0" class="sueldos-table">
+        <div v-if="!loading && liquidacionesFiltradas.length > 0" class="sueldos-table-shell">
+          <div class="sueldos-table-header-row">
+            <div>
+              <span class="section-kicker">Listado</span>
+              <h3>Liquidaciones generadas</h3>
+            </div>
+          </div>
+
+          <div class="sueldos-table">
           <table>
             <thead>
               <tr>
@@ -520,7 +627,7 @@ onUnmounted(() => {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="liq in liquidaciones" :key="liq.id">
+              <tr v-for="liq in liquidacionesFiltradas" :key="liq.id">
                 <td><strong>{{ getNombreEmpleado(liq.empleado_id) }}</strong></td>
                 <td>{{ liq.mes }}/{{ liq.anio }}</td>
                 <td>{{ formatearHoras(liq.horas_computadas) }}</td>
@@ -544,6 +651,7 @@ onUnmounted(() => {
               </tr>
             </tbody>
           </table>
+          </div>
         </div>
 
         <!-- Estado vacío -->
@@ -552,6 +660,11 @@ onUnmounted(() => {
           <button class="btn-primary" @click="cargarLiquidaciones">
             Generar automáticamente
           </button>
+        </div>
+
+        <div v-if="!loading && liquidaciones.length > 0 && liquidacionesFiltradas.length === 0" class="empty-state empty-state-search">
+          <p>No hay coincidencias para la búsqueda actual</p>
+          <button class="btn-secondary" @click="filtroBusqueda = ''">Limpiar búsqueda</button>
         </div>
 
         <!-- Cargando -->
@@ -666,6 +779,16 @@ onUnmounted(() => {
               <span>Adicional:</span>
               <span>{{ formatearMoneda(liquidacionSeleccionada.adicional) }}</span>
             </div>
+            <div
+              v-for="(conceptoExtra, index) in liquidacionSeleccionada.conceptos_extra || []"
+              :key="`${conceptoExtra.descripcion}-${index}`"
+              class="concepto"
+            >
+              <span>{{ conceptoExtra.descripcion }}<template v-if="conceptoExtra.tipo === 'resta'"> (resta)</template>:</span>
+              <span :class="conceptoExtra.tipo === 'resta' ? 'concepto-negativo' : ''">
+                {{ conceptoExtra.tipo === "resta" ? "-" : "" }}{{ formatearMoneda(conceptoExtra.monto) }}
+              </span>
+            </div>
             <div class="concepto-observacion">
               <span>Observaciones:</span>
               <p>{{ liquidacionSeleccionada.observaciones || "-" }}</p>
@@ -747,11 +870,15 @@ onUnmounted(() => {
       <!-- VISTA: TARIFAS -->
       <div v-if="vistaActual === 'tarifas'" class="tarifas-container">
         <!-- Encabezado -->
-        <div class="tarifas-header">
+        <div class="tarifas-header tarifas-topbar">
           <button class="btn-volver" @click="volverALista">
             ← Volver a la lista
           </button>
-          <h2>💰 Configurar Tarifas por Hora</h2>
+          <div class="tarifas-topbar-copy">
+            <span class="section-kicker">Configuración salarial</span>
+            <h2>Configurar tarifas por hora</h2>
+            <p>Actualizá el valor hora de cada empleado con una vista más clara y operativa.</p>
+          </div>
         </div>
 
         <!-- Mensaje de error -->
@@ -760,7 +887,15 @@ onUnmounted(() => {
         </div>
 
         <!-- Tabla de empleados -->
-        <div v-if="!loading && empleados.length > 0" class="tarifas-table">
+        <div v-if="!loading && empleados.length > 0" class="tarifas-table-shell">
+          <div class="sueldos-table-header-row">
+            <div>
+              <span class="section-kicker">Tarifario</span>
+              <h3>Valores por empleado</h3>
+            </div>
+          </div>
+
+          <div class="tarifas-table">
           <table>
             <thead>
               <tr>
@@ -805,6 +940,7 @@ onUnmounted(() => {
               </tr>
             </tbody>
           </table>
+          </div>
         </div>
 
         <!-- Estado vacío -->
@@ -822,85 +958,212 @@ onUnmounted(() => {
       <div v-if="showFormConceptos" class="modal-overlay" @click.self="showFormConceptos = false">
         <div class="modal modal-conceptos">
           <div class="modal-header">
-            <h3>Editar conceptos adicionales</h3>
-            <button class="btn-close" @click="showFormConceptos = false">×</button>
+            <div class="modal-header-copy modal-header-copy-conceptos">
+              <span class="modal-kicker">Liquidacion manual</span>
+              <h3>Editar conceptos adicionales</h3>
+              <p>Revisá horas, ajustes y conceptos manuales antes de guardar la liquidación del período.</p>
+            </div>
+            <button type="button" class="btn-close" aria-label="Cerrar modal" @click="showFormConceptos = false">×</button>
           </div>
 
           <form @submit.prevent="actualizarConceptos" class="modal-form modal-form-conceptos">
-            <label class="form-group">
-              <span>Horas computadas / pagadas</span>
-              <input v-model.number="formConceptos.total_horas" type="number" min="0" step="0.5" />
-              <small class="form-help">Al cambiar este valor, se autocalcula el sueldo base con el valor hora del empleado. Después podés retocarlo manualmente.</small>
-            </label>
-
-            <label class="form-group">
-              <span>Sueldo base ($)</span>
-              <input v-model.number="formConceptos.monto_bruto" type="number" min="0" step="0.01" />
-              <small class="form-help">Administración puede ajustarlo manualmente sin depender de las horas cargadas.</small>
-              <small class="form-help">
-                Cálculo automático: {{ formatearHoras(formConceptos.total_horas) }} hs × {{ formatearMoneda(getValorHoraEmpleado(liquidacionSeleccionada?.empleado_id) || liquidacionSeleccionada?.valor_hora) }} = {{ formatearMoneda(sueldoBaseCalculadoPreview) }}
-              </small>
-            </label>
-
-            <label class="form-group">
-              <span>Presentismo ($)</span>
-              <input v-model.number="formConceptos.presentismo" type="number" min="0" step="0.01" />
-            </label>
-
-            <div class="form-group form-group-readonly">
-              <span>Horas extra al 50%</span>
-              <strong>{{ formatearHoras(formConceptos.horas_extra_cantidad) }} hs</strong>
-              <small class="form-help">Se toma automáticamente desde la ventana de horas. Importe calculado: {{ formatearMoneda(importeHorasExtraPreview) }}</small>
+            <div class="conceptos-modal-summary">
+              <div class="conceptos-summary-pill">
+                <span>Empleado</span>
+                <strong>{{ getNombreEmpleado(liquidacionSeleccionada?.empleado_id) }}</strong>
+              </div>
+              <div class="conceptos-summary-pill">
+                <span>Periodo</span>
+                <strong>{{ liquidacionSeleccionada?.mes }}/{{ liquidacionSeleccionada?.anio }}</strong>
+              </div>
+              <div class="conceptos-summary-pill">
+                <span>Valor hora</span>
+                <strong>{{ formatearMoneda(getValorHoraEmpleado(liquidacionSeleccionada?.empleado_id) || liquidacionSeleccionada?.valor_hora) }}</strong>
+              </div>
             </div>
 
-            <div class="form-group form-group-readonly">
-              <span>Horas extra al 100%</span>
-              <strong>{{ formatearHoras(formConceptos.horas_extra_100_cantidad) }} hs</strong>
-              <small class="form-help">Se toma automáticamente desde la ventana de horas. Importe calculado: {{ formatearMoneda(importeHorasExtra100Preview) }}</small>
+            <section class="conceptos-form-section">
+              <div class="conceptos-form-section-header">
+                <div>
+                  <span class="section-kicker">Base de liquidacion</span>
+                  <h4>Horas y sueldo base</h4>
+                </div>
+                <small>Podés recalcular desde horas y luego ajustar el valor final manualmente.</small>
+              </div>
+
+              <div class="conceptos-form-grid conceptos-form-grid-primary">
+                <label class="form-group form-card-field">
+                  <span>Horas computadas / pagadas</span>
+                  <input
+                    :value="formConceptosHorasInput"
+                    type="text"
+                    inputmode="decimal"
+                    placeholder="Ej: 8.30"
+                    @input="actualizarHorasConceptosDesdeInput($event.target.value)"
+                    @blur="normalizarHorasConceptosInput"
+                  />
+                  <small class="form-help">Al cambiar este valor, se autocalcula el sueldo base con el valor hora del empleado. Después podés retocarlo manualmente.</small>
+                  <small class="form-help">Formato hora real. Ejemplo: 0.30 = media hora, 8.30 = ocho horas y media.</small>
+                </label>
+
+                <label class="form-group form-card-field">
+                  <span>Sueldo base ($)</span>
+                  <input v-model.number="formConceptos.monto_bruto" type="number" min="0" step="0.01" />
+                  <small class="form-help">Administración puede ajustarlo manualmente sin depender de las horas cargadas.</small>
+                  <small class="form-help">
+                    Cálculo automático: {{ formatearHoras(formConceptos.total_horas) }} hs × {{ formatearMoneda(getValorHoraEmpleado(liquidacionSeleccionada?.empleado_id) || liquidacionSeleccionada?.valor_hora) }} = {{ formatearMoneda(sueldoBaseCalculadoPreview) }}
+                  </small>
+                </label>
+
+                <label class="form-group form-card-field">
+                  <span>Presentismo ($)</span>
+                  <input v-model.number="formConceptos.presentismo" type="number" min="0" step="0.01" />
+                  <small class="form-help">Usalo para reflejar asistencia perfecta o premios fijos del período.</small>
+                </label>
+              </div>
+            </section>
+
+            <section class="conceptos-form-section conceptos-form-section-highlighted">
+              <div class="conceptos-form-section-header">
+                <div>
+                  <span class="section-kicker">Variables del periodo</span>
+                  <h4>Horas extra y adicionales legales</h4>
+                </div>
+                <small>Compará lo liquidado contra lo que vino cargado en horas.</small>
+              </div>
+
+              <div class="overtime-edit-grid">
+                <label class="form-group overtime-edit-card">
+                  <span>Horas extra a liquidar al 50%</span>
+                  <input v-model.number="formConceptos.horas_extra_cantidad" type="number" min="0" step="0.01" />
+                  <small class="form-help">Importe calculado: {{ formatearMoneda(importeHorasExtraPreview) }}</small>
+                  <div class="overtime-source-note">
+                    <span>Registradas en horas:</span>
+                    <strong>{{ formatearHoras(horasExtraRegistradas50) }} hs</strong>
+                  </div>
+                </label>
+
+                <label class="form-group overtime-edit-card">
+                  <span>Horas extra a liquidar al 100%</span>
+                  <input v-model.number="formConceptos.horas_extra_100_cantidad" type="number" min="0" step="0.01" />
+                  <small class="form-help">Importe calculado: {{ formatearMoneda(importeHorasExtra100Preview) }}</small>
+                  <div class="overtime-source-note">
+                    <span>Registradas en horas:</span>
+                    <strong>{{ formatearHoras(horasExtraRegistradas100) }} hs</strong>
+                  </div>
+                </label>
+              </div>
+
+              <div class="conceptos-form-grid conceptos-form-grid-secondary">
+                <label class="form-group form-card-field">
+                  <span>No remunerativo ($)</span>
+                  <input v-model.number="formConceptos.no_remunerativo" type="number" min="0" step="0.01" />
+                </label>
+
+                <label class="form-group form-card-field">
+                  <span>Aguinaldo ($)</span>
+                  <input v-model.number="formConceptos.aguinaldo" type="number" min="0" step="0.01" />
+                </label>
+
+                <label class="form-group form-card-field">
+                  <span>Vacaciones ($)</span>
+                  <input v-model.number="formConceptos.vacaciones" type="number" min="0" step="0.01" />
+                </label>
+
+                <label class="form-group form-card-field">
+                  <span>Feriados (cantidad de días)</span>
+                  <input v-model.number="formConceptos.feriados_cantidad" type="number" min="0" step="1" />
+                  <small class="form-help">Cada feriado suma 8 horas al valor común. Importe calculado: {{ formatearMoneda(importeFeriadosPreview) }}</small>
+                </label>
+
+                <label class="form-group form-card-field">
+                  <span>Días no trabajados (cantidad)</span>
+                  <input v-model.number="formConceptos.dias_no_trabajados" type="number" min="0" step="1" />
+                  <small class="form-help">Se descuenta 8 horas por día faltado. Descuento calculado: -{{ formatearMoneda(descuentoDiasNoTrabajadosPreview) }}</small>
+                </label>
+
+                <label class="form-group form-card-field">
+                  <span>Adelantos ($)</span>
+                  <input v-model.number="formConceptos.adelantos" type="number" min="0" step="0.01" />
+                </label>
+
+                <label class="form-group form-card-field form-card-field-accent">
+                  <span>Adicional ($)</span>
+                  <input v-model.number="formConceptos.adicional" type="number" min="0" step="0.01" />
+                  <small class="form-help">Monto adicional a sumar a la liquidación (bonos, premios, etc).</small>
+                </label>
+              </div>
+            </section>
+
+            <section class="conceptos-form-section">
+              <div class="conceptos-form-section-header">
+                <div>
+                  <span class="section-kicker">Ajustes puntuales</span>
+                  <h4>Conceptos manuales y anotaciones</h4>
+                </div>
+                <small>Estos conceptos impactan también en el PDF de la liquidación.</small>
+              </div>
+
+            <div class="form-group form-group-conceptos-extra">
+              <div class="conceptos-extra-header">
+                <div>
+                  <span>Conceptos manuales</span>
+                  <small class="form-help conceptos-extra-subtitle">Sumá bonos, descuentos o ajustes puntuales que no vienen de horas.</small>
+                </div>
+                <button type="button" class="btn-secondary btn-small btn-concepto-add" @click="agregarConceptoExtra">
+                  + Agregar concepto
+                </button>
+              </div>
+
+              <div class="conceptos-extra-summary">
+                <span>Impacto total</span>
+                <strong :class="{ negativo: totalConceptosExtrasPreview < 0 }">
+                  {{ totalConceptosExtrasPreview >= 0 ? "+" : "" }}{{ formatearMoneda(totalConceptosExtrasPreview) }}
+                </strong>
+              </div>
+
+              <div v-if="formConceptos.conceptos_extra.length === 0" class="conceptos-extra-empty">
+                <strong>Sin conceptos manuales cargados</strong>
+                <span>Cuando agregues uno, va a aparecer en conceptos adicionales y también en el PDF.</span>
+              </div>
+
+              <div
+                v-for="(conceptoExtra, index) in formConceptos.conceptos_extra"
+                :key="`extra-${index}`"
+                class="concepto-extra-row"
+              >
+                <div class="concepto-extra-row-top">
+                  <span class="concepto-extra-index">Concepto {{ index + 1 }}</span>
+                  <button type="button" class="btn-delete-small" @click="eliminarConceptoExtra(index)">
+                    Quitar
+                  </button>
+                </div>
+                <div class="concepto-extra-fields">
+                  <label>
+                    <span>Descripción</span>
+                    <input v-model="conceptoExtra.descripcion" type="text" placeholder="Ej: Bono productividad" />
+                  </label>
+                  <label>
+                    <span>Monto</span>
+                    <input v-model.number="conceptoExtra.monto" type="number" min="0" step="0.01" placeholder="0.00" />
+                  </label>
+                  <label>
+                    <span>Impacto</span>
+                    <select v-model="conceptoExtra.tipo">
+                      <option value="suma">Suma</option>
+                      <option value="resta">Resta</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
             </div>
 
-            <label class="form-group">
-              <span>No remunerativo ($)</span>
-              <input v-model.number="formConceptos.no_remunerativo" type="number" min="0" step="0.01" />
-            </label>
-
-            <label class="form-group">
-              <span>Aguinaldo ($)</span>
-              <input v-model.number="formConceptos.aguinaldo" type="number" min="0" step="0.01" />
-            </label>
-
-            <label class="form-group">
-              <span>Vacaciones ($)</span>
-              <input v-model.number="formConceptos.vacaciones" type="number" min="0" step="0.01" />
-            </label>
-
-            <label class="form-group">
-              <span>Feriados (cantidad de días)</span>
-              <input v-model.number="formConceptos.feriados_cantidad" type="number" min="0" step="1" />
-              <small class="form-help">Cada feriado suma 8 horas al valor común. Importe calculado: {{ formatearMoneda(importeFeriadosPreview) }}</small>
-            </label>
-
-            <label class="form-group">
-              <span>Días no trabajados (cantidad)</span>
-              <input v-model.number="formConceptos.dias_no_trabajados" type="number" min="0" step="1" />
-              <small class="form-help">Se descuenta 8 horas por día faltado. Descuento calculado: -{{ formatearMoneda(descuentoDiasNoTrabajadosPreview) }}</small>
-            </label>
-
-            <label class="form-group">
-              <span>Adelantos ($)</span>
-              <input v-model.number="formConceptos.adelantos" type="number" min="0" step="0.01" />
-            </label>
-
-            <label class="form-group">
-              <span>Adicional ($)</span>
-              <input v-model.number="formConceptos.adicional" type="number" min="0" step="0.01" />
-              <small class="form-help">Monto adicional a sumar a la liquidación (bonos, premios, etc).</small>
-            </label>
-
-            <label class="form-group">
-              <span>Anotaciones</span>
-              <textarea v-model="formConceptos.observaciones" rows="3" placeholder="Notas del período, adelantos, aclaraciones..."></textarea>
-            </label>
+              <label class="form-group form-card-field conceptos-notes-field">
+                <span>Anotaciones</span>
+                <textarea v-model="formConceptos.observaciones" rows="3" placeholder="Notas del período, adelantos, aclaraciones..."></textarea>
+                <small class="form-help">Este texto sirve para dejar contexto interno y también observaciones que después pueden verse en el detalle.</small>
+              </label>
+            </section>
 
             <div class="modal-actions">
               <button type="submit" class="btn-primary" :disabled="loading">
@@ -970,20 +1233,68 @@ onUnmounted(() => {
 <style scoped>
 .sueldos-container {
   padding: 1.5rem;
+  display: grid;
+  gap: 1.75rem;
 }
 
-.sueldos-header {
+.sueldos-list-view {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.section-kicker {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #7dd3fc;
+}
+
+.sueldos-topbar,
+.sueldos-toolbar,
+.sueldos-table-shell,
+.sueldo-stat-card,
+.empty-state {
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(15, 23, 42, 0.78));
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  box-shadow: 0 18px 38px rgba(15, 23, 42, 0.45);
+}
+
+.sueldos-topbar {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 2rem;
-  gap: 1rem;
+  align-items: end;
+  gap: 1.2rem;
+  flex-wrap: wrap;
+  padding: 1.4rem 1.5rem;
+  border-radius: 1rem;
+}
+
+.sueldos-topbar-copy {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.sueldos-topbar-copy h2,
+.sueldos-table-header-row h3 {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 1.45rem;
+}
+
+.sueldos-topbar-copy p {
+  margin: 0;
+  color: #94a3b8;
+  max-width: 62ch;
+  line-height: 1.45;
 }
 
 .header-actions {
   display: flex;
   align-items: center;
   gap: 1rem;
+  flex-wrap: wrap;
 }
 
 .header-btn {
@@ -995,9 +1306,67 @@ onUnmounted(() => {
   flex: 0 0 270px;
 }
 
+.sueldos-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1.35rem;
+}
+
+.sueldo-stat-card {
+  padding: 1.15rem 1.2rem;
+  border-radius: 0.95rem;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.sueldo-stat-card span {
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.sueldo-stat-card strong {
+  font-size: 1.55rem;
+  color: #f8fafc;
+}
+
+.sueldo-stat-card small {
+  color: #94a3b8;
+  line-height: 1.35;
+}
+
+.sueldo-stat-card-primary {
+  border-color: rgba(96, 165, 250, 0.28);
+}
+
+.sueldo-stat-card-paid {
+  border-color: rgba(74, 222, 128, 0.24);
+}
+
+.sueldo-stat-card-pending {
+  border-color: rgba(248, 113, 113, 0.22);
+}
+
+.sueldos-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 1.15rem;
+  flex-wrap: wrap;
+  padding: 1.1rem 1.2rem;
+  border-radius: 1rem;
+}
+
 .filtros {
   display: flex;
   gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.filtros-sueldo {
+  flex: 1;
 }
 
 .filtro-grupo {
@@ -1007,18 +1376,49 @@ onUnmounted(() => {
 }
 
 .filtro-grupo label {
-  font-size: 0.875rem;
-  font-weight: 500;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: #cbd5e1;
 }
 
-.filtro-grupo select {
-  padding: 0.5rem;
-  background-color: rgba(30, 41, 59, 0.8);
-  border: 1px solid rgba(148, 163, 184, 0.3);
-  border-radius: 0.375rem;
+.filtro-grupo select,
+.sueldos-search-field input {
+  min-height: 3rem;
+  padding: 0.78rem 0.9rem;
+  background-color: rgba(15, 23, 42, 0.86);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 0.85rem;
   color: #e2e8f0;
-  font-size: 0.9375rem;
+  font-size: 0.95rem;
+}
+
+.filtro-grupo select:focus,
+.sueldos-search-field input:focus {
+  outline: none;
+  border-color: rgba(56, 189, 248, 0.6);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
+}
+
+.sueldos-search-field {
+  display: grid;
+  gap: 0.45rem;
+  min-width: min(100%, 280px);
+}
+
+.sueldos-search-field span {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #cbd5e1;
+}
+
+.sueldos-toolbar-count {
+  color: #94a3b8;
+  font-size: 0.88rem;
+  white-space: nowrap;
 }
 
 .error-alert {
@@ -1032,6 +1432,19 @@ onUnmounted(() => {
 
 .sueldos-table {
   overflow-x: auto;
+  padding: 0 1rem 1rem;
+}
+
+.sueldos-table-shell {
+  border-radius: 1rem;
+  overflow: hidden;
+}
+
+.sueldos-table-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 1.15rem 0.75rem;
 }
 
 table {
@@ -1039,7 +1452,8 @@ table {
   border-collapse: collapse;
   background-color: rgba(15, 23, 42, 0.6);
   border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.5rem;
+  border-radius: 0.85rem;
+  overflow: hidden;
 }
 
 thead {
@@ -1136,9 +1550,7 @@ td {
 .empty-state {
   text-align: center;
   padding: 3rem 2rem;
-  background-color: rgba(15, 23, 42, 0.6);
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 0.5rem;
+  border-radius: 1rem;
   color: #94a3b8;
 }
 
@@ -1473,18 +1885,20 @@ td {
 }
 
 .btn-delete-small {
-  padding: 0.25rem 0.5rem;
-  background-color: rgba(239, 68, 68, 0.2);
-  color: #fca5a5;
-  border: none;
-  border-radius: 0.25rem;
+  padding: 0.45rem 0.75rem;
+  background-color: rgba(239, 68, 68, 0.14);
+  color: #fecaca;
+  border: 1px solid rgba(248, 113, 113, 0.22);
+  border-radius: 0.5rem;
   cursor: pointer;
-  transition: all 0.2s;
-  font-size: 0.875rem;
+  transition: all 0.2s ease;
+  font-size: 0.8rem;
+  font-weight: 600;
 }
 
 .btn-delete-small:hover {
-  background-color: rgba(239, 68, 68, 0.3);
+  background-color: rgba(239, 68, 68, 0.22);
+  border-color: rgba(248, 113, 113, 0.35);
 }
 
 .sin-datos {
@@ -1514,11 +1928,16 @@ td {
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: rgba(0, 0, 0, 0.7);
+  background:
+    radial-gradient(circle at top, rgba(15, 23, 42, 0.45), rgba(2, 6, 23, 0.82)),
+    rgba(0, 0, 0, 0.68);
+  backdrop-filter: blur(7px);
+  -webkit-backdrop-filter: blur(7px);
   display: flex;
   justify-content: center;
   align-items: center;
   z-index: 1000;
+  animation: fadeIn 0.18s ease-out;
 }
 
 .modal {
@@ -1531,18 +1950,52 @@ td {
 }
 
 .modal-conceptos {
-  max-width: 550px;
-  max-height: 98vh;
+  width: min(96vw, 980px);
+  max-width: 980px;
+  min-height: min(82vh, 920px);
+  max-height: 94vh;
   display: flex;
   flex-direction: column;
+  border-radius: 1.2rem;
+  border: 1px solid rgba(96, 165, 250, 0.2);
+  background:
+    radial-gradient(circle at top left, rgba(59, 130, 246, 0.14), transparent 34%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(15, 23, 42, 0.95));
 }
 
 .modal-conceptos .modal-header {
-  padding: 1rem 1.25rem;
+  padding: 1.35rem 1.6rem 1.15rem;
+  align-items: flex-start;
 }
 
 .modal-conceptos .modal-header h3 {
-  font-size: 1.05rem;
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.modal-header-copy {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.modal-header-copy p {
+  margin: 0;
+  color: #9fb1d1;
+  max-width: 60ch;
+  line-height: 1.45;
+}
+
+.modal-header-copy-conceptos {
+  gap: 0.4rem;
+}
+
+.modal-kicker,
+.section-kicker {
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #7dd3fc;
 }
 
 .modal-header {
@@ -1552,25 +2005,65 @@ td {
   padding: 1.5rem;
   border-bottom: 1px solid rgba(148, 163, 184, 0.2);
 }
+.tarifas-topbar {
+  gap: 1.5rem;
+  padding: 1.4rem 1.5rem;
+  border-radius: 1rem;
+}
 
-.modal-header h3 {
+.tarifas-topbar-copy {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.tarifas-topbar-copy h2 {
+  color: #f9fafb;
   margin: 0;
-  color: #e2e8f0;
+  font-size: 1.5rem;
+}
+
+.tarifas-topbar-copy p {
+  margin: 0;
+  color: #94a3b8;
+  max-width: 58ch;
+  line-height: 1.45;
   font-size: 1.25rem;
 }
 
 .btn-close {
-  background: none;
-  border: none;
-  color: #94a3b8;
-  font-size: 2rem;
+  width: 2.6rem;
+  height: 2.6rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-start;
+  border-radius: 0.85rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.92));
+  color: #e2e8f0;
+  font-size: 1.3rem;
+  line-height: 1;
+  box-shadow: 0 10px 24px -18px rgba(15, 23, 42, 0.95);
   cursor: pointer;
   padding: 0;
-  transition: color 0.2s;
+  transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+.tarifas-table-shell {
+  border-radius: 1rem;
+  overflow: hidden;
 }
 
 .btn-close:hover {
-  color: #cbd5e1;
+  color: #ffffff;
+  border-color: rgba(125, 211, 252, 0.42);
+  background: linear-gradient(180deg, rgba(37, 99, 235, 0.42), rgba(30, 64, 175, 0.34));
+  transform: translateY(-1px);
+}
+
+.btn-close:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(125, 211, 252, 0.2);
 }
 
 .modal-form {
@@ -1581,10 +2074,139 @@ td {
 }
 
 .modal-form-conceptos {
-  padding: 1rem 1.2rem;
-  gap: 0.8rem;
-  max-height: calc(88vh - 74px);
+  padding: 1.15rem 1.5rem 1.5rem;
+  gap: 1.15rem;
+  max-height: calc(94vh - 110px);
   overflow-y: auto;
+}
+
+.conceptos-modal-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.85rem;
+}
+
+.conceptos-summary-pill {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.95rem 1rem;
+  border-radius: 0.95rem;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.82), rgba(15, 23, 42, 0.94));
+}
+
+.conceptos-summary-pill span {
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8ea2c7;
+}
+
+.conceptos-summary-pill strong {
+  color: #f8fafc;
+  font-size: 0.98rem;
+}
+
+.conceptos-form-section {
+  display: grid;
+  gap: 0.95rem;
+  padding: 1.05rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.76), rgba(15, 23, 42, 0.92));
+}
+
+.conceptos-form-section-highlighted {
+  border-color: rgba(96, 165, 250, 0.22);
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.12), transparent 28%),
+    linear-gradient(180deg, rgba(23, 37, 84, 0.32), rgba(15, 23, 42, 0.95));
+}
+
+.conceptos-form-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.conceptos-form-section-header > div {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.conceptos-form-section-header h4 {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 1.02rem;
+}
+
+.conceptos-form-section-header small {
+  max-width: 32rem;
+  color: #8ea2c7;
+  line-height: 1.45;
+}
+
+.conceptos-form-grid {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.conceptos-form-grid-primary {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.conceptos-form-grid-secondary {
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+.form-card-field {
+  padding: 1rem;
+  border-radius: 0.9rem;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.62), rgba(15, 23, 42, 0.86));
+}
+
+.form-card-field-accent {
+  border-color: rgba(74, 222, 128, 0.18);
+  background: linear-gradient(180deg, rgba(20, 83, 45, 0.2), rgba(15, 23, 42, 0.9));
+}
+
+.overtime-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.9rem;
+}
+
+.overtime-edit-card {
+  padding: 1rem;
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.88), rgba(15, 23, 42, 0.92));
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  border-radius: 0.85rem;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+
+.overtime-source-note {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem 0.8rem;
+  background-color: rgba(15, 23, 42, 0.75);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 0.65rem;
+}
+
+.overtime-source-note span {
+  font-size: 0.78rem;
+  color: #8ea2c7;
+}
+
+.overtime-source-note strong {
+  color: #f8fafc;
+  font-size: 0.95rem;
 }
 
 .form-group {
@@ -1636,6 +2258,159 @@ td {
 .form-group select option {
   background-color: #0f172a;
   color: #e2e8f0;
+}
+
+.form-group-conceptos-extra {
+  padding: 1rem;
+  background: linear-gradient(180deg, rgba(23, 37, 84, 0.32), rgba(15, 23, 42, 0.94));
+  border: 1px solid rgba(96, 165, 250, 0.16);
+  border-radius: 1rem;
+  gap: 0.9rem;
+}
+
+.conceptos-notes-field textarea {
+  min-height: 92px;
+}
+
+.conceptos-extra-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.conceptos-extra-header > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.conceptos-extra-subtitle {
+  max-width: 30rem;
+}
+
+.btn-small {
+  padding: 0.6rem 0.9rem;
+  font-size: 0.85rem;
+}
+
+.btn-concepto-add {
+  border-radius: 0.75rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.conceptos-extra-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.85rem 1rem;
+  background-color: rgba(15, 23, 42, 0.78);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 0.85rem;
+}
+
+.conceptos-extra-summary span {
+  color: #9fb1d1;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.conceptos-extra-summary strong {
+  color: #86efac;
+  font-size: 1rem;
+}
+
+.conceptos-extra-summary strong.negativo {
+  color: #fca5a5;
+}
+
+.conceptos-extra-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 1rem;
+  background-color: rgba(15, 23, 42, 0.68);
+  border: 1px dashed rgba(148, 163, 184, 0.22);
+  border-radius: 0.85rem;
+  color: #94a3b8;
+}
+
+.conceptos-extra-empty strong {
+  color: #e2e8f0;
+  font-size: 0.92rem;
+}
+
+.concepto-extra-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  padding: 1rem;
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.84), rgba(15, 23, 42, 0.96));
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 0.95rem;
+}
+
+.concepto-extra-row-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.concepto-extra-index {
+  color: #bfdbfe;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.concepto-extra-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(130px, 0.9fr) minmax(120px, 0.8fr);
+  gap: 0.8rem;
+}
+
+.concepto-extra-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.concepto-extra-fields label span {
+  font-size: 0.78rem;
+  color: #9fb1d1;
+  font-weight: 600;
+}
+
+.concepto-extra-fields input,
+.concepto-extra-fields select {
+  width: 100%;
+}
+
+@media (max-width: 720px) {
+  .modal-conceptos .modal-header,
+  .conceptos-form-section-header {
+    flex-direction: column;
+  }
+
+  .conceptos-extra-header,
+  .concepto-extra-row-top {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .concepto-extra-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .conceptos-extra-summary,
+  .overtime-source-note {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }
 
 .form-info {
@@ -1692,6 +2467,20 @@ td {
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s;
+}
+
+@media (max-width: 900px) {
+  .sueldos-topbar,
+  .sueldos-toolbar,
+  .tarifas-header,
+  .detalle-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .sueldos-toolbar-count {
+    white-space: normal;
+  }
 }
 
 .btn-secondary:hover {

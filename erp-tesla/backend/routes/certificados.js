@@ -21,6 +21,51 @@ const normalizeTipoRegistro = (value) => {
 	return tipo === "monto" ? "monto" : "porcentaje"
 }
 
+const validarInputCertificado = (input = {}) => {
+	const presupuestoId = Number(input.presupuesto_id)
+	if (!Number.isInteger(presupuestoId) || presupuestoId <= 0) {
+		return { ok: false, status: 400, error: "presupuesto_id invalido" }
+	}
+
+	const tipoRegistro = normalizeTipoRegistro(input.tipo_registro)
+	const porcentajeAvance = Math.max(0, toNumber(input.porcentaje_avance, 0))
+	const montoBase = Math.max(0, toNumber(input.monto_base, 0))
+	const indiceCac = toNumber(input.indice_cac, 1)
+	const pagos = Math.max(0, toNumber(input.pagos, 0))
+	const estado = normalizeEstado(input.estado)
+
+	if (tipoRegistro === "porcentaje" && porcentajeAvance <= 0) {
+		return { ok: false, status: 400, error: "El porcentaje de avance debe ser mayor a 0" }
+	}
+
+	if (tipoRegistro === "porcentaje" && porcentajeAvance > 100) {
+		return { ok: false, status: 400, error: "El porcentaje de avance no puede superar 100" }
+	}
+
+	if (tipoRegistro === "monto" && montoBase <= 0) {
+		return { ok: false, status: 400, error: "El monto base debe ser mayor a 0" }
+	}
+
+	if (!Number.isFinite(indiceCac) || indiceCac <= 0) {
+		return { ok: false, status: 400, error: "El indice CAC debe ser mayor a 0" }
+	}
+
+	if (estado === "pagado" && pagos <= 0) {
+		return { ok: false, status: 400, error: "Un certificado pagado debe registrar pagos mayores a 0" }
+	}
+
+	return {
+		ok: true,
+		presupuestoId,
+		tipoRegistro,
+		porcentajeAvance,
+		montoBase,
+		indiceCac,
+		pagos,
+		estado,
+	}
+}
+
 const calcularCertificado = ({ presupuesto, input, acumuladoPrevio = 0 }) => {
 	const importeOriginal = roundMoney(presupuesto.total)
 	const ivaPorcentaje = toNumber(presupuesto.iva_porcentaje, 21)
@@ -222,11 +267,16 @@ router.post("/", async (req, res) => {
 			return res.status(400).json({ error: "presupuesto_id es obligatorio" })
 		}
 
+		const validacion = validarInputCertificado(req.body || {})
+		if (!validacion.ok) {
+			return res.status(validacion.status).json({ error: validacion.error })
+		}
+
 		await client.query("BEGIN")
 
 		const presupuestoResult = await client.query(
 			`SELECT id, total, iva_porcentaje FROM presupuestos WHERE id = $1 LIMIT 1`,
-			[Number(presupuesto_id)]
+			[validacion.presupuestoId]
 		)
 
 		if (presupuestoResult.rowCount === 0) {
@@ -237,18 +287,24 @@ router.post("/", async (req, res) => {
 		const presupuesto = presupuestoResult.rows[0]
 		const secuenciaResult = await client.query(
 			`SELECT COALESCE(MAX(secuencia), 0) + 1 AS siguiente FROM certificados WHERE presupuesto_id = $1`,
-			[Number(presupuesto_id)]
+			[validacion.presupuestoId]
 		)
 		const acumuladoPrevioResult = await client.query(
 			`SELECT COALESCE(MAX(acumulado_certificado), 0) AS acumulado FROM certificados WHERE presupuesto_id = $1`,
-			[Number(presupuesto_id)]
+			[validacion.presupuestoId]
 		)
 
 		const siguienteSecuencia = Number(secuenciaResult.rows[0]?.siguiente) || 1
 		const acumuladoPrevio = toNumber(acumuladoPrevioResult.rows[0]?.acumulado)
 		const calculado = calcularCertificado({
 			presupuesto,
-			input: { tipo_registro, porcentaje_avance, monto_base, indice_cac, pagos },
+			input: {
+				tipo_registro: validacion.tipoRegistro,
+				porcentaje_avance: validacion.porcentajeAvance,
+				monto_base: validacion.montoBase,
+				indice_cac: validacion.indiceCac,
+				pagos: validacion.pagos,
+			},
 			acumuladoPrevio,
 		})
 
@@ -263,11 +319,11 @@ router.post("/", async (req, res) => {
 				RETURNING *
 			`,
 			[
-				Number(presupuesto_id),
+				validacion.presupuestoId,
 				siguienteSecuencia,
 				siguienteSecuencia,
 				fecha || null,
-				normalizeEstado(estado),
+				validacion.estado,
 				calculado.tipo_registro,
 				calculado.porcentaje_avance,
 				calculado.importe_original,
@@ -281,7 +337,7 @@ router.post("/", async (req, res) => {
 				calculado.total_cert_con_iva,
 				calculado.acumulado_certificado,
 				calculado.saldo_pre_original,
-				calculado.pagos,
+				validacion.pagos,
 				calculado.saldo_pendiente,
 				String(observaciones || "").trim(),
 			]
@@ -328,6 +384,20 @@ router.put("/:id", async (req, res) => {
 			`SELECT id, total, iva_porcentaje FROM presupuestos WHERE id = $1 LIMIT 1`,
 			[certificadoActual.presupuesto_id]
 		)
+		if (presupuestoResult.rowCount === 0) {
+			await client.query("ROLLBACK")
+			return res.status(404).json({ error: "Presupuesto no encontrado" })
+		}
+
+		const validacion = validarInputCertificado({
+			...req.body,
+			presupuesto_id: certificadoActual.presupuesto_id,
+		})
+		if (!validacion.ok) {
+			await client.query("ROLLBACK")
+			return res.status(validacion.status).json({ error: validacion.error })
+		}
+
 		const anterioresResult = await client.query(
 			`SELECT COALESCE(MAX(acumulado_certificado), 0) AS acumulado FROM certificados WHERE presupuesto_id = $1 AND secuencia < $2`,
 			[certificadoActual.presupuesto_id, certificadoActual.secuencia]
@@ -335,7 +405,13 @@ router.put("/:id", async (req, res) => {
 
 		const calculado = calcularCertificado({
 			presupuesto: presupuestoResult.rows[0],
-			input: req.body || {},
+			input: {
+				tipo_registro: validacion.tipoRegistro,
+				porcentaje_avance: validacion.porcentajeAvance,
+				monto_base: validacion.montoBase,
+				indice_cac: validacion.indiceCac,
+				pagos: validacion.pagos,
+			},
 			acumuladoPrevio: toNumber(anterioresResult.rows[0]?.acumulado),
 		})
 
@@ -365,7 +441,7 @@ router.put("/:id", async (req, res) => {
 			[
 				certificadoId,
 				req.body?.fecha || null,
-				normalizeEstado(req.body?.estado),
+				validacion.estado,
 				calculado.tipo_registro,
 				calculado.porcentaje_avance,
 				calculado.monto_base,
@@ -379,7 +455,7 @@ router.put("/:id", async (req, res) => {
 				calculado.total_cert_con_iva,
 				calculado.acumulado_certificado,
 				calculado.saldo_pre_original,
-				calculado.pagos,
+				validacion.pagos,
 				calculado.saldo_pendiente,
 				String(req.body?.observaciones || "").trim(),
 			]
