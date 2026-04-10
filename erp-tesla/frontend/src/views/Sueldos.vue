@@ -108,8 +108,8 @@ const crearFormularioConceptos = (liquidacion = {}, opciones = {}) => {
     total_horas: liquidacion.total_horas || 0,
     monto_bruto: liquidacion.monto_bruto || liquidacion.importe_horas || 0,
     presentismo: liquidacion.presentismo || 0,
-    horas_extra_cantidad: reiniciarHorasExtra ? 0 : (liquidacion.horas_extra_cantidad || 0),
-    horas_extra_100_cantidad: reiniciarHorasExtra ? 0 : (liquidacion.horas_extra_100_cantidad || 0),
+    horas_extra_cantidad:  liquidacion.horas_extra_cantidad || 0,
+    horas_extra_100_cantidad: liquidacion.horas_extra_100_cantidad || 0,
     no_remunerativo: liquidacion.no_remunerativo || 0,
     aguinaldo: liquidacion.aguinaldo || 0,
     vacaciones: liquidacion.vacaciones || 0,
@@ -207,7 +207,7 @@ const verDetalle = async (liquidacion) => {
 const abrirEdicionLiquidacion = (liquidacion) => {
   const liquidacionNormalizada = normalizarLiquidacion(liquidacion)
   liquidacionSeleccionada.value = liquidacionNormalizada
-  formConceptos.value = crearFormularioConceptos(liquidacionNormalizada, { reiniciarHorasExtra: true })
+  formConceptos.value = crearFormularioConceptos(liquidacionNormalizada)
   syncHorasInputConceptos(formConceptos.value.total_horas)
   showFormConceptos.value = true
 }
@@ -644,7 +644,7 @@ onUnmounted(() => {
                       👁️ Ver detalle
                     </button>
                     <button class="btn-edit-inline" @click="abrirEdicionLiquidacion(liq)">
-                      ✏️ Editar
+                      ✏️ Editar Conceptos
                     </button>
                   </div>
                 </td>
@@ -744,11 +744,11 @@ onUnmounted(() => {
               <span>{{ formatearMoneda(liquidacionSeleccionada.presentismo) }}</span>
             </div>
             <div class="concepto">
-              <span>Horas extra 50% ({{ formatearCantidad(liquidacionSeleccionada.horas_extra_cantidad) }} hs):</span>
+              <span>Horas extra 50% ({{ formatearCantidad(liquidacionSeleccionada.horasExtraRegistradas50) }} hs):</span>
               <span>{{ formatearMoneda(liquidacionSeleccionada.importe_horas_extra) }}</span>
             </div>
             <div class="concepto">
-              <span>Horas extra 100% ({{ formatearCantidad(liquidacionSeleccionada.horas_extra_100_cantidad) }} hs):</span>
+              <span>Horas extra 100% ({{ formatearCantidad(liquidacionSeleccionada.horasExtraRegistradas100) }} hs):</span>
               <span>{{ formatearMoneda(liquidacionSeleccionada.importe_horas_extra_100) }}</span>
             </div>
             <div class="concepto">
@@ -1036,10 +1036,10 @@ onUnmounted(() => {
                 <label class="form-group overtime-edit-card">
                   <span>Horas extra a liquidar al 50%</span>
                   <input v-model.number="formConceptos.horas_extra_cantidad" type="number" min="0" step="0.01" />
-                  <small class="form-help">Importe calculado: {{ formatearMoneda(importeHorasExtraPreview) }}</small>
+                  <small class="form-help">Importe calculado: {{ formatearMoneda(importeHorasExtra50Preview) }}</small>
                   <div class="overtime-source-note">
                     <span>Registradas en horas:</span>
-                    <strong>{{ formatearHoras(horasExtraRegistradas50) }} hs</strong>
+                    <strong>{{liquidacionSeleccionada.horas_extra_registradas_50}} hs</strong>
                   </div>
                 </label>
 
@@ -1049,7 +1049,7 @@ onUnmounted(() => {
                   <small class="form-help">Importe calculado: {{ formatearMoneda(importeHorasExtra100Preview) }}</small>
                   <div class="overtime-source-note">
                     <span>Registradas en horas:</span>
-                    <strong>{{ formatearHoras(horasExtraRegistradas100) }} hs</strong>
+                    <strong>{{liquidacionSeleccionada.horas_extra_registradas_100}} hs</strong>
                   </div>
                 </label>
               </div>
@@ -1159,7 +1159,7 @@ onUnmounted(() => {
             </div>
 
               <label class="form-group form-card-field conceptos-notes-field">
-                <span>Anotaciones</span>
+                <span>Observaciones</span>
                 <textarea v-model="formConceptos.observaciones" rows="3" placeholder="Notas del período, adelantos, aclaraciones..."></textarea>
                 <small class="form-help">Este texto sirve para dejar contexto interno y también observaciones que después pueden verse en el detalle.</small>
               </label>

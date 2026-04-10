@@ -354,13 +354,16 @@ const openModalDiaria = (hora = null) => {
     editingId.value = hora.id
     focoModalDiaria = "cantidad"
     const tipoExtraActual = hora.es_hora_extra ? (hora.tipo_hora_extra || (hora.tipo === "extra_100" ? "100" : "50")) : ""
+    const fechaEdicion = getDateObject(hora.fecha)
+    const cantidadHoraActual = Number(hora.cantidad_horas ?? hora.horas_trabajadas) || 0
     formDiaria.value = {
       ...hora,
       cliente_id: hora.cliente_id || "",
-      cantidad_horas: formatearHoras(hora.cantidad_horas ?? hora.horas_trabajadas),
-      cantidad_horas_extra: hora.es_hora_extra ? formatearHoras(hora.cantidad_horas || 0) : "",
-      cantidad_horas_extra_50: tipoExtraActual === "50" ? formatearHoras(hora.cantidad_horas || 0) : "",
-      cantidad_horas_extra_100: tipoExtraActual === "100" ? formatearHoras(hora.cantidad_horas || 0) : "",
+      fecha: fechaEdicion ? formatLocalDate(fechaEdicion) : "",
+      cantidad_horas: formatearHoras(cantidadHoraActual),
+      cantidad_horas_extra: hora.es_hora_extra ? formatearHoras(cantidadHoraActual) : "",
+      cantidad_horas_extra_50: tipoExtraActual === "50" ? formatearHoras(cantidadHoraActual) : "",
+      cantidad_horas_extra_100: tipoExtraActual === "100" ? formatearHoras(cantidadHoraActual) : "",
       tipo_hora_extra: tipoExtraActual,
     }
     modoDiaria.value = (hora.hora_inicio && hora.hora_fin) ? "horario" : "cantidad"
@@ -395,7 +398,7 @@ const buildRangoDiaBase = ({ fecha, empleadoId, base = null, existentes = [] }) 
   const esEmpleadoAdmin = isEmpleadoAdministrativo(empleadoId)
   const obraAdmin = esEmpleadoAdmin ? getObraAdministrativaParaEmpleado(empleadoId) : null
   const modo = base?.hora_inicio && base?.hora_fin ? "horario" : "cantidad"
-  const horasNormales = base?.cantidad_horas ?? base?.horas_trabajadas
+  const horasNormales = Number(base?.cantidad_horas ?? base?.horas_trabajadas)
   const extra50 = Number(base?.cantidad_horas_extra_50 || 0)
   const extra100 = Number(base?.cantidad_horas_extra_100 || 0)
 
@@ -409,7 +412,7 @@ const buildRangoDiaBase = ({ fecha, empleadoId, base = null, existentes = [] }) 
     cliente_id: esEmpleadoAdmin ? "" : (base?.cliente_id || ""),
     obra_id: esEmpleadoAdmin ? (obraAdmin?.id || "") : (base?.obra_id || ""),
     modo,
-    cantidad_horas: modo === "cantidad" && Number.isFinite(Number(horasNormales)) ? formatearHoras(horasNormales) : "",
+    cantidad_horas: modo === "cantidad" && Number.isFinite(horasNormales) ? formatearHoras(horasNormales) : "",
     hora_inicio: base?.hora_inicio || "",
     hora_fin: base?.hora_fin || "",
     cantidad_horas_extra_50: extra50 > 0 ? formatearHoras(extra50) : "",

@@ -151,6 +151,10 @@ export default {
     return api.put(`/grupos/${id}`, payload)
   },
 
+  deleteGrupo(id) {
+    return api.delete(`/grupos/${id}`)
+  },
+
   // Empleados
   getEmpleados() {
     return api.get("/empleados")

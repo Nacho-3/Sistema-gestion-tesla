@@ -58,7 +58,7 @@ export const parseHoursInput = (value) => {
   }
 
   if (/^\d+[.]\d{1}$/.test(normalized)) {
-    return roundHourDecimal(Number(normalized))
+    return null
   }
 
   return null

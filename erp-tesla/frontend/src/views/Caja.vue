@@ -1167,6 +1167,7 @@ onUnmounted(() => {
   background: rgba(51, 65, 85, 0.75);
   color: #d1d5db;
   border-color: rgba(148, 163, 184, 0.18);
+  margin-top: 1rem;
 }
 
 .btn-secondary:hover {
@@ -1459,6 +1460,7 @@ onUnmounted(() => {
   border: 1px dashed rgba(148, 163, 184, 0.18);
   border-radius: 1rem;
   background: rgba(15, 23, 42, 0.45);
+  margin-top: 1rem;
 }
 
 .empty strong {

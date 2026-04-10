@@ -224,12 +224,9 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
   const aguinaldo = preferColumn(liq.aguinaldo, meta.aguinaldo)
   const vacaciones = preferColumn(liq.vacaciones, meta.vacaciones)
   const adelantos = preferColumn(liq.adelantos, meta.adelantos, liq?.descuentos)
-  const horasExtraCantidad = horasExtraLiquidacionManual
-    ? preferColumn(liq.horas_extra_cantidad, meta.horas_extra_cantidad, 0, { allowLegacyMetaWhenColumnZero: false })
-    : 0
-  const horasExtra100Cantidad = horasExtraLiquidacionManual
-    ? preferColumn(liq.horas_extra_100_cantidad, meta.horas_extra_100_cantidad, 0, { allowLegacyMetaWhenColumnZero: false })
-    : 0
+  const horasExtraCantidad = preferColumn(liq.horas_extra_cantidad, meta.horas_extra_cantidad, 0, { allowLegacyMetaWhenColumnZero: false })
+  
+  const horasExtra100Cantidad = preferColumn(liq.horas_extra_100_cantidad, meta.horas_extra_100_cantidad, 0, { allowLegacyMetaWhenColumnZero: false })
   const feriadosCantidad = preferColumn(liq.feriados_cantidad, meta.feriados_cantidad)
   const diasNoTrabajados = preferColumn(liq.dias_no_trabajados, meta.dias_no_trabajados)
   // Treat `adicional` as a standard column (fallback to 0). Do not prefer legacy meta.
@@ -448,23 +445,13 @@ export const syncLiquidacionesPeriodo = async (mes, anio) => {
       const montoBruto = roundMoney(liq.monto_bruto || 0)
       const conceptos = getConceptosFromLiquidacion(liq, valorHora)
       const horasExtraLiquidacionManual = metaActual?.horas_extra_liquidacion_manual === true
-      const horasExtra50Liquidadas = horasExtraLiquidacionManual
-        ? roundMoney(conceptos.horas_extra_cantidad)
-        : roundMoney(conceptos.horas_extra_cantidad) === horasExtra50Automaticas
-          ? 0
-          : roundMoney(conceptos.horas_extra_cantidad)
-      const horasExtra100Liquidadas = horasExtraLiquidacionManual
-        ? roundMoney(conceptos.horas_extra_100_cantidad)
-        : roundMoney(conceptos.horas_extra_100_cantidad) === horasExtra100Automaticas
-          ? 0
-          : roundMoney(conceptos.horas_extra_100_cantidad)
+      
       const conceptosActualizados = {
         ...conceptos,
-        horas_extra_cantidad: horasExtra50Liquidadas,
-        importe_horas_extra: roundMoney(horasExtra50Liquidadas * valorHora * 1.5),
-        horas_extra_100_cantidad: horasExtra100Liquidadas,
-        importe_horas_extra_100: roundMoney(horasExtra100Liquidadas * valorHora * 2),
+        importe_horas_extra: roundMoney(conceptos.horas_extra_cantidad * valorHora * 1.5),
+        importe_horas_extra_100: roundMoney(conceptos.horas_extra_100_cantidad * valorHora * 2),
       }
+
       const montoNeto = roundMoney(Math.max(
         0,
         montoBruto +
@@ -913,9 +900,9 @@ router.post("/", async (req, res) => {
         total_horas,
         monto_bruto: importe_horas,
         presentismo: 0,
-        horas_extra_cantidad: 0,
+        horas_extra_cantidad: horas_extra_cantidad,
         importe_horas_extra: 0,
-        horas_extra_100_cantidad: 0,
+        horas_extra_100_cantidad: horas_extra_100_cantidad,
         importe_horas_extra_100: 0,
         no_remunerativo: 0,
         aguinaldo: 0,

@@ -16,6 +16,7 @@ const showConfirmRename = ref(false)
 const editingId = ref(null)
 const filtroBusqueda = ref("")
 
+
 const formGrupo = ref({ nombre: "", descripcion: "" })
 
 const loadGrupos = async () => {
@@ -114,6 +115,25 @@ const gruposFiltrados = computed(() => {
   })
 })
 
+const deleteGrupo = async (grupoId) => {
+
+  if (!confirm("¿Estás seguro de que deseas eliminar este grupo?")) return
+
+  loading.value = true
+  error.value = ""
+  try {
+    await api.deleteGrupo(grupoId)
+    await loadGrupos()
+  } catch (err) {
+    error.value = "Error al eliminar grupo"
+    console.error(err)
+  } finally {
+    loading.value = false
+  }
+}
+
+
+
 const gruposConDescripcion = computed(() => grupos.value.filter((grupo) => String(grupo.descripcion || "").trim()).length)
 
 onMounted(() => {
@@ -190,7 +210,10 @@ onUnmounted(() => {
           >
             <div class="grupo-card-header">
               <h3>{{ grupo.nombre }}</h3>
-              <button class="btn-edit-inline" @click.stop="abrirFormEditar(grupo)" title="Renombrar">✏️</button>
+              <div class="btn-card-header">
+                <button class="btn-edit-inline" @click.stop="abrirFormEditar(grupo)" title="Renombrar">✏️</button>
+                <button class="btn-delete-inline" @click.stop="deleteGrupo(grupo.id)" title="Eliminar">🗑️</button>
+              </div>
             </div>
             <p class="grupo-desc">{{ grupo.descripcion || "Sin descripción" }}</p>
             <button class="btn-detalle" @click="verDetalle(grupo)">📋 Ver resumen</button>
@@ -211,8 +234,8 @@ onUnmounted(() => {
       <!-- VISTA DETALLE-->
       <div v-if="vistaActual === 'detalle' && resumen" class="detalle-container">
         <div class="detalle-header">
-          <button class="btn-volver" @click="volverALista">← Volver a grupos</button>
-          <button class="btn-edit" @click="abrirFormEditar(grupoSeleccionado)">✏️ Renombrar</button>
+            <button class="btn-volver" @click="volverALista">← Volver a grupos</button>
+            <button class="btn-edit" @click="abrirFormEditar(grupoSeleccionado)">✏️ Renombrar</button>
         </div>
 
         <div v-if="error" class="error-alert">{{ error }}</div>
@@ -555,12 +578,17 @@ onUnmounted(() => {
   font-weight: 700;
 }
 
+.btn-card-header {
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
+  justify-content: center;
+  float: left;
+}
+
 .btn-edit-inline {
   width: 2rem;
   height: 2rem;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   background: rgba(148, 163, 184, 0.08);
   border: 1px solid rgba(148, 163, 184, 0.12);
   cursor: pointer;
@@ -573,6 +601,22 @@ onUnmounted(() => {
 .btn-edit-inline:hover {
   background: rgba(148, 163, 184, 0.15);
   border-color: rgba(148, 163, 184, 0.28);
+}
+
+.btn-delete-inline {
+  width: 2rem;
+  height: 2rem;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.12);
+  font-size: 1rem;
+  padding: 0;
+  border-radius: 999px;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.btn-delete-inline:hover {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.28);
 }
 
 .grupo-desc {
