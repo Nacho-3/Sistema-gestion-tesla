@@ -204,12 +204,23 @@ const verDetalle = async (liquidacion) => {
   }
 }
 
-const abrirEdicionLiquidacion = (liquidacion) => {
-  const liquidacionNormalizada = normalizarLiquidacion(liquidacion)
-  liquidacionSeleccionada.value = liquidacionNormalizada
-  formConceptos.value = crearFormularioConceptos(liquidacionNormalizada)
-  syncHorasInputConceptos(formConceptos.value.total_horas)
-  showFormConceptos.value = true
+const abrirEdicionLiquidacion = async (liquidacion) => {
+  loading.value = true
+  error.value = ""
+  try {
+    const res = await api.getLiquidacion(liquidacion.id)
+    const liquidacionActualizada = normalizarLiquidacion(res.data || liquidacion)
+
+    liquidacionSeleccionada.value = liquidacionActualizada
+    formConceptos.value = crearFormularioConceptos(liquidacionActualizada)
+    syncHorasInputConceptos(formConceptos.value.total_horas)
+    showFormConceptos.value = true
+  } catch (err) {
+    console.error("Error al cargar liquidación para edición:", err)
+    error.value = err.response?.data?.error || "Error al cargar la liquidación para edición"
+  } finally {
+    loading.value = false
+  }
 }
 
 const agregarConceptoExtra = () => {
@@ -515,6 +526,8 @@ onUnmounted(() => {
   socket.off('liquidaciones:changed', cargarLiquidaciones)
   socket.off('horas:changed', cargarLiquidaciones)
 })
+
+
 </script>
 
 <template>
@@ -644,7 +657,7 @@ onUnmounted(() => {
                       👁️ Ver detalle
                     </button>
                     <button class="btn-edit-inline" @click="abrirEdicionLiquidacion(liq)">
-                      ✏️ Editar Conceptos
+                      ✏️ Editar
                     </button>
                   </div>
                 </td>
@@ -1039,7 +1052,7 @@ onUnmounted(() => {
                   <small class="form-help">Importe calculado: {{ formatearMoneda(importeHorasExtra50Preview) }}</small>
                   <div class="overtime-source-note">
                     <span>Registradas en horas:</span>
-                    <strong>{{liquidacionSeleccionada.horas_extra_registradas_50}} hs</strong>
+                    <strong>{{ formatearHoras(liquidacionSeleccionada.horas_extra_registradas_50) }} hs</strong>
                   </div>
                 </label>
 
@@ -1049,7 +1062,7 @@ onUnmounted(() => {
                   <small class="form-help">Importe calculado: {{ formatearMoneda(importeHorasExtra100Preview) }}</small>
                   <div class="overtime-source-note">
                     <span>Registradas en horas:</span>
-                    <strong>{{liquidacionSeleccionada.horas_extra_registradas_100}} hs</strong>
+                    <strong>{{ formatearHoras(liquidacionSeleccionada.horas_extra_registradas_100) }} hs</strong>
                   </div>
                 </label>
               </div>
@@ -1447,6 +1460,23 @@ onUnmounted(() => {
   padding: 1rem 1.15rem 0.75rem;
 }
 
+.btn-generar {
+  padding: 0.4rem 1rem;
+  background-color: rgba(255, 72, 0, 0.822);
+  color: #ffffff;
+  border: none;
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-generar:hover {
+  background-color: rgba(255, 72, 0, 0.575);
+}
+
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -1505,6 +1535,12 @@ td {
   background-color: rgba(34, 197, 94, 0.2);
   color: #86efac;
 }
+
+.badge-generar {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fbbf24;
+}
+
 
 .acciones {
   display: flex;

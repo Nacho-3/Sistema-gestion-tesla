@@ -463,7 +463,7 @@ onUnmounted(() => {
           <!-- Botones dentro del recuadro -->
           <div class="empleado-acciones">
             <button @click="verDetalle(emp)" class="btn-action btn-detail">
-              <span class="btn-icon">◉</span>
+              <span class="btn-icon">📋</span>
               <span>Ver detalle</span>
             </button>
             <button @click="abrirFormulario(emp)" class="btn-action btn-edit">
@@ -1687,9 +1687,15 @@ onUnmounted(() => {
 }
 
 .btn-detail {
+  padding: 0.4rem 1rem;
+  background-color: rgba(34, 197, 94, 0.2);
   color: #86efac;
-  border-color: rgba(22, 163, 74, 0.28);
-  background: rgba(20, 83, 45, 0.52);
+  border: none;
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
 }
 
 .btn-detail:hover {
@@ -1697,10 +1703,21 @@ onUnmounted(() => {
   border-color: rgba(74, 222, 128, 0.42);
 }
 
+
 .btn-edit {
+  padding: 0.4rem 1rem;
+  background-color: rgba(30, 64, 175, 0.42);
   color: #bfdbfe;
+
   border-color: rgba(96, 165, 250, 0.36);
   background: rgba(30, 64, 175, 0.42);
+
+  border: none;
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
 }
 
 .btn-edit:hover {
@@ -1709,9 +1726,17 @@ onUnmounted(() => {
 }
 
 .btn-delete {
+  padding: 0.4rem 1rem;
+  background-color: rgba(239, 68, 68, 0.2);
   color: #fecaca;
   border-color: rgba(248, 113, 113, 0.26);
   background: rgba(127, 29, 29, 0.42);
+  border: none;
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
 }
 
 .btn-delete:hover {

@@ -885,6 +885,21 @@ onUnmounted(() => {
   font-size: 1.1rem;
 }
 
+.btn-detalle {
+  padding: 0.4rem 0.8rem;
+  background-color: rgba(34, 197, 94, 0.2);
+  color: #86efac;
+  border: none;
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.btn-detalle:hover {
+  background-color: rgba(34, 197, 94, 0.3)  ;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -984,22 +999,6 @@ td {
 }
 
 .btn-status-reopen:hover {
-  background-color: rgba(34, 197, 94, 0.3);
-}
-
-.btn-detalle {
-  padding: 0.4rem 1rem;
-  background-color: rgba(34, 197, 94, 0.2);
-  color: #86efac;
-  border: none;
-  border-radius: 0.375rem;
-  font-size: 0.875rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.btn-detalle:hover {
   background-color: rgba(34, 197, 94, 0.3);
 }
 

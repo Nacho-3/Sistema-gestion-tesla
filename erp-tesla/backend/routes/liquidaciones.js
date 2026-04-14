@@ -510,9 +510,6 @@ export const syncLiquidacionesPeriodo = async (mes, anio) => {
         })
 
       updateQuery = updateQuery.eq("id", liq.id)
-      if (liq.updated_at) {
-        updateQuery = updateQuery.eq("updated_at", liq.updated_at)
-      }
 
       await updateQuery
     }

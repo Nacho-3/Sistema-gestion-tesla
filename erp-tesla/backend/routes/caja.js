@@ -27,7 +27,7 @@ const LABEL_CATEGORIA = {
   materiales: "Materiales",
 }
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const LOGO_PATH = path.join(__dirname, "..", "assets", "logo.png")
+const LOGO_PATH = path.join(__dirname, "..", "assets", "logo_presupuesto.png")
 
 let detalleColumnCache = null
 let detallesSchemaCache = null
@@ -44,10 +44,23 @@ const formatoMoneda = (valor) => {
 
 const formatoFecha = (valor) => {
   if (!valor) return "-"
+
+  const texto = String(valor)
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(texto)) {
+    const [anio, mes, dia] = texto.split("-")
+    return `${dia}/${mes}/${anio}`
+  }
+
   const fecha = new Date(valor)
-  if (Number.isNaN(fecha.getTime())) return String(valor)
-  return fecha.toLocaleDateString("es-AR")
+  if (Number.isNaN(fecha.getTime())) return texto
+
+  const dia = String(fecha.getDate()).padStart(2, "0")
+  const mes = String(fecha.getMonth() + 1).padStart(2, "0")
+  const anio = fecha.getFullYear()
+  return `${dia}/${mes}/${anio}`
 }
+
 
 async function getDetalleColumn() {
   if (detalleColumnCache) return detalleColumnCache
@@ -91,6 +104,8 @@ function normalizarMovimiento(movimiento) {
     con_iva: Boolean(movimiento.con_iva),
     destinatario: movimiento.destinatario || "",
     cliente_id: movimiento.cliente_id ?? null,
+    nombre_cliente: movimiento.nombre_cliente ?? movimiento.cliente ?? null,
+    numero_presupuesto: movimiento.numero_presupuesto ?? null,
     presupuesto_id: movimiento.presupuesto_id ?? null,
     detalles_medio_pago: detallesNormalizados,
   }
@@ -302,19 +317,19 @@ router.get("/resumen/pdf", async (req, res) => {
       fecha_fin ? `Hasta ${formatoFecha(fecha_fin)}` : "",
       tipo ? `Tipo ${tipo}` : "Todos los tipos",
     ].filter(Boolean).join(" - ")
-
+    
     const headerBottom = drawPremiumHeader(doc, {
       title: "TESLA MONTAJES ELECTRICOS",
       subtitle: cajaCodigoNormalizada ? `Resumen ${LABEL_CAJA[cajaCodigoNormalizada]}` : "Resumen completo de caja",
       accentText: filtroPeriodo || "Sin filtros",
       logoPath: LOGO_PATH,
-    })
+    })  
 
     doc.fillColor(PDF_COLORS.ink)
     doc.y = headerBottom + 15
 
     const resumenY = doc.y
-    doc.roundedRect(45, resumenY, pageWidth - 90, 82, 6).fill(PDF_COLORS.card)
+    doc.roundedRect(65, resumenY, pageWidth - 90, 82, 6).fill(PDF_COLORS.card)
     doc.fillColor("#334155").font("Helvetica-Bold").fontSize(8.5)
     doc.text("MOVIMIENTOS", 58, resumenY + 10, { width: 100 })
     doc.text("INGRESOS", 185, resumenY + 10, { width: 120 })
@@ -371,7 +386,7 @@ router.get("/resumen/pdf", async (req, res) => {
       doc.text("FECHA", 50, headerY + 8, { width: 68 })
       doc.text("CAJA", 120, headerY + 8, { width: 72 })
       doc.text("DETALLE", 194, headerY + 8, { width: 158 })
-      doc.text("MEDIOS", 354, headerY + 8, { width: 100 })
+      doc.text("MEDIOS", 345, headerY + 8, { width: 150 })
       doc.text("MONTO", 456, headerY + 8, { width: 44, align: "right" })
       doc.fillColor(PDF_COLORS.ink)
       doc.y = headerY + 24
@@ -398,15 +413,16 @@ router.get("/resumen/pdf", async (req, res) => {
         const medios = (mov.detalles_medio_pago || [])
           .filter((d) => parseFloat(d.monto || 0) > 0)
           .map((d) => `${LABEL_MEDIO[d.medio_pago] || d.medio_pago}: ${formatoMoneda(d.monto)}`)
-          .join(" | ")
+          .join("\n")
 
         doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(8.5)
         doc.text(formatoFecha(mov.fecha), 50, yMov + 7, { width: 68 })
         doc.text(`${LABEL_CAJA[mov.caja_codigo] || mov.caja_codigo} / ${mov.tipo === "ingreso" ? "Ingreso" : "Egreso"}`, 120, yMov + 7, { width: 72, ellipsis: true })
-        doc.text(String(mov.detalle || mov.destinatario || "-"), 194, yMov + 7, { width: 158, ellipsis: true })
-        doc.text(medios || "-", 354, yMov + 7, { width: 100, ellipsis: true })
-        doc.text(formatoMoneda(mov.monto_total), 456, yMov + 7, { width: 44, align: "right" })
-        yMov += 22
+        doc.text(String(mov.detalle || mov.destinatario || "-"), 185, yMov + 7, { width: 135, ellipsis: true })
+        doc.text(medios || "-", 320, yMov + 6, { width: 150, ellipsis: true })
+        doc.text(formatoMoneda(mov.monto_total), 456, yMov + 7, { width: 60, align: "right" })
+        doc.strokeColor(PDF_COLORS.line).lineWidth(0.5).moveTo(60, yMov + 60).lineTo(pageWidth - 60, yMov + 60).stroke()
+        yMov += 65
       })
     }
 
@@ -474,23 +490,31 @@ router.get("/:id/pdf", async (req, res) => {
     doc.text(movimiento.tipo === "ingreso" ? "Ingreso" : "Egreso", 170, infoY + 26, { width: 100 })
     doc.text(formatoMoneda(movimiento.monto_total), 282, infoY + 26, { width: 140 })
     doc.font("Helvetica").fontSize(10).fillColor(PDF_COLORS.ink)
+    doc.strokeColor(PDF_COLORS.line).lineWidth(0.8).moveTo(58, infoY + 48).lineTo(pageWidth - 58, infoY + 48).stroke()
+    
     doc.text(movimiento.detalle || "-", 58, infoY + 66, { width: pageWidth - 116 })
+    doc.strokeColor(PDF_COLORS.line).lineWidth(0.8).moveTo(58, infoY + 98).lineTo(pageWidth - 58, infoY + 98).stroke()
+
+    let infoAdicionalY = infoY + 108
 
     doc.font("Helvetica").fontSize(9).fillColor(PDF_COLORS.slate)
-    doc.text(`Caja: ${LABEL_CAJA[movimiento.caja_codigo] || "Caja Tesla"}`, 58, infoY + 84, { width: 180 })
-    doc.text(`IVA: ${movimiento.con_iva ? "Con IVA" : "Sin IVA"}`, 250, infoY + 84, { width: 120 })
-    doc.text(`Categoria: ${LABEL_CATEGORIA[movimiento.categoria] || "-"}`, 390, infoY + 84, { width: 140, align: "right" })
+    doc.text(`Caja: ${LABEL_CAJA[movimiento.caja_codigo] || "Caja Tesla"}`, 58, infoAdicionalY, { width: 180 })
+    doc.text(`IVA: ${movimiento.con_iva ? "Con IVA" : "Sin IVA"}`, 250, infoAdicionalY, { width: 120 })
+    doc.text(`Categoria: ${LABEL_CATEGORIA[movimiento.categoria] || "-"}`, 360, infoAdicionalY, { width: 140, align: "right" })
 
     if (movimiento.destinatario) {
-      doc.text(`Destinatario: ${movimiento.destinatario}`, 58, infoY + 104, { width: 472 })
+      doc.text(`Destinatario: ${movimiento.destinatario}`, 58, infoAdicionalY + 20, { width: 472 })
     }
-    doc.text(`Cliente ID: ${movimiento.cliente_id || "-"}`, 360, infoY + 84, { width: 85 })
-    doc.text(`Presupuesto ID: ${movimiento.presupuesto_id || "-"}`, 448, infoY + 84, { width: 90, align: "right" })
+    doc.text(`Cliente: ${movimiento.cliente || "-"}`, 250, infoAdicionalY + 20, { width: 85 })
+    doc.text(`Presupuesto: ${movimiento.presupuesto_id || "-"}`, 410, infoAdicionalY + 20, { width: 90, align: "right" })
 
-    doc.y = infoY + 132
+    doc.strokeColor(PDF_COLORS.line).lineWidth(0.8).moveTo(45, infoAdicionalY + 50).lineTo(pageWidth - 45, infoAdicionalY + 50).stroke()
+
+    let infoDesgloseY = infoAdicionalY + 60
     doc.moveDown(0.4)
-    doc.font("Helvetica-Bold").fontSize(12).fillColor(PDF_COLORS.navy).text("Desglose por medio de pago")
+    doc.font("Helvetica-Bold").fontSize(12).fillColor(PDF_COLORS.navy).text("Desglose por medio de pago", 45, infoDesgloseY, { width: pageWidth - 90, align: "center" })
     doc.moveDown(0.25)
+  
 
     const detalles = (movimiento.detalles_medio_pago || []).filter((d) => parseFloat(d.monto || 0) > 0)
     const desgloseItems = (detalles.length > 0 ? detalles : MEDIOS_PAGO.map((medio) => ({ medio_pago: medio, monto: 0 })))
@@ -499,7 +523,7 @@ router.get("/:id/pdf", async (req, res) => {
     doc.rect(45, headerY, pageWidth - 90, 22).fill(PDF_COLORS.navy)
     doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(9)
     doc.text("MEDIO", 55, headerY + 7, { width: 280 })
-    doc.text("MONTO", 410, headerY + 7, { width: 120, align: "right" })
+    doc.text("MONTO", 395, headerY + 7, { width: 120, align: "right" })
     doc.fillColor(PDF_COLORS.ink)
 
     let y = headerY + 22
@@ -507,7 +531,7 @@ router.get("/:id/pdf", async (req, res) => {
       const bg = idx % 2 === 0 ? PDF_COLORS.light : PDF_COLORS.lightAlt
       doc.rect(45, y, pageWidth - 90, 20).fill(bg)
       doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9.5)
-      doc.text(LABEL_MEDIO[item.medio_pago] || item.medio_pago, 55, y + 6, { width: 280 })
+      doc.text(LABEL_MEDIO[item.medio_pago] || '\n' + item.medio_pago, 55, y + 6, { width: 280 }) +'\n'+ 
       doc.text(formatoMoneda(item.monto), 410, y + 6, { width: 120, align: "right" })
       y += 20
     })
