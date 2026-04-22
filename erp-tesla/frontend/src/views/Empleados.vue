@@ -25,6 +25,10 @@ const loadingHorasId = ref(null)
 // Filtros
 const filtroGrupo = ref("")
 const filtroBusqueda = ref("")
+const filtroMes = ref("")
+const horasDetalle = ref([])
+const liquidacionesDetalle = ref([])
+
 
 const TIPOS_CONTRATO = [
   { value: "monotributista", label: "Monotributista" },
@@ -291,6 +295,7 @@ const verDetalle = (empleado) => {
     const num = Number(val)
     return Number.isFinite(num) ? num : 0
   }
+  
 
   error.value = ""
   empleadoSeleccionado.value = {
@@ -301,6 +306,10 @@ const verDetalle = (empleado) => {
   vistaActual.value = "detalle"
   loadingDetalleResumen.value = true
 
+  filtroMes.value = ""
+  horasDetalle.value = []
+  liquidacionesDetalle.value = []
+
   Promise.all([
     api.getHoras(undefined, undefined, empleado.id),
     api.getLiquidaciones(undefined, undefined, empleado.id),
@@ -310,6 +319,10 @@ const verDetalle = (empleado) => {
 
       const horas = horasRes?.data || []
       const liquidaciones = liquidacionesRes?.data || []
+
+      horasDetalle.value = horas
+      liquidacionesDetalle.value = liquidaciones
+
       const totalHoras = roundResumenValue(
         horas.reduce((sum, registro) => sum + getCantidadHorasRegistro(registro), 0)
       )
@@ -339,9 +352,47 @@ const verDetalle = (empleado) => {
     })
 }
 
+const resumenDetalle = computed(() => {
+  const horasBase = horasFiltradas.value
+  const liquidacionesBase = liquidacionesFiltradas.value
+
+  return {
+    totalHoras: roundResumenValue(
+      horasBase.reduce((sum, registro) => sum + getCantidadHorasRegistro(registro), 0)
+    ),
+    horasPrestadas: roundResumenValue(
+      horasBase
+        .filter((registro) => registro.es_prestada === true || String(registro.tipo || "").toLowerCase() === "prestada")
+        .reduce((sum, registro) => sum + getCantidadHorasRegistro(registro), 0)
+    ),
+    liquidacionesPagadas: liquidacionesBase.filter(
+      (liquidacion) => String(liquidacion.estado || "").toLowerCase() === "pagada"
+    ).length,
+    liquidacionesPendientes: liquidacionesBase.filter(
+      (liquidacion) => String(liquidacion.estado || "").toLowerCase() !== "pagada"
+    ).length,
+  }
+})
+
+const filtrarPorMes = (registros) => {
+  if (!filtroMes.value) return registros
+  return registros.filter((registro) => {
+    const fecha = registro.fecha ? String(registro.fecha).split("T")[0] : null
+    return fecha && fecha.startsWith(filtroMes.value)
+  })
+}
+
+
+const horasFiltradas = computed(() => filtrarPorMes(horasDetalle.value))
+const liquidacionesFiltradas = computed(() => filtrarPorMes(liquidacionesDetalle.value))
+
+
 const volverALista = () => {
   vistaActual.value = "lista"
   empleadoSeleccionado.value = null
+  filtroMes.value = ""
+  horasDetalle.value = []
+  liquidacionesDetalle.value = []
 }
 
 const confirmarEliminar = (empleado) => {
@@ -548,25 +599,46 @@ onUnmounted(() => {
           </div>
         </div>
 
+        <div class="section">
+          <h3>Período</h3>
+          <div class="filtroPorMes">
+            <div class="filtroPorMes-copy">
+              <span class="filtroPorMes-kicker">Resumen mensual</span>
+              <h4>Filtrar por mes</h4>
+              <p>Al elegir un período, el resumen del empleado se actualiza automáticamente.</p>
+            </div>
+            <div class="filtroPorMes-controls">
+              <label class="filtroPorMes-field">
+                <span>Mes</span>
+                <input type="month" v-model="filtroMes" />
+              </label>
+              <button v-if="filtroMes" type="button" class="btn btn-secondary filtroPorMes-clear" @click="filtroMes = ''">
+                Ver todo
+              </button>
+            </div>
+          </div>
+        </div>
+
+
         <!-- Resumen -->
         <div class="section">
           <h3>Resumen</h3>
           <div class="resumen-grid">
             <div class="resumen-card">
               <span class="label">Total Horas</span>
-              <span class="value">{{ loadingDetalleResumen ? "..." : formatearResumenValor(empleadoSeleccionado.resumen.totalHoras) }}</span>
+              <span class="value">{{ loadingDetalleResumen ? "..." : formatearResumenValor(resumenDetalle.totalHoras) }}</span>
             </div>
             <div class="resumen-card">
               <span class="label">Horas Prestadas</span>
-              <span class="value">{{ loadingDetalleResumen ? "..." : formatearResumenValor(empleadoSeleccionado.resumen.horasPrestadas) }}</span>
+              <span class="value">{{ loadingDetalleResumen ? "..." : formatearResumenValor(resumenDetalle.horasPrestadas) }}</span>
             </div>
             <div class="resumen-card">
               <span class="label">Liquidaciones Pendientes</span>
-              <span class="value">{{ loadingDetalleResumen ? "..." : formatearResumenValor(empleadoSeleccionado.resumen.liquidacionesPendientes) }}</span>
+              <span class="value">{{ loadingDetalleResumen ? "..." : formatearResumenValor(resumenDetalle.liquidacionesPendientes) }}</span>
             </div>
             <div class="resumen-card">
               <span class="label">Liquidaciones Pagadas</span>
-              <span class="value">{{ loadingDetalleResumen ? "..." : formatearResumenValor(empleadoSeleccionado.resumen.liquidacionesPagadas) }}</span>
+              <span class="value">{{ loadingDetalleResumen ? "..." : formatearResumenValor(resumenDetalle.liquidacionesPagadas) }}</span>
             </div>
           </div>
         </div>
@@ -1190,6 +1262,93 @@ onUnmounted(() => {
   font-weight: bold;
 }
 
+.filtroPorMes {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1.25rem;
+  padding: 1.35rem 1.45rem;
+  min-height: 132px;
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.12), transparent 30%),
+    linear-gradient(180deg, rgba(28, 39, 57, 0.72), rgba(18, 25, 41, 0.88));
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 1rem;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  transition: all 0.2s ease;
+}
+
+.filtroPorMes-copy {
+  display: grid;
+  gap: 0.32rem;
+  max-width: 34rem;
+}
+
+.filtroPorMes-kicker {
+  color: #7dd3fc;
+  font-size: 0.76rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.filtroPorMes-copy h4 {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 1.08rem;
+}
+
+.filtroPorMes-copy p {
+  margin: 0;
+  color: #94a3b8;
+  line-height: 1.5;
+}
+
+.filtroPorMes-controls {
+  display: flex;
+  align-items: end;
+  gap: 0.85rem;
+  flex-wrap: wrap;
+}
+
+.filtroPorMes-field {
+  display: grid;
+  gap: 0.42rem;
+  min-width: 220px;
+}
+
+.filtroPorMes-field span {
+  color: #cbd5e1;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.filtroPorMes-field input {
+  min-height: 3rem;
+  padding: 0.78rem 0.9rem;
+  background-color: rgba(15, 23, 42, 0.86);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 0.8rem;
+  color: #e2e8f0;
+  font-size: 0.94rem;
+  transition: all 0.2s;
+}
+
+.filtroPorMes-field input:focus {
+  outline: none;
+  border-color: rgba(96, 165, 250, 0.9);
+  background-color: rgba(15, 23, 42, 0.98);
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.12);
+}
+
+.filtroPorMes-clear {
+  margin-top: 0;
+  min-height: 3rem;
+  padding-inline: 1rem;
+}
+
 /* Form styles */
 .form-group {
   display: flex;
@@ -1747,7 +1906,8 @@ onUnmounted(() => {
 @media (max-width: 900px) {
   .empleados-topbar,
   .empleados-toolbar,
-  .detalle-header {
+  .detalle-header,
+  .filtroPorMes {
     flex-direction: column;
     align-items: stretch;
   }
@@ -1813,6 +1973,10 @@ onUnmounted(() => {
 
   .detalle-header h2 {
     font-size: 1.55rem;
+  }
+
+  .filtroPorMes-field {
+    min-width: 100%;
   }
 }
 

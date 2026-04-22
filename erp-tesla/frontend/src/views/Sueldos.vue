@@ -398,7 +398,12 @@ const sueldoBaseCalculadoPreview = computed(() => {
   return Math.round(horas * valorHora * 100) / 100
 })
 
-const importeHorasExtraPreview = computed(() => {
+const estaAGenerar = (liq) => {
+  return Number(liq?.total || 0) === 0 &&
+         Number(liq?.monto_neto || 0) === 0
+}
+
+const importeHorasExtra50Preview = computed(() => {
   return toNumber(formConceptos.value.horas_extra_cantidad) * valorHoraDetalle.value * 1.5
 })
 
@@ -647,8 +652,8 @@ onUnmounted(() => {
                 <td>{{ formatearMoneda(liq.monto_bruto || 0) }}</td>
                 <td><strong>{{ formatearMoneda(liq.total) }}</strong></td>
                 <td>
-                  <span :class="['badge', liq.estado === 'pagada' ? 'badge-pagada' : 'badge-pendiente']">
-                    {{ liq.estado === "pagada" ? "PAGADA" : "PENDIENTE" }}
+                  <span :class="['badge', estaAGenerar(liq) ? 'badge-generar' : (liq.estado === 'pagada' ? 'badge-pagada' : 'badge-pendiente')]">
+                    {{ estaAGenerar(liq) ? "A GENERAR" : (liq.estado === "pagada" ? "PAGADA" : "PENDIENTE") }}
                   </span>
                 </td>
                 <td>
@@ -720,8 +725,8 @@ onUnmounted(() => {
             </div>
             <div class="dato-item">
               <span class="dato-label">Estado:</span>
-              <span :class="['badge', estaPagadaDetalle ? 'badge-pagada' : 'badge-pendiente']">
-                {{ estaPagadaDetalle ? "Pagada" : "Pendiente" }}
+              <span :class="['badge', estaAGenerar(liquidacionSeleccionada) ? 'badge-generar' : (estaPagadaDetalle ? 'badge-pagada' : 'badge-pendiente')]">
+                {{ estaAGenerar(liquidacionSeleccionada) ? "A GENERAR" : (estaPagadaDetalle ? "PAGADA" : "PENDIENTE") }}
               </span>
             </div>
           </div>
@@ -757,11 +762,11 @@ onUnmounted(() => {
               <span>{{ formatearMoneda(liquidacionSeleccionada.presentismo) }}</span>
             </div>
             <div class="concepto">
-              <span>Horas extra 50% ({{ formatearCantidad(liquidacionSeleccionada.horasExtraRegistradas50) }} hs):</span>
+              <span>Horas extra 50% ({{ formatearCantidad(liquidacionSeleccionada.horas_extra_cantidad) }} hs):</span>
               <span>{{ formatearMoneda(liquidacionSeleccionada.importe_horas_extra) }}</span>
             </div>
             <div class="concepto">
-              <span>Horas extra 100% ({{ formatearCantidad(liquidacionSeleccionada.horasExtraRegistradas100) }} hs):</span>
+              <span>Horas extra 100% ({{ formatearCantidad(liquidacionSeleccionada.horas_extra_100_cantidad) }} hs):</span>
               <span>{{ formatearMoneda(liquidacionSeleccionada.importe_horas_extra_100) }}</span>
             </div>
             <div class="concepto">
@@ -929,6 +934,7 @@ onUnmounted(() => {
                   <input
                     v-model="tarifaEditando"
                     type="number"
+                    @wheel.prevent
                     min="0"
                     step="100"
                     class="input-tarifa"
@@ -1010,6 +1016,7 @@ onUnmounted(() => {
                   <input
                     :value="formConceptosHorasInput"
                     type="text"
+                    @wheel.prevent
                     inputmode="decimal"
                     placeholder="Ej: 8.30"
                     @input="actualizarHorasConceptosDesdeInput($event.target.value)"
@@ -1021,7 +1028,7 @@ onUnmounted(() => {
 
                 <label class="form-group form-card-field">
                   <span>Sueldo base ($)</span>
-                  <input v-model.number="formConceptos.monto_bruto" type="number" min="0" step="0.01" />
+                  <input v-model.number="formConceptos.monto_bruto" type="number" min="0" step="0.01" @wheel.prevent />
                   <small class="form-help">Administración puede ajustarlo manualmente sin depender de las horas cargadas.</small>
                   <small class="form-help">
                     Cálculo automático: {{ formatearHoras(formConceptos.total_horas) }} hs × {{ formatearMoneda(getValorHoraEmpleado(liquidacionSeleccionada?.empleado_id) || liquidacionSeleccionada?.valor_hora) }} = {{ formatearMoneda(sueldoBaseCalculadoPreview) }}
@@ -1030,7 +1037,7 @@ onUnmounted(() => {
 
                 <label class="form-group form-card-field">
                   <span>Presentismo ($)</span>
-                  <input v-model.number="formConceptos.presentismo" type="number" min="0" step="0.01" />
+                  <input v-model.number="formConceptos.presentismo" type="number" min="0" step="0.01" @wheel.prevent />
                   <small class="form-help">Usalo para reflejar asistencia perfecta o premios fijos del período.</small>
                 </label>
               </div>
@@ -1048,7 +1055,7 @@ onUnmounted(() => {
               <div class="overtime-edit-grid">
                 <label class="form-group overtime-edit-card">
                   <span>Horas extra a liquidar al 50%</span>
-                  <input v-model.number="formConceptos.horas_extra_cantidad" type="number" min="0" step="0.01" />
+                  <input v-model.number="formConceptos.horas_extra_cantidad" type="number" min="0" step="0.01" @wheel.prevent />
                   <small class="form-help">Importe calculado: {{ formatearMoneda(importeHorasExtra50Preview) }}</small>
                   <div class="overtime-source-note">
                     <span>Registradas en horas:</span>
@@ -1058,7 +1065,7 @@ onUnmounted(() => {
 
                 <label class="form-group overtime-edit-card">
                   <span>Horas extra a liquidar al 100%</span>
-                  <input v-model.number="formConceptos.horas_extra_100_cantidad" type="number" min="0" step="0.01" />
+                  <input v-model.number="formConceptos.horas_extra_100_cantidad" type="number" min="0" step="0.01" @wheel.prevent />
                   <small class="form-help">Importe calculado: {{ formatearMoneda(importeHorasExtra100Preview) }}</small>
                   <div class="overtime-source-note">
                     <span>Registradas en horas:</span>
@@ -1070,39 +1077,39 @@ onUnmounted(() => {
               <div class="conceptos-form-grid conceptos-form-grid-secondary">
                 <label class="form-group form-card-field">
                   <span>No remunerativo ($)</span>
-                  <input v-model.number="formConceptos.no_remunerativo" type="number" min="0" step="0.01" />
+                  <input v-model.number="formConceptos.no_remunerativo" type="number" min="0" step="0.01" @wheel.prevent />
                 </label>
 
                 <label class="form-group form-card-field">
                   <span>Aguinaldo ($)</span>
-                  <input v-model.number="formConceptos.aguinaldo" type="number" min="0" step="0.01" />
+                  <input v-model.number="formConceptos.aguinaldo" type="number" min="0" step="0.01" @wheel.prevent />
                 </label>
 
                 <label class="form-group form-card-field">
                   <span>Vacaciones ($)</span>
-                  <input v-model.number="formConceptos.vacaciones" type="number" min="0" step="0.01" />
+                  <input v-model.number="formConceptos.vacaciones" type="number" min="0" step="0.01" @wheel.prevent />
                 </label>
 
                 <label class="form-group form-card-field">
                   <span>Feriados (cantidad de días)</span>
-                  <input v-model.number="formConceptos.feriados_cantidad" type="number" min="0" step="1" />
+                  <input v-model.number="formConceptos.feriados_cantidad" type="number" min="0" step="1" @wheel.prevent />
                   <small class="form-help">Cada feriado suma 8 horas al valor común. Importe calculado: {{ formatearMoneda(importeFeriadosPreview) }}</small>
                 </label>
 
                 <label class="form-group form-card-field">
                   <span>Días no trabajados (cantidad)</span>
-                  <input v-model.number="formConceptos.dias_no_trabajados" type="number" min="0" step="1" />
+                  <input v-model.number="formConceptos.dias_no_trabajados" type="number" min="0" step="1" @wheel.prevent />
                   <small class="form-help">Se descuenta 8 horas por día faltado. Descuento calculado: -{{ formatearMoneda(descuentoDiasNoTrabajadosPreview) }}</small>
                 </label>
 
                 <label class="form-group form-card-field">
                   <span>Adelantos ($)</span>
-                  <input v-model.number="formConceptos.adelantos" type="number" min="0" step="0.01" />
+                  <input v-model.number="formConceptos.adelantos" type="number" min="0" step="0.01" @wheel.prevent />
                 </label>
 
                 <label class="form-group form-card-field form-card-field-accent">
                   <span>Adicional ($)</span>
-                  <input v-model.number="formConceptos.adicional" type="number" min="0" step="0.01" />
+                  <input v-model.number="formConceptos.adicional" type="number" min="0" step="0.01" @wheel.prevent />
                   <small class="form-help">Monto adicional a sumar a la liquidación (bonos, premios, etc).</small>
                 </label>
               </div>
@@ -1158,7 +1165,7 @@ onUnmounted(() => {
                   </label>
                   <label>
                     <span>Monto</span>
-                    <input v-model.number="conceptoExtra.monto" type="number" min="0" step="0.01" placeholder="0.00" />
+                    <input v-model.number="conceptoExtra.monto" type="number" min="0" step="0.01" placeholder="0.00" @wheel.prevent />
                   </label>
                   <label>
                     <span>Impacto</span>
@@ -1208,6 +1215,7 @@ onUnmounted(() => {
               <input
                 v-model.number="formPago.monto"
                 type="number"
+                @wheel.prevent
                 min="0"
                 step="0.01"
                 :max="faltaPagar"
@@ -1536,11 +1544,10 @@ td {
   color: #86efac;
 }
 
-.badge-generar {
-  background: rgba(245, 158, 11, 0.18);
-  color: #fbbf24;
+.badge-generar{
+  background-color: rgba(255, 94, 0, 0.548);
+  color: #ffffff;
 }
-
 
 .acciones {
   display: flex;

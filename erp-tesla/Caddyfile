@@ -18,7 +18,7 @@ erp.tesla.local {
 	}
 
 	handle {
-		root * ./frontend/dist
+		root * "C:/Users/usuario/Documents/Sistema Gestion TESLA/Sistema-gestion-tesla/erp-tesla/frontend/dist"
 		try_files {path} /index.html
 		file_server
 	}

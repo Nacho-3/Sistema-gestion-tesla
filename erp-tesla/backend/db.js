@@ -211,7 +211,7 @@ class QueryBuilder {
     const placeholders = ids.map((_, idx) => `$${idx + 1}`).join(",")
     const query = detallesSchema.mode === "filas"
       ? `
-          SELECT id, movimiento_id, medio_pago, monto, created_at
+          SELECT *
           FROM detalles_medio_pago
           WHERE movimiento_id IN (${placeholders})
           ORDER BY id ASC

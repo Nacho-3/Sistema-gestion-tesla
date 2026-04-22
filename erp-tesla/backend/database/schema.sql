@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS obras (
   estado VARCHAR(30) NOT NULL DEFAULT 'activa' CONSTRAINT chk_obras_estado CHECK (estado IN ('activa', 'finalizada', 'cerrada')),
   activo BOOLEAN DEFAULT TRUE,
   fecha_inicio DATE,
+  horas_presupuestadas NUMERIC(12,2) DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -308,6 +309,9 @@ ALTER TABLE IF EXISTS obras
 
 UPDATE obras SET activo = TRUE WHERE activo IS NULL;
 
+-- Obras: Columna para el control de presupuesto de horas
+ALTER TABLE IF EXISTS obras ADD COLUMN IF NOT EXISTS horas_presupuestadas NUMERIC(12,2) DEFAULT 0;
+
 -- Obras: CHECK en estado para DBs existentes sin el constraint
 DO $$
 BEGIN
@@ -374,13 +378,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_empleados_dni_activo ON empleados(dni) WHER
 -- =========================
 -- CAJA
 -- =========================
+CREATE TABLE IF NOT EXISTS cajas_semanales (
+  id SERIAL PRIMARY KEY,
+  caja_codigo VARCHAR(20) NOT NULL DEFAULT 'tesla' CONSTRAINT chk_cajas_semanales_codigo CHECK (caja_codigo IN ('tesla', 'teslita', 'juani')),
+  fecha_inicio DATE NOT NULL,
+  fecha_fin DATE NOT NULL,
+  saldo_inicial NUMERIC(12,2) NOT NULL DEFAULT 0,
+  total_ingresos NUMERIC(12,2) NOT NULL DEFAULT 0,
+  total_egresos NUMERIC(12,2) NOT NULL DEFAULT 0,
+  saldo_final NUMERIC(12,2) NOT NULL DEFAULT 0,
+  estado VARCHAR(20) NOT NULL DEFAULT 'abierta' CONSTRAINT chk_cajas_semanales_estado CHECK (estado IN ('abierta', 'cerrada')),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_cajas_semanales_rango CHECK (fecha_fin >= fecha_inicio),
+  CONSTRAINT uq_cajas_semanales_periodo UNIQUE (caja_codigo, fecha_inicio, fecha_fin)
+);
+
 CREATE TABLE IF NOT EXISTS movimientos_caja (
   id SERIAL PRIMARY KEY,
   fecha DATE NOT NULL,
   caja_codigo VARCHAR(20) NOT NULL DEFAULT 'tesla' CONSTRAINT chk_movimientos_caja_codigo CHECK (caja_codigo IN ('tesla', 'teslita', 'juani')),
   tipo VARCHAR(20) NOT NULL CHECK (tipo IN ('ingreso', 'egreso')),
   detalle TEXT NOT NULL,
-  categoria VARCHAR(20) CONSTRAINT chk_movimientos_categoria CHECK (categoria IS NULL OR categoria IN ('mano_obra', 'materiales')),
+  categoria VARCHAR(20) CONSTRAINT chk_movimientos_categoria CHECK (categoria IS NULL OR categoria IN ('mano_obra', 'materiales', 'varios')),
   con_iva BOOLEAN NOT NULL DEFAULT true,
   destinatario TEXT,
   cliente_id INTEGER REFERENCES clientes(id) ON DELETE SET NULL,
@@ -389,7 +409,7 @@ CREATE TABLE IF NOT EXISTS movimientos_caja (
   CONSTRAINT chk_movimientos_reglas_tipo CHECK (
     (
       tipo = 'ingreso'
-      AND categoria IN ('mano_obra', 'materiales')
+      AND categoria IN ('mano_obra', 'materiales', 'varios')
       AND NULLIF(BTRIM(COALESCE(destinatario, '')), '') IS NULL
       AND (presupuesto_id IS NULL OR cliente_id IS NOT NULL)
     )
@@ -408,11 +428,27 @@ CREATE TABLE IF NOT EXISTS movimientos_caja (
 
 ALTER TABLE IF EXISTS movimientos_caja
   ADD COLUMN IF NOT EXISTS caja_codigo VARCHAR(20) NOT NULL DEFAULT 'tesla',
+  ADD COLUMN IF NOT EXISTS caja_semanal_id INTEGER,
   ADD COLUMN IF NOT EXISTS categoria VARCHAR(20),
   ADD COLUMN IF NOT EXISTS con_iva BOOLEAN NOT NULL DEFAULT true,
   ADD COLUMN IF NOT EXISTS destinatario TEXT,
   ADD COLUMN IF NOT EXISTS cliente_id INTEGER,
   ADD COLUMN IF NOT EXISTS presupuesto_id INTEGER;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'fk_movimientos_caja_semanal'
+      AND conrelid = 'movimientos_caja'::regclass
+  ) THEN
+    ALTER TABLE movimientos_caja
+      ADD CONSTRAINT fk_movimientos_caja_semanal
+      FOREIGN KEY (caja_semanal_id)
+      REFERENCES cajas_semanales(id)
+      ON DELETE SET NULL;
+  END IF;
+END $$;
 
 UPDATE movimientos_caja
 SET caja_codigo = 'tesla'
@@ -458,8 +494,16 @@ CREATE TABLE IF NOT EXISTS detalles_medio_pago (
   movimiento_id INTEGER NOT NULL REFERENCES movimientos_caja(id) ON DELETE CASCADE,
   medio_pago VARCHAR(30) NOT NULL CONSTRAINT chk_detalles_medio_pago_codigo CHECK (medio_pago IN ('efectivo', 'transferencia', 'cheque', 'echeq', 'retencion')),
   monto NUMERIC(12,2) NOT NULL CONSTRAINT chk_detalles_medio_pago_monto CHECK (monto > 0),
+  identificador TEXT,
+  banco TEXT,
+  fecha_cobro DATE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE IF EXISTS detalles_medio_pago
+  ADD COLUMN IF NOT EXISTS identificador TEXT,
+  ADD COLUMN IF NOT EXISTS banco TEXT,
+  ADD COLUMN IF NOT EXISTS fecha_cobro DATE;
 
 -- =========================
 -- PRESUPUESTOS
@@ -487,9 +531,19 @@ CREATE TABLE IF NOT EXISTS presupuestos (
   iva_porcentaje NUMERIC(6,2) NOT NULL DEFAULT 21,
   iva_monto NUMERIC(12,2) NOT NULL DEFAULT 0,
   total NUMERIC(12,2) NOT NULL DEFAULT 0,
+  info_interna_quien_hizo TEXT DEFAULT '',
+  info_interna_quien_hizo_pdf BOOLEAN NOT NULL DEFAULT FALSE,
+  info_interna_quien_aprobo TEXT DEFAULT '',
+  info_interna_quien_aprobo_pdf BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE IF EXISTS presupuestos
+  ADD COLUMN IF NOT EXISTS info_interna_quien_hizo TEXT DEFAULT '',
+  ADD COLUMN IF NOT EXISTS info_interna_quien_hizo_pdf BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS info_interna_quien_aprobo TEXT DEFAULT '',
+  ADD COLUMN IF NOT EXISTS info_interna_quien_aprobo_pdf BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS presupuesto_items (
   id SERIAL PRIMARY KEY,
@@ -501,6 +555,15 @@ CREATE TABLE IF NOT EXISTS presupuesto_items (
   ganancia_porcentaje NUMERIC(6,2) NOT NULL DEFAULT 0,
   precio_unitario NUMERIC(12,2) NOT NULL DEFAULT 0,
   subtotal NUMERIC(12,2) NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS presupuesto_info_interna_items (
+  id SERIAL PRIMARY KEY,
+  presupuesto_id INTEGER NOT NULL REFERENCES presupuestos(id) ON DELETE CASCADE,
+  orden INTEGER NOT NULL,
+  descripcion TEXT NOT NULL,
+  mostrar_en_pdf BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -665,11 +728,14 @@ CREATE INDEX IF NOT EXISTS idx_pagos_fecha_pago ON pagos_sueldo(fecha_pago);
 CREATE INDEX IF NOT EXISTS idx_movimientos_fecha ON movimientos_caja(fecha);
 CREATE INDEX IF NOT EXISTS idx_movimientos_fecha_tipo ON movimientos_caja(fecha, tipo);
 CREATE INDEX IF NOT EXISTS idx_movimientos_caja_codigo ON movimientos_caja(caja_codigo);
+CREATE INDEX IF NOT EXISTS idx_movimientos_caja_semanal ON movimientos_caja(caja_semanal_id);
 CREATE INDEX IF NOT EXISTS idx_movimientos_caja_fecha_tipo ON movimientos_caja(caja_codigo, fecha, tipo);
+CREATE INDEX IF NOT EXISTS idx_cajas_semanales_codigo_inicio ON cajas_semanales(caja_codigo, fecha_inicio);
 CREATE INDEX IF NOT EXISTS idx_movimientos_cliente ON movimientos_caja(cliente_id);
 CREATE INDEX IF NOT EXISTS idx_movimientos_presupuesto ON movimientos_caja(presupuesto_id);
 CREATE INDEX IF NOT EXISTS idx_detalles_movimiento ON detalles_medio_pago(movimiento_id);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_detalles_medio_pago_movimiento_medio ON detalles_medio_pago(movimiento_id, medio_pago);
+DROP INDEX IF EXISTS uq_detalles_medio_pago_movimiento_medio;
+CREATE INDEX IF NOT EXISTS idx_detalles_medio_pago_movimiento_medio ON detalles_medio_pago(movimiento_id, medio_pago);
 CREATE INDEX IF NOT EXISTS idx_presupuestos_cliente ON presupuestos(cliente_id);
 CREATE INDEX IF NOT EXISTS idx_presupuestos_obra ON presupuestos(obra_id);
 CREATE INDEX IF NOT EXISTS idx_presupuestos_fecha ON presupuestos(fecha);
@@ -774,18 +840,20 @@ BEGIN
     ALTER TABLE movimientos_caja DROP CONSTRAINT movimientos_caja_categoria_check;
   END IF;
 
-  IF NOT EXISTS (
+  IF EXISTS (
     SELECT 1 FROM pg_constraint
     WHERE conname = 'chk_movimientos_categoria'
       AND conrelid = 'movimientos_caja'::regclass
   ) THEN
-    UPDATE movimientos_caja
-    SET categoria = NULL
-    WHERE categoria IS NOT NULL AND categoria NOT IN ('mano_obra', 'materiales');
-
-    ALTER TABLE movimientos_caja ADD CONSTRAINT chk_movimientos_categoria
-      CHECK (categoria IS NULL OR categoria IN ('mano_obra', 'materiales'));
+    ALTER TABLE movimientos_caja DROP CONSTRAINT chk_movimientos_categoria;
   END IF;
+
+  UPDATE movimientos_caja
+  SET categoria = NULL
+  WHERE categoria IS NOT NULL AND categoria NOT IN ('mano_obra', 'materiales', 'varios');
+
+  ALTER TABLE movimientos_caja ADD CONSTRAINT chk_movimientos_categoria
+    CHECK (categoria IS NULL OR categoria IN ('mano_obra', 'materiales', 'varios'));
 END $$;
 
 DO $$
@@ -850,7 +918,7 @@ WHERE tipo = 'ingreso';
 UPDATE movimientos_caja
 SET categoria = NULL
 WHERE categoria IS NOT NULL
-  AND categoria NOT IN ('mano_obra', 'materiales');
+  AND categoria NOT IN ('mano_obra', 'materiales', 'varios');
 
 UPDATE movimientos_caja
 SET monto_total = ABS(monto_total)
@@ -871,34 +939,38 @@ DELETE FROM detalles_medio_pago d
 USING detalles_medio_pago duplicado
 WHERE d.id < duplicado.id
   AND d.movimiento_id = duplicado.movimiento_id
-  AND LOWER(BTRIM(d.medio_pago)) = LOWER(BTRIM(duplicado.medio_pago));
+  AND LOWER(BTRIM(d.medio_pago)) = LOWER(BTRIM(duplicado.medio_pago))
+  AND COALESCE(NULLIF(BTRIM(d.identificador), ''), '-') = COALESCE(NULLIF(BTRIM(duplicado.identificador), ''), '-')
+  AND COALESCE(d.monto, 0) = COALESCE(duplicado.monto, 0);
 
 DO $$
 BEGIN
-  IF NOT EXISTS (
+  IF EXISTS (
     SELECT 1 FROM pg_constraint
     WHERE conname = 'chk_movimientos_reglas_tipo'
       AND conrelid = 'movimientos_caja'::regclass
   ) THEN
-    ALTER TABLE movimientos_caja
-      ADD CONSTRAINT chk_movimientos_reglas_tipo
-      CHECK (
-        (
-          tipo = 'ingreso'
-          AND categoria IN ('mano_obra', 'materiales')
-          AND NULLIF(BTRIM(COALESCE(destinatario, '')), '') IS NULL
-          AND (presupuesto_id IS NULL OR cliente_id IS NOT NULL)
-        )
-        OR
-        (
-          tipo = 'egreso'
-          AND categoria IS NULL
-          AND cliente_id IS NULL
-          AND presupuesto_id IS NULL
-          AND NULLIF(BTRIM(COALESCE(destinatario, '')), '') IS NOT NULL
-        )
-      );
+    ALTER TABLE movimientos_caja DROP CONSTRAINT chk_movimientos_reglas_tipo;
   END IF;
+
+  ALTER TABLE movimientos_caja
+    ADD CONSTRAINT chk_movimientos_reglas_tipo
+    CHECK (
+      (
+        tipo = 'ingreso'
+        AND categoria IN ('mano_obra', 'materiales', 'varios')
+        AND NULLIF(BTRIM(COALESCE(destinatario, '')), '') IS NULL
+        AND (presupuesto_id IS NULL OR cliente_id IS NOT NULL)
+      )
+      OR
+      (
+        tipo = 'egreso'
+        AND categoria IS NULL
+        AND cliente_id IS NULL
+        AND presupuesto_id IS NULL
+        AND NULLIF(BTRIM(COALESCE(destinatario, '')), '') IS NOT NULL
+      )
+    );
 END $$;
 
 DO $$

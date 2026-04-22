@@ -6,6 +6,43 @@ import PDFDocument from "pdfkit"
 import path from "path"
 import { fileURLToPath } from "url"
 import { sanitizeFileText } from "../pdf/premiumTheme.js"
+import { PDFDocument as PDFLib } from "pdf-lib"
+
+const removeBlankPagesFromBuffer = async (pdfBuffer) => {
+	try {
+		const pdfDoc = await PDFLib.load(pdfBuffer)
+		const pages = pdfDoc.getPages()
+		const pagesToRemove = []
+
+		for (let i = 0; i < pages.length; i++) {
+			const page = pages[i]
+			const text = page.getTextContent()
+			const hasContent = text.items && text.items.length > 0
+			if (!hasContent) {
+				pagesToRemove.push(i)
+			}
+		}
+
+		if (pagesToRemove.length === 0) {
+			return pdfBuffer
+		}
+
+		console.log(`Removing ${pagesToRemove.length} blank pages from PDF`)
+
+		const newPdfDoc = new PDFLib()
+		for (let i = 0; i < pages.length; i++) {
+			if (!pagesToRemove.includes(i)) {
+				const [copiedPage] = await newPdfDoc.copyPages(pdfDoc, [i])
+				newPdfDoc.addPage(copiedPage)
+			}
+		}
+
+		return Buffer.from(await newPdfDoc.save())
+	} catch (e) {
+		console.error("Error removing blank pages:", e)
+		return pdfBuffer
+}
+}
 
 const router = express.Router()
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -65,6 +102,18 @@ const normalizeItems = (items = [], tipo = "material") => {
 			}
 		})
 		.filter((item) => item.descripcion && item.cantidad > 0 && (tipo === "mano_obra" || item.precio_unitario >= 0))
+}
+
+const normalizeInfoInternaItems = (items = []) => {
+	if (!Array.isArray(items)) return []
+
+	return items
+		.map((item, idx) => ({
+			orden: idx + 1,
+			descripcion: sanitizeDescripcion(item?.descripcion),
+			mostrar_en_pdf: Boolean(item?.mostrar_en_pdf),
+		}))
+		.filter((item) => item.descripcion)
 }
 
 const calcularTotales = ({ materiales, manoObra, aplicaIva, ivaPorcentaje, subtotalGeneralManoObra = 0 }) => {
@@ -175,9 +224,20 @@ const getPresupuestoCompleto = async (id) => {
 		[id]
 	)
 
+	const infoInternaItemsQuery = await pool.query(
+		`
+			SELECT id, orden, descripcion, mostrar_en_pdf
+			FROM presupuesto_info_interna_items
+			WHERE presupuesto_id = $1
+			ORDER BY orden ASC, id ASC
+		`,
+		[id]
+	)
+
 	return {
 		...cabeceraQuery.rows[0],
 		items: itemsQuery.rows,
+		items_info_interna: infoInternaItemsQuery.rows,
 	}
 }
 
@@ -212,12 +272,33 @@ const renderPresupuestoPdfBuffer = async (presupuesto) => {
 		try {
 			const itemsMateriales = presupuesto.items.filter((item) => item.tipo === "material")
 			const itemsManoObra = presupuesto.items.filter((item) => item.tipo === "mano_obra")
+			const infoInternaItems = Array.isArray(presupuesto.items_info_interna) ? presupuesto.items_info_interna : []
+			const infoInternaVisible = []
+			const quienHizo = sanitizeDescripcion(presupuesto.info_interna_quien_hizo)
+			const quienAprobo = sanitizeDescripcion(presupuesto.info_interna_quien_aprobo)
+
+			if (Boolean(presupuesto.info_interna_quien_hizo_pdf) && quienHizo) {
+				infoInternaVisible.push(`Quien hizo el presupuesto: ${quienHizo}`)
+			}
+			if (Boolean(presupuesto.info_interna_quien_aprobo_pdf) && quienAprobo) {
+				infoInternaVisible.push(`Quien aprobo el presupuesto: ${quienAprobo}`)
+			}
+			for (const item of infoInternaItems) {
+				const descripcion = sanitizeDescripcion(item?.descripcion)
+				if (Boolean(item?.mostrar_en_pdf) && descripcion) {
+					infoInternaVisible.push(descripcion)
+				}
+			}
 
 			const doc = new PDFDocument({ size: "A4", margin: 45 })
 			const chunks = []
 
 			doc.on("data", (chunk) => chunks.push(chunk))
-			doc.on("end", () => resolve(Buffer.concat(chunks)))
+			doc.on("end", async () => {
+				let buffer = Buffer.concat(chunks)
+				buffer = await removeBlankPagesFromBuffer(buffer)
+				resolve(buffer)
+			})
 			doc.on("error", reject)
 
 			const left = 45
@@ -446,18 +527,44 @@ const renderPresupuestoPdfBuffer = async (presupuesto) => {
 			doc.font("Helvetica-Bold").fontSize(9.8).fillColor("#ffffff")
 			doc.text("TOTAL", sumX + 12, y + 64)
 			doc.text(formatoMoneda(totalGeneral), right - 8 - 80, y + 64, { width: 80, align: "right" })
+			y += summaryBoxH + 10
+
+			if (infoInternaVisible.length > 0) {
+				const infoHeaderH = 22
+				const infoRowH = 15
+				const infoBoxH = infoHeaderH + (infoInternaVisible.length * infoRowH) + 8
+
+				if (y + infoBoxH + 24 > pageBottomLimit) {
+					doc.addPage()
+					y = drawContinuationHeader()
+				}
+
+				doc.rect(left, y, width, infoBoxH).lineWidth(0.8).strokeColor(lineColor).stroke()
+				doc.font("Helvetica-Bold").fontSize(8.8).fillColor("#111")
+				doc.text("Informacion interna", left + 8, y + 7)
+				doc.strokeColor("#d0d0d0").lineWidth(0.5).moveTo(left + 8, y + infoHeaderH).lineTo(right - 8, y + infoHeaderH).stroke()
+				doc.font("Helvetica").fontSize(8.4).fillColor("#111")
+
+				let infoY = y + infoHeaderH + 4
+				infoInternaVisible.forEach((linea) => {
+					doc.text(`- ${linea}`, left + 10, infoY, { width: width - 20, lineBreak: false })
+					infoY += infoRowH
+				})
+
+				y += infoBoxH + 8
+			}
 
 			const firmaY = doc.page.height - 84
-			doc.strokeColor("#5a5a5a").lineWidth(0.6).moveTo(left + 10, firmaY).lineTo(left + 170, firmaY).stroke()
-			doc.strokeColor("#5a5a5a").lineWidth(0.6).moveTo(right - 170, firmaY).lineTo(right - 10, firmaY).stroke()
+			const firmaWidth = 160
+			const firmaX = left + (width - firmaWidth) / 2
+			doc.strokeColor("#5a5a5a").lineWidth(0.6).moveTo(firmaX, firmaY).lineTo(firmaX + firmaWidth, firmaY).stroke()
 			doc.font("Helvetica").fontSize(7.4).fillColor(muted)
-			doc.text("Firma cliente", left + 10, firmaY + 3)
-			doc.text("Firma empresa", right - 170, firmaY + 3)
+			doc.text("Firma cliente", firmaX, firmaY + 3, { width: firmaWidth, align: "center" })
 
 			doc.strokeColor(lineColor).lineWidth(0.8).moveTo(left, doc.page.height - 62).lineTo(right, doc.page.height - 62).stroke()
 			doc.font("Helvetica").fontSize(7.8).fillColor(muted)
-			doc.text("Tesla Montajes Electricos - Documento comercial", left, doc.page.height - 54)
-			doc.text(`Pagina 1`, left, doc.page.height - 54, { width, align: "right" })
+			doc.text("Tesla Montajes Electricos - Documento comercial", left, doc.page.height - 60)
+			doc.text(`Pagina 1`, left, doc.page.height - 60, { width, align: "right" })
 
 			doc.end()
 		} catch (error) {
@@ -675,6 +782,11 @@ router.post("/", async (req, res) => {
 			subtotal_general_mano_obra,
 			items_materiales,
 			items_mano_obra,
+			info_interna_quien_hizo,
+			info_interna_quien_hizo_pdf,
+			info_interna_quien_aprobo,
+			info_interna_quien_aprobo_pdf,
+			items_info_interna,
 		} = req.body || {}
 
 		if (!cliente_id || !obra_id) {
@@ -689,6 +801,9 @@ router.post("/", async (req, res) => {
 		const subtotalGeneralManoObra = Math.max(0, toNumber(subtotal_general_mano_obra, 0))
 		const materiales = normalizeItems(items_materiales, "material")
 		const manoObra = normalizeItems(items_mano_obra, "mano_obra")
+		const infoInternaItems = normalizeInfoInternaItems(items_info_interna)
+		const infoInternaQuienHizo = sanitizeDescripcion(info_interna_quien_hizo)
+		const infoInternaQuienAprobo = sanitizeDescripcion(info_interna_quien_aprobo)
 
 		if (materiales.length === 0 && manoObra.length === 0) {
 			return res.status(400).json({ error: "Debe ingresar al menos un item" })
@@ -712,8 +827,10 @@ router.post("/", async (req, res) => {
 			`
 				INSERT INTO presupuestos (
 					numero, cliente_id, obra_id, fecha, validez_dias, forma_pago, observaciones,
-					subtotal_materiales, subtotal_mano_obra, iva_porcentaje, iva_monto, total
-				) VALUES ($1,$2,$3,COALESCE($4::date, CURRENT_DATE),$5,$6,$7,$8,$9,$10,$11,$12)
+					subtotal_materiales, subtotal_mano_obra, iva_porcentaje, iva_monto, total,
+					info_interna_quien_hizo, info_interna_quien_hizo_pdf,
+					info_interna_quien_aprobo, info_interna_quien_aprobo_pdf
+				) VALUES ($1,$2,$3,COALESCE($4::date, CURRENT_DATE),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 				RETURNING *
 			`,
 			[
@@ -729,6 +846,10 @@ router.post("/", async (req, res) => {
 				ivaPorcentaje,
 				ivaMonto,
 				total,
+				infoInternaQuienHizo,
+				Boolean(info_interna_quien_hizo_pdf),
+				infoInternaQuienAprobo,
+				Boolean(info_interna_quien_aprobo_pdf),
 			]
 		)
 
@@ -751,6 +872,22 @@ router.post("/", async (req, res) => {
 					item.ganancia_porcentaje,
 					item.precio_unitario,
 					item.subtotal,
+				]
+			)
+		}
+
+		for (const item of infoInternaItems) {
+			await client.query(
+				`
+					INSERT INTO presupuesto_info_interna_items (
+						presupuesto_id, orden, descripcion, mostrar_en_pdf
+					) VALUES ($1,$2,$3,$4)
+				`,
+				[
+					presupuesto.id,
+					item.orden,
+					item.descripcion,
+					item.mostrar_en_pdf,
 				]
 			)
 		}
@@ -795,6 +932,11 @@ router.put("/:id", async (req, res) => {
 			subtotal_general_mano_obra,
 			items_materiales,
 			items_mano_obra,
+			info_interna_quien_hizo,
+			info_interna_quien_hizo_pdf,
+			info_interna_quien_aprobo,
+			info_interna_quien_aprobo_pdf,
+			items_info_interna,
 		} = req.body || {}
 
 		if (!cliente_id || !obra_id) {
@@ -809,6 +951,9 @@ router.put("/:id", async (req, res) => {
 		const subtotalGeneralManoObra = Math.max(0, toNumber(subtotal_general_mano_obra, 0))
 		const materiales = normalizeItems(items_materiales, "material")
 		const manoObra = normalizeItems(items_mano_obra, "mano_obra")
+		const infoInternaItems = normalizeInfoInternaItems(items_info_interna)
+		const infoInternaQuienHizo = sanitizeDescripcion(info_interna_quien_hizo)
+		const infoInternaQuienAprobo = sanitizeDescripcion(info_interna_quien_aprobo)
 
 		if (materiales.length === 0 && manoObra.length === 0) {
 			return res.status(400).json({ error: "Debe ingresar al menos un item" })
@@ -850,8 +995,12 @@ router.put("/:id", async (req, res) => {
 					subtotal_mano_obra = $8,
 					iva_porcentaje = $9,
 					iva_monto = $10,
-					total = $11
-				WHERE id = $12
+					total = $11,
+					info_interna_quien_hizo = $12,
+					info_interna_quien_hizo_pdf = $13,
+					info_interna_quien_aprobo = $14,
+					info_interna_quien_aprobo_pdf = $15
+				WHERE id = $16
 			`,
 			[
 				validacionRelacion.clienteId,
@@ -865,6 +1014,10 @@ router.put("/:id", async (req, res) => {
 				ivaPorcentaje,
 				ivaMonto,
 				total,
+				infoInternaQuienHizo,
+				Boolean(info_interna_quien_hizo_pdf),
+				infoInternaQuienAprobo,
+				Boolean(info_interna_quien_aprobo_pdf),
 				presupuestoId,
 			]
 		)
@@ -872,6 +1025,7 @@ router.put("/:id", async (req, res) => {
 		await recalcularCertificadosPorPresupuesto(client, presupuestoId)
 
 		await client.query(`DELETE FROM presupuesto_items WHERE presupuesto_id = $1`, [presupuestoId])
+		await client.query(`DELETE FROM presupuesto_info_interna_items WHERE presupuesto_id = $1`, [presupuestoId])
 
 		const allItems = [...materiales, ...manoObra]
 		for (const item of allItems) {
@@ -890,6 +1044,22 @@ router.put("/:id", async (req, res) => {
 					item.ganancia_porcentaje,
 					item.precio_unitario,
 					item.subtotal,
+				]
+			)
+		}
+
+		for (const item of infoInternaItems) {
+			await client.query(
+				`
+					INSERT INTO presupuesto_info_interna_items (
+						presupuesto_id, orden, descripcion, mostrar_en_pdf
+					) VALUES ($1,$2,$3,$4)
+				`,
+				[
+					presupuestoId,
+					item.orden,
+					item.descripcion,
+					item.mostrar_en_pdf,
 				]
 			)
 		}

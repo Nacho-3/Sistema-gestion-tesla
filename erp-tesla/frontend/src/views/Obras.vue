@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed } from "vue"
+import { ref, onMounted, onUnmounted, computed, watch } from "vue"
 import api, { extractApiErrorMessage } from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
@@ -20,13 +20,23 @@ const obraSeleccionada = ref(null)
 const filtroCliente = ref("")
 const filtroBusqueda = ref("")
 
+const filtroDetalleMes = ref(new Date().getMonth() + 1);
+const filtroDetalleAnio = ref(new Date().getFullYear());
+
+const meses = [
+  "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+];
+
+
 // Formulario
 const form = ref({
   nombre: "",
   cliente_id: "",
   grupo_id: "",
   estado: "activa",
-  fecha_inicio: ""
+  fecha_inicio: "",
+  horas_presupuestadas: 0
 })
 
 // Cargar obras
@@ -73,7 +83,7 @@ const verDetalle = async (obra) => {
   loading.value = true
   try {
     const [resHoras, resPresupuestos] = await Promise.all([
-      api.getHoras(undefined, undefined, undefined, obra.id),
+      api.getHoras(filtroDetalleMes.value, filtroDetalleAnio.value, undefined, obra.id),
       api.getPresupuestos(),
     ])
     horas.value = resHoras.data || []
@@ -104,7 +114,8 @@ const openForm = (obra = null) => {
       cliente_id: obra.cliente_id,
       grupo_id: obra.grupo_id,
       estado: obra.estado,
-      fecha_inicio: obra.fecha_inicio
+      fecha_inicio: obra.fecha_inicio ? String(obra.fecha_inicio).slice(0, 10) : "",
+      horas_presupuestadas: obra.horas_presupuestadas || 0
     }
   } else {
     editingId.value = null
@@ -113,7 +124,8 @@ const openForm = (obra = null) => {
       cliente_id: "",
       grupo_id: "",
       estado: "activa",
-      fecha_inicio: ""
+      fecha_inicio: "",
+      horas_presupuestadas: 0
     }
   }
   showForm.value = true
@@ -128,7 +140,8 @@ const closeForm = () => {
     cliente_id: "",
     grupo_id: "",
     estado: "activa",
-    fecha_inicio: ""
+    fecha_inicio: "",
+    horas_presupuestadas: 0
   }
 }
 
@@ -162,6 +175,34 @@ const saveObra = async () => {
     console.error(err)
   } finally {
     loading.value = false
+  }
+}
+
+
+
+// Descargar PDF de la obra
+const descargarPdfObra = async (obra, completo = false) => {
+  error.value = ""
+  try {
+    // Si es completo, enviamos undefined para que el backend no filtre por fecha
+    const mes = completo ? undefined : filtroDetalleMes.value
+    const anio = completo ? undefined : filtroDetalleAnio.value
+    
+    const res = await api.getObraPdf(obra.id, mes, anio)
+    const blob = new Blob([res.data], { type: "application/pdf" })
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    
+    let nombreArchivo = `Resumen-Obra-${obra.nombre.replace(/\s+/g, '-')}`
+    nombreArchivo += completo ? "-Completo" : `-${meses[filtroDetalleMes.value - 1]}-${filtroDetalleAnio.value}`
+    
+    a.download = `${nombreArchivo}.pdf`
+    a.click()
+    window.URL.revokeObjectURL(url)
+  } catch (err) {
+    error.value = extractApiErrorMessage(err, "Error al generar el PDF de la obra")
+    console.error(err)
   }
 }
 
@@ -200,6 +241,19 @@ const cambiarEstado = async (id, nuevoEstado) => {
     console.error(err)
   }
 }
+
+// Reaccionar a cambios en los filtros de detalle
+watch([filtroDetalleMes, filtroDetalleAnio], async () => {
+  if (vistaActual.value === 'detalle' && obraSeleccionada.value) {
+    loading.value = true
+    try {
+      const res = await api.getHoras(filtroDetalleMes.value, filtroDetalleAnio.value, undefined, obraSeleccionada.value.id)
+      horas.value = res.data || []
+    } finally {
+      loading.value = false
+    }
+  }
+})
 
 // Calculado: total de horas de la obra
 const totalHorasObra = computed(() => {
@@ -248,10 +302,23 @@ const obrasActivas = computed(() => obrasFiltradas.value.filter((o) => o.estado 
 const obrasFinalizadas = computed(() => obrasFiltradas.value.filter((o) => o.estado === "finalizada"))
 const obrasConInicio = computed(() => obrasFiltradas.value.filter((o) => o.fecha_inicio))
 
+const getEtiquetaCliente = (cliente) => {
+  if (!cliente) return "-"
+  const empresa = String(cliente.empresa || "").trim()
+  const razonSocial = String(cliente.razon_social || "").trim()
+  return empresa || razonSocial || "-"
+}
+
+const clientesOrdenados = computed(() => {
+  return [...clientes.value].sort((a, b) =>
+    getEtiquetaCliente(a).localeCompare(getEtiquetaCliente(b), "es", { sensitivity: "base" })
+  )
+})
+
 // Obtener nombre del cliente
 const getNombreCliente = (clienteId) => {
   const cliente = clientes.value.find((c) => c.id === clienteId)
-  return cliente ? (cliente.empresa || cliente.razon_social) : "-"
+  return getEtiquetaCliente(cliente)
 }
 
 // Obtener nombre del grupo
@@ -341,8 +408,8 @@ onUnmounted(() => {
             <span>Filtrar por cliente</span>
             <select v-model="filtroCliente" class="filtro-cliente">
               <option value="">Todos los clientes</option>
-              <option v-for="c in clientes" :key="c.id" :value="c.id">
-                {{ c.empresa || c.razon_social }}
+              <option v-for="c in clientesOrdenados" :key="c.id" :value="c.id">
+                {{ getEtiquetaCliente(c) }}
               </option>
             </select>
           </label>
@@ -441,11 +508,17 @@ onUnmounted(() => {
       <!-- VISTA: DETALLE DE OBRA -->
       <div v-if="vistaActual === 'detalle' && obraSeleccionada" class="detalle-container">
         <!-- Encabezado con botón volver -->
+        <!-- Mensaje de error para el detalle -->
+        <div v-if="error" class="error-alert" style="margin-bottom: 1rem;">{{ error }}</div>
+
         <div class="detalle-header">
           <button class="btn-volver" @click="volverALista">
             ← Volver a la lista
           </button>
           <div class="detalle-acciones">
+            <button class="btn-pdf" @click="descargarPdfObra(obraSeleccionada)">
+              📄 Generar Resumen
+            </button>
             <button class="btn-edit" @click="openForm(obraSeleccionada)">
               ✏️ Editar
             </button>
@@ -467,6 +540,24 @@ onUnmounted(() => {
               🗑️ Eliminar
             </button>
           </div>
+
+                    <!-- Colocá esto dentro del detalle de la obra -->
+          <div class="filtros-reporte" style="display: flex; gap: 10px; align-items: center; margin-bottom: 15px;">
+            <div class="form-group">
+              <label>Mes de Reporte:</label>
+              <select v-model="filtroDetalleMes" class="form-control">
+                <option v-for="(mesNombre, index) in meses" :key="index" :value="index + 1">
+                  {{ mesNombre }}
+                </option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label>Año:</label>
+              <input type="number" v-model="filtroDetalleAnio" class="form-control" style="width: 80px;" />
+            </div>
+          </div>
+
         </div>
 
         <!-- Información general -->
@@ -480,6 +571,10 @@ onUnmounted(() => {
             <div class="dato-item">
               <span class="dato-label">Grupo:</span>
               <span class="dato-valor">{{ getNombreGrupo(obraSeleccionada.grupo_id) }}</span>
+            </div>
+            <div class="dato-item">
+              <span class="dato-label">Horas presupuestadas:</span>
+              <span class="dato-valor">{{ obraSeleccionada.horas_presupuestadas }} hs</span>
             </div>
             <div class="dato-item">
               <span class="dato-label">Estado:</span>
@@ -613,8 +708,8 @@ onUnmounted(() => {
               <span>Cliente *</span>
               <select v-model="form.cliente_id" required>
                 <option value="">Seleccionar cliente...</option>
-                <option v-for="cliente in clientes" :key="cliente.id" :value="cliente.id">
-                  {{ cliente.empresa || cliente.razon_social }}
+                <option v-for="cliente in clientesOrdenados" :key="cliente.id" :value="cliente.id">
+                  {{ getEtiquetaCliente(cliente) }}
                 </option>
               </select>
             </label>
@@ -642,6 +737,11 @@ onUnmounted(() => {
               <input v-model="form.fecha_inicio" type="date" />
             </label>
             </div>
+
+            <label class="form-group">
+              <span>Horas presupuestadas</span>
+              <input v-model="form.horas_presupuestadas" type="number" step="0.01" @wheel.prevent/>
+            </label>
 
             <div class="modal-actions">
               <button type="submit" class="btn-primary" :disabled="loading">
@@ -1057,6 +1157,21 @@ td {
 .btn-volver:hover {
   background-color: rgba(148, 163, 184, 0.3);
 }
+
+.btn-pdf {
+  padding: 0.75rem 1.25rem;
+  background-color: rgba(139, 92, 246, 0.2); /* Púrpura suave */
+  color: #a78bfa;
+  border: none;
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-pdf:hover {
+  background-color: rgba(139, 92, 246, 0.3);
+}
+
 
 .detalle-acciones {
   display: flex;
@@ -1478,4 +1593,3 @@ td {
   }
 }
 </style>
-

@@ -4,7 +4,7 @@ import { getPeriodo, syncLiquidacionesPeriodo } from "./liquidaciones.js"
 
 const router = express.Router()
 
-const withTimeout = async (promise, ms = 5000) => {
+const withTimeout = async (promise, ms = 1000) => {
   return Promise.race([
     promise,
     new Promise((resolve) => setTimeout(() => resolve(null), ms)),
@@ -25,7 +25,7 @@ router.get("/resumen", async (req, res) => {
     const anio = Number(req.query.anio || now.getFullYear())
     const { inicioISO, finISO } = getPeriodo(mes, anio)
 
-    await withTimeout(syncLiquidacionesPeriodo(mes, anio), 5000)
+    await withTimeout(syncLiquidacionesPeriodo(mes, anio), 1000)
 
     const finExclusive = new Date(finISO)
     finExclusive.setDate(finExclusive.getDate() + 1)
@@ -66,7 +66,13 @@ router.get("/resumen", async (req, res) => {
       ),
       db.query(
         `
-          SELECT id, fecha, tipo, detalle, COALESCE(monto_total, 0) AS monto_total
+          SELECT 
+            id, 
+            fecha, 
+            tipo, 
+            detalle, 
+            COALESCE(monto_total, 0) AS monto_total,
+            caja_codigo
           FROM movimientos_caja
           WHERE fecha >= $1 AND fecha < $2
           ORDER BY fecha DESC, id DESC
@@ -94,7 +100,9 @@ router.get("/resumen", async (req, res) => {
     const cajaMovimientos = (cajaRes.rows || []).map((mov) => ({
       ...mov,
       monto_total: toNumber(mov.monto_total),
+      caja_codigo: mov.caja_codigo,
     }))
+
 
     const cajasMes = CAJAS_DISPONIBLES.reduce((acc, codigo) => {
       acc[codigo] = {
@@ -108,8 +116,7 @@ router.get("/resumen", async (req, res) => {
     cajaMovimientos.forEach((mov) => {
       const codigo = CAJAS_DISPONIBLES.includes(String(mov.caja_codigo || "").toLowerCase())
         ? String(mov.caja_codigo || "").toLowerCase()
-        : "tesla"
-
+        : "tesla, teslita, juani"
       if (mov.tipo === "ingreso") {
         cajasMes[codigo].ingresos += toNumber(mov.monto_total)
       } else if (mov.tipo === "egreso") {

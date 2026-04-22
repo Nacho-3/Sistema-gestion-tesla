@@ -134,6 +134,13 @@ export default {
     return api.delete(`/obras/${id}`)
   },
 
+  getObraPdf(id, mes, anio) {
+    const params = new URLSearchParams()
+    if (mes) params.append("mes", mes)
+    if (anio) params.append("anio", anio)
+    return api.get(`/obras/${id}/pdf?${params.toString()}`, { responseType: "blob" })
+  },
+
   // Grupos
   getGrupos() {
     return api.get("/grupos")
@@ -279,12 +286,13 @@ export default {
   },
 
   // Caja
-  getMovimientosCaja(fecha_inicio, fecha_fin, tipo, caja_codigo) {
+  getMovimientosCaja(fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id) {
     const params = new URLSearchParams()
     if (fecha_inicio) params.append("fecha_inicio", fecha_inicio)
     if (fecha_fin) params.append("fecha_fin", fecha_fin)
     if (tipo) params.append("tipo", tipo)
     if (caja_codigo) params.append("caja_codigo", caja_codigo)
+    if (caja_semanal_id) params.append("caja_semanal_id", caja_semanal_id)
     return api.get(`/caja?${params.toString()}`)
   },
 
@@ -315,6 +323,23 @@ export default {
 
   deleteMovimientoCaja(id) {
     return api.delete(`/caja/${id}`)
+  },
+
+  getSemanasCaja(caja_codigo) {
+    const params = new URLSearchParams()
+    if (caja_codigo) params.append("caja_codigo", caja_codigo)
+    return api.get(`/caja/semanas?${params.toString()}`)
+  },
+
+  getSemanaCajaActual(caja_codigo, fecha) {
+    const params = new URLSearchParams()
+    if (caja_codigo) params.append("caja_codigo", caja_codigo)
+    if (fecha) params.append("fecha", fecha)
+    return api.get(`/caja/semana-actual?${params.toString()}`)
+  },
+
+  cerrarSemanaCaja(id) {
+    return api.post(`/caja/semanas/${id}/cerrar`)
   },
 
   // Presupuestos

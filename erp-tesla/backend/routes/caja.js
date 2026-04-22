@@ -8,8 +8,9 @@ import { drawPremiumHeader, setupPremiumFooter, drawPremiumSectionTitle, PDF_COL
 
 const router = express.Router()
 const MEDIOS_PAGO = ["efectivo", "transferencia", "cheque", "echeq", "retencion"]
+const MEDIOS_CHEQUE = ["cheque", "echeq"]
 const CAJAS_DISPONIBLES = ["tesla", "teslita", "juani"]
-const CATEGORIAS_CAJA = ["mano_obra", "materiales"]
+const CATEGORIAS_CAJA = ["mano_obra", "materiales", "varios"]
 const LABEL_CAJA = {
   tesla: "Caja Tesla",
   teslita: "Caja Teslita",
@@ -25,12 +26,233 @@ const LABEL_MEDIO = {
 const LABEL_CATEGORIA = {
   mano_obra: "Mano de obra",
   materiales: "Materiales",
+  varios: "Varios", 
 }
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const LOGO_PATH = path.join(__dirname, "..", "assets", "logo_presupuesto.png")
 
 let detalleColumnCache = null
 let detallesSchemaCache = null
+
+const roundMoney = (valor) => Math.round((Number(valor) || 0) * 100) / 100
+
+const normalizarFechaISO = (valor) => {
+  if (!valor) return null
+
+  if (valor instanceof Date && !Number.isNaN(valor.getTime())) {
+    const y = valor.getFullYear()
+    const m = String(valor.getMonth() + 1).padStart(2, "0")
+    const d = String(valor.getDate()).padStart(2, "0")
+    return `${y}-${m}-${d}`
+  }
+
+  const texto = String(valor).split("T")[0]
+  if (/^\d{4}-\d{2}-\d{2}$/.test(texto)) {
+    return texto
+  }
+
+  const fecha = new Date(valor)
+  if (Number.isNaN(fecha.getTime())) return null
+
+  const y = fecha.getFullYear()
+  const m = String(fecha.getMonth() + 1).padStart(2, "0")
+  const d = String(fecha.getDate()).padStart(2, "0")
+  return `${y}-${m}-${d}`
+}
+
+const normalizarCajaSemanalId = (valor) => {
+  if (valor === undefined || valor === null || valor === "") return undefined
+  const texto = String(valor).trim()
+  const match = texto.match(/^id-(\d+)$/i)
+  const numero = Number(match ? match[1] : texto)
+  return Number.isInteger(numero) && numero > 0 ? numero : undefined
+}
+
+const getRangoSemana = (fechaValor) => {
+  const fechaIso = normalizarFechaISO(fechaValor)
+  if (!fechaIso) throw new Error("Fecha inválida para calcular semana de caja")
+
+  const [anio, mes, dia] = fechaIso.split("-").map(Number)
+  const fecha = new Date(anio, mes - 1, dia)
+  const diaSemana = fecha.getDay()
+  // Lunes = 1, Domingo = 0
+  const offsetLunes = diaSemana === 0 ? -6 : 1 - diaSemana
+  const inicio = new Date(fecha)
+  inicio.setDate(fecha.getDate() + offsetLunes)
+  inicio.setHours(0, 0, 0, 0)
+  const fin = new Date(inicio)
+  fin.setDate(inicio.getDate() + 4) // Solo lunes a viernes
+  fin.setHours(0, 0, 0, 0)
+
+  const toIso = (value) => {
+    const y = value.getFullYear()
+    const m = String(value.getMonth() + 1).padStart(2, "0")
+    const d = String(value.getDate()).padStart(2, "0")
+    return `${y}-${m}-${d}`
+  }
+
+  return {
+    fecha_inicio: toIso(inicio),
+    fecha_fin: toIso(fin),
+  }
+}
+
+async function obtenerCajaSemanalAnterior(caja_codigo, fecha_inicio) {
+  const { data, error } = await db
+    .from("cajas_semanales")
+    .select("*")
+    .eq("caja_codigo", caja_codigo)
+    .lt("fecha_fin", fecha_inicio)
+    .order("fecha_fin", { ascending: false })
+    .limit(1)
+
+  if (error) throw error
+  return data?.[0] || null
+}
+
+async function asegurarCajaSemanal(caja_codigo, fecha) {
+  const rango = getRangoSemana(fecha)
+  const codigo = String(caja_codigo || "").toLowerCase()
+
+  const { data: existentes, error: errorExistente } = await db
+    .from("cajas_semanales")
+    .select("*")
+    .eq("caja_codigo", codigo)
+    .eq("fecha_inicio", rango.fecha_inicio)
+    .eq("fecha_fin", rango.fecha_fin)
+
+  if (errorExistente) throw errorExistente
+
+  const existente = Array.isArray(existentes) ? existentes[0] : null
+  if (existente) return existente
+
+  const { data: legacyMismaSemana, error: errorLegacy } = await db
+    .from("cajas_semanales")
+    .select("*")
+    .eq("caja_codigo", codigo)
+    .eq("fecha_inicio", rango.fecha_inicio)
+    .order("fecha_fin", { ascending: true })
+
+  if (errorLegacy) throw errorLegacy
+
+  const legacy = Array.isArray(legacyMismaSemana) && legacyMismaSemana.length > 0 ? legacyMismaSemana[0] : null
+  if (legacy) {
+    const fechaFinLegacy = normalizarFechaISO(legacy.fecha_fin)
+    if (fechaFinLegacy && fechaFinLegacy !== rango.fecha_fin) {
+      const { data: actualizada, error: errorActualizada } = await db
+        .from("cajas_semanales")
+        .update({ fecha_fin: rango.fecha_fin })
+        .eq("id", legacy.id)
+        .select()
+        .single()
+
+      if (errorActualizada) throw errorActualizada
+      return actualizada
+    }
+
+    return legacy
+  }
+
+  const saldoPrevio = await obtenerSaldoAcumuladoPorMedio(codigo, rango.fecha_inicio)
+  const saldoInicial = roundMoney(saldoPrevio.total || 0)
+
+  const { data: creada, error: errorCreada } = await db
+    .from("cajas_semanales")
+    .insert([{
+      caja_codigo: codigo,
+      fecha_inicio: rango.fecha_inicio,
+      fecha_fin: rango.fecha_fin,
+      saldo_inicial: saldoInicial,
+      total_ingresos: 0,
+      total_egresos: 0,
+      saldo_final: saldoInicial,
+      estado: "abierta",
+    }])
+    .select()
+    .single()
+
+  if (errorCreada) throw errorCreada
+  return creada
+}
+
+async function recalcularCajaSemanal(cajaSemanalId) {
+  if (!cajaSemanalId) return null
+
+  const { data: semana, error: errorSemana } = await db
+    .from("cajas_semanales")
+    .select("*")
+    .eq("id", cajaSemanalId)
+    .single()
+
+  if (errorSemana || !semana) {
+    if (errorSemana) throw errorSemana
+    return null
+  }
+
+  const { data: movimientos, error: errorMovimientos } = await db
+    .from("movimientos_caja")
+    .select(`
+      monto_total,
+      tipo,
+      detalles_medio_pago(*)
+    `)
+    .eq("caja_semanal_id", cajaSemanalId)
+
+  if (errorMovimientos) throw errorMovimientos
+
+  const movimientosNormalizados = (movimientos || []).map(normalizarMovimiento)
+
+  const totalIngresos = roundMoney((movimientosNormalizados || [])
+    .filter((mov) => String(mov.tipo) === "ingreso")
+    .reduce((sum, mov) => sum + Number(mov.monto_total || 0), 0))
+
+  const totalEgresos = roundMoney((movimientosNormalizados || [])
+    .filter((mov) => String(mov.tipo) === "egreso")
+    .reduce((sum, mov) => sum + Number(mov.monto_total || 0), 0))
+
+  const saldoInicialPorMedio = await obtenerSaldoAcumuladoPorMedio(semana.caja_codigo, semana.fecha_inicio)
+  const saldoPorMedio = {
+    efectivo: Number(saldoInicialPorMedio.efectivo || 0),
+    cheques: Number(saldoInicialPorMedio.cheques || 0),
+  }
+  movimientosNormalizados.forEach((movimiento) => {
+    actualizarSaldoPorMedio(saldoPorMedio, movimiento)
+  })
+  const saldoFinal = roundMoney(Number(saldoPorMedio.efectivo || 0) + Number(saldoPorMedio.cheques || 0))
+
+  const { data: actualizada, error: errorActualizacion } = await db
+    .from("cajas_semanales")
+    .update({
+      saldo_inicial: roundMoney(Number(saldoInicialPorMedio.total || 0)),
+      total_ingresos: totalIngresos,
+      total_egresos: totalEgresos,
+      saldo_final: saldoFinal,
+    })
+    .eq("id", cajaSemanalId)
+    .select()
+    .single()
+
+  if (errorActualizacion) throw errorActualizacion
+  return actualizada
+}
+
+async function asignarCajaSemanalAMovimiento({ movimientoId, fecha, caja_codigo }) {
+  const semana = await asegurarCajaSemanal(caja_codigo, fecha)
+
+  if (String(semana.estado || "").toLowerCase() === "cerrada") {
+    throw new Error("La semana de caja correspondiente ya está cerrada")
+  }
+
+  const { error } = await db
+    .from("movimientos_caja")
+    .update({ caja_semanal_id: semana.id })
+    .eq("id", movimientoId)
+
+  if (error) throw error
+
+  await recalcularCajaSemanal(semana.id)
+  return semana
+}
 
 const formatoMoneda = (valor) => {
   const numero = Number(valor) || 0
@@ -153,6 +375,9 @@ function normalizarDetalles(detalles) {
         ...item,
         medio_pago: String(item.medio_pago).toLowerCase(),
         monto: parseFloat(item.monto || 0),
+        identificador: String(item.identificador || "").trim() || null,
+        banco: String(item.banco || "").trim() || null,
+        fecha_cobro: item.fecha_cobro || null,
       }))
   }
 
@@ -162,6 +387,206 @@ function normalizarDetalles(detalles) {
       monto: parseFloat(primerDetalle[medio] || 0),
     }))
     .filter((item) => item.monto > 0)
+}
+
+// Solo efectivo y cheques comunes afectan el saldo inicial/final
+function actualizarSaldoPorMedio(acumulador, movimiento) {
+  const signo = String(movimiento?.tipo || "").toLowerCase() === "egreso" ? -1 : 1
+  let montoAplicado = 0
+  const detalles = Array.isArray(movimiento?.detalles_medio_pago) ? movimiento.detalles_medio_pago : []
+
+  detalles.forEach((detalle) => {
+    const medio = String(detalle?.medio_pago || "").toLowerCase()
+    const monto = Number(detalle?.monto || 0)
+    if (!(monto > 0)) return
+
+    if (medio === "efectivo") {
+      acumulador.efectivo += signo * monto
+      montoAplicado += monto
+    }
+    // Solo cheques comunes (NO echeq, NO transferencia, NO retencion)
+    if (medio === "cheque") {
+      acumulador.cheques += signo * monto
+      montoAplicado += monto
+    }
+    // NO sumar echeq, transferencia, retencion, etc.
+  })
+
+  // Compatibilidad con movimientos historicos sin desglose guardado.
+  if (detalles.length === 0 && !(montoAplicado > 0)) {
+    acumulador.efectivo += signo * Number(movimiento?.monto_total || 0)
+  }
+}
+
+function deduplicarSemanasPorRango(semanas = []) {
+  const mapa = new Map()
+
+  semanas.forEach((semana) => {
+    const inicio = normalizarFechaISO(semana?.fecha_inicio)
+    const fin = normalizarFechaISO(semana?.fecha_fin)
+    if (!inicio || !fin) return
+
+    const clave = `${inicio}-${fin}`
+    const existente = mapa.get(clave)
+    const estadoSemana = String(semana?.estado || "").toLowerCase()
+    const estadoExistente = String(existente?.estado || "").toLowerCase()
+
+    if (!existente || (estadoExistente !== "abierta" && estadoSemana === "abierta")) {
+      mapa.set(clave, semana)
+    }
+  })
+
+  return Array.from(mapa.values()).sort((a, b) => new Date(b.fecha_inicio) - new Date(a.fecha_inicio))
+}
+
+async function obtenerMovimientosCajaConDetalles(cajaCodigo) {
+  await getDetallesSchema()
+
+  const { data, error } = await db
+    .from("movimientos_caja")
+    .select(`
+      id,
+      fecha,
+      tipo,
+      monto_total,
+      caja_semanal_id,
+      detalles_medio_pago(*)
+    `)
+    .eq("caja_codigo", cajaCodigo)
+    .order("fecha", { ascending: true })
+
+  if (error) throw error
+  return (data || []).map(normalizarMovimiento)
+}
+
+async function obtenerSaldoAcumuladoPorMedio(cajaCodigo, fechaCorteExclusiva) {
+  if (!cajaCodigo) {
+    return { efectivo: 0, cheques: 0, total: 0 }
+  }
+
+  const movimientos = await obtenerMovimientosCajaConDetalles(cajaCodigo)
+  const acumulador = { efectivo: 0, cheques: 0 }
+
+  movimientos.forEach((movimiento) => {
+    const fechaMovimiento = normalizarFechaISO(movimiento.fecha)
+    if (!fechaMovimiento) return
+    if (fechaCorteExclusiva && fechaMovimiento >= fechaCorteExclusiva) return
+    actualizarSaldoPorMedio(acumulador, movimiento)
+  })
+
+  return {
+    efectivo: roundMoney(acumulador.efectivo),
+    cheques: roundMoney(acumulador.cheques),
+    total: roundMoney(acumulador.efectivo + acumulador.cheques),
+  }
+}
+
+async function enriquecerSemanasConMedios(cajaCodigo, semanas = []) {
+  if (!cajaCodigo || !Array.isArray(semanas) || semanas.length === 0) return semanas || []
+
+  const movimientos = await obtenerMovimientosCajaConDetalles(cajaCodigo)
+  const acumulador = { efectivo: 0, cheques: 0 }
+
+  const enriquecidas = [...semanas]
+    .map((semana) => ({ ...semana }))
+    .sort((a, b) => new Date(a.fecha_inicio) - new Date(b.fecha_inicio))
+    .map((semana) => {
+      const semanaId = normalizarCajaSemanalId(semana.id)
+      const inicio = normalizarFechaISO(semana.fecha_inicio)
+      const fin = normalizarFechaISO(semana.fecha_fin)
+
+      const movimientosSemana = movimientos.filter((movimiento) => {
+        const movimientoSemanaId = normalizarCajaSemanalId(movimiento.caja_semanal_id)
+        if (semanaId && movimientoSemanaId) {
+          return semanaId === movimientoSemanaId
+        }
+
+        const fechaMovimiento = normalizarFechaISO(movimiento.fecha)
+        if (!fechaMovimiento) return false
+        return (!inicio || fechaMovimiento >= inicio) && (!fin || fechaMovimiento <= fin)
+      })
+
+      const semanaEnriquecida = {
+        ...semana,
+        saldo_inicial: roundMoney(acumulador.efectivo + acumulador.cheques),
+        saldo_inicial_efectivo: roundMoney(acumulador.efectivo),
+        saldo_inicial_cheques: roundMoney(acumulador.cheques),
+      }
+
+      movimientosSemana.forEach((movimiento) => {
+        actualizarSaldoPorMedio(acumulador, movimiento)
+      })
+
+      semanaEnriquecida.saldo_final = roundMoney(acumulador.efectivo + acumulador.cheques)
+      semanaEnriquecida.saldo_final_efectivo = roundMoney(acumulador.efectivo)
+      semanaEnriquecida.saldo_final_cheques = roundMoney(acumulador.cheques)
+
+      return semanaEnriquecida
+    })
+
+  return enriquecidas.sort((a, b) => new Date(b.fecha_inicio) - new Date(a.fecha_inicio))
+}
+
+const MEDIOS_SIMPLES = ["efectivo", "transferencia", "retencion"]
+const MEDIOS_MULTIPLES = ["cheque", "echeq"]
+
+function construirDetallesPago({ desglose = {}, detalles_medio_pago = [] } = {}) {
+  const detalles = []
+
+  MEDIOS_SIMPLES.forEach((medio) => {
+    const monto = parseFloat(desglose?.[medio] || 0)
+    if (monto > 0) {
+      detalles.push({
+        medio_pago: medio,
+        monto,
+        identificador: null,
+        banco: null,
+        fecha_cobro: null,
+      })
+    }
+  })
+
+  if (Array.isArray(detalles_medio_pago)) {
+    detalles_medio_pago.forEach((item) => {
+      const medio = String(item?.medio_pago || "").toLowerCase().trim()
+      const monto = parseFloat(item?.monto || 0)
+      if (!MEDIOS_MULTIPLES.includes(medio) || !(monto > 0)) return
+
+      detalles.push({
+        medio_pago: medio,
+        monto,
+        identificador: String(item?.identificador || "").trim() || null,
+        banco: String(item?.banco || "").trim() || null,
+        fecha_cobro: item?.fecha_cobro || null,
+      })
+    })
+  }
+
+  return detalles
+}
+
+function validarDetallesPago(detalles = []) {
+  if (!Array.isArray(detalles) || detalles.length === 0) {
+    throw new Error("Debe incluir al menos un medio de pago")
+  }
+
+  for (const item of detalles) {
+    const medio = String(item?.medio_pago || "").toLowerCase().trim()
+    const monto = parseFloat(item?.monto || 0)
+    if (!MEDIOS_PAGO.includes(medio)) {
+      throw new Error(`Medio de pago inválido: ${medio}`)
+    }
+    if (!(monto > 0)) {
+      throw new Error("Todos los medios de pago deben tener un monto mayor a 0")
+    }
+    if (MEDIOS_MULTIPLES.includes(medio) && !String(item?.identificador || "").trim()) {
+      throw new Error(`Cada ${medio === "echeq" ? "eCheq" : "cheque"} debe tener un identificador`)
+    }
+  }
+}
+
+function totalDetallesPago(detalles = []) {
+  return detalles.reduce((sum, item) => sum + parseFloat(item?.monto || 0), 0)
 }
 
 async function validarPresupuestoCliente(presupuestoId, clienteId) {
@@ -184,7 +609,7 @@ async function validarPresupuestoCliente(presupuestoId, clienteId) {
   return presupuesto
 }
 
-async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_codigo } = {}) {
+async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id } = {}) {
   await getDetallesSchema()
 
   let query = db.from("movimientos_caja").select(`
@@ -208,6 +633,10 @@ async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_
 
   if (caja_codigo) {
     query = query.eq("caja_codigo", caja_codigo)
+  }
+
+  if (caja_semanal_id) {
+    query = query.eq("caja_semanal_id", caja_semanal_id)
   }
 
   const { data, error } = await query.order("fecha", { ascending: false })
@@ -249,23 +678,105 @@ async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_
 // Listar movimientos de caja con filtros
 router.get("/", async (req, res) => {
   try {
-    const { fecha_inicio, fecha_fin, tipo, caja_codigo } = req.query
+    const { fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id } = req.query
 
     if (caja_codigo && !CAJAS_DISPONIBLES.includes(String(caja_codigo).toLowerCase())) {
       return res.status(400).json({ error: "Caja inválida" })
     }
+
+    const cajaSemanalIdNormalizada = normalizarCajaSemanalId(caja_semanal_id)
 
     const { movimientos, totales } = await obtenerMovimientosYTotales({
       fecha_inicio,
       fecha_fin,
       tipo,
       caja_codigo: caja_codigo ? String(caja_codigo).toLowerCase() : undefined,
+      caja_semanal_id: cajaSemanalIdNormalizada,
     })
 
     res.json({
       movimientos,
       totales
     })
+  } catch (err) {
+    res.status(400).json({ error: err.message })
+  }
+})
+
+router.get("/semanas", async (req, res) => {
+  try {
+    const cajaCodigoNormalizada = String(req.query.caja_codigo || "tesla").toLowerCase()
+    if (!CAJAS_DISPONIBLES.includes(cajaCodigoNormalizada)) {
+      return res.status(400).json({ error: "Caja inválida" })
+    }
+
+    const { data, error } = await db
+      .from("cajas_semanales")
+      .select("*")
+      .eq("caja_codigo", cajaCodigoNormalizada)
+      .order("fecha_inicio", { ascending: false })
+
+    if (error) throw error
+
+    let semanasEnriquecidas = await enriquecerSemanasConMedios(cajaCodigoNormalizada, data || [])
+    semanasEnriquecidas = deduplicarSemanasPorRango(semanasEnriquecidas)
+    res.json(semanasEnriquecidas)
+  } catch (err) {
+    res.status(400).json({ error: err.message })
+  }
+})
+
+router.get("/semana-actual", async (req, res) => {
+  try {
+    const cajaCodigoNormalizada = String(req.query.caja_codigo || "tesla").toLowerCase()
+    const fechaBase = req.query.fecha || new Date().toISOString().slice(0, 10)
+
+    if (!CAJAS_DISPONIBLES.includes(cajaCodigoNormalizada)) {
+      return res.status(400).json({ error: "Caja inválida" })
+    }
+
+    const semana = await asegurarCajaSemanal(cajaCodigoNormalizada, fechaBase)
+    const semanaActualizada = await recalcularCajaSemanal(semana.id)
+
+    const { data: semanasData, error: semanasError } = await db
+      .from("cajas_semanales")
+      .select("*")
+      .eq("caja_codigo", cajaCodigoNormalizada)
+      .order("fecha_inicio", { ascending: false })
+
+    if (semanasError) throw semanasError
+
+    const semanasEnriquecidas = deduplicarSemanasPorRango(await enriquecerSemanasConMedios(cajaCodigoNormalizada, semanasData || []))
+    const semanaObjetivo = semanasEnriquecidas.find((item) => {
+      return normalizarFechaISO(item.fecha_inicio) === normalizarFechaISO((semanaActualizada || semana)?.fecha_inicio)
+        && normalizarFechaISO(item.fecha_fin) === normalizarFechaISO((semanaActualizada || semana)?.fecha_fin)
+    })
+
+    res.json(semanaObjetivo || semanaActualizada || semana)
+  } catch (err) {
+    res.status(400).json({ error: err.message })
+  }
+})
+
+router.post("/semanas/:id/cerrar", async (req, res) => {
+  try {
+    const { id } = req.params
+
+    const semana = await recalcularCajaSemanal(id)
+    if (!semana) {
+      return res.status(404).json({ error: "Semana de caja no encontrada" })
+    }
+
+    const { data, error } = await db
+      .from("cajas_semanales")
+      .update({ estado: "cerrada" })
+      .eq("id", id)
+      .select()
+      .single()
+
+    if (error) throw error
+    getIo()?.emit('caja:changed')
+    res.json(data)
   } catch (err) {
     res.status(400).json({ error: err.message })
   }
@@ -289,6 +800,54 @@ router.get("/resumen/pdf", async (req, res) => {
 
     const balance = (totales.totalIngresos || 0) - (totales.totalEgresos || 0)
     const cantidadMovimientos = movimientos.length
+    const esResumenSemanal = Boolean(fecha_inicio && fecha_fin)
+    const etiquetaPeriodo = esResumenSemanal
+      ? `${formatoFecha(fecha_inicio)} al ${formatoFecha(fecha_fin)}`
+      : "Período completo"
+
+    let cajaSemanalResumen = null
+    if (esResumenSemanal && cajaCodigoNormalizada) {
+      const { data: semanasCajaData, error: errorSemanaCaja } = await db
+        .from("cajas_semanales")
+        .select("*")
+        .eq("caja_codigo", cajaCodigoNormalizada)
+        .order("fecha_inicio", { ascending: false })
+
+      if (errorSemanaCaja) throw errorSemanaCaja
+
+      const semanaCaja = (semanasCajaData || []).find((semana) => {
+        return normalizarFechaISO(semana.fecha_inicio) === normalizarFechaISO(fecha_inicio)
+          && normalizarFechaISO(semana.fecha_fin) === normalizarFechaISO(fecha_fin)
+      })
+
+      const saldoPrevio = await obtenerSaldoAcumuladoPorMedio(cajaCodigoNormalizada, fecha_inicio)
+      const saldoFinalDesglosado = {
+        efectivo: Number(saldoPrevio.efectivo || 0),
+        cheques: Number(saldoPrevio.cheques || 0),
+      }
+
+      movimientos.forEach((movimiento) => {
+        actualizarSaldoPorMedio(saldoFinalDesglosado, movimiento)
+      })
+
+      const saldoInicialEfectivo = roundMoney(saldoPrevio.efectivo)
+      const saldoInicialCheques = roundMoney(saldoPrevio.cheques)
+      const saldoFinalEfectivo = roundMoney(saldoFinalDesglosado.efectivo)
+      const saldoFinalCheques = roundMoney(saldoFinalDesglosado.cheques)
+
+      cajaSemanalResumen = {
+        fecha_inicio,
+        fecha_fin,
+        saldo_inicial: roundMoney(saldoInicialEfectivo + saldoInicialCheques),
+        saldo_inicial_efectivo: saldoInicialEfectivo,
+        saldo_inicial_cheques: saldoInicialCheques,
+        total_ingresos: Number(semanaCaja?.total_ingresos || totales.totalIngresos || 0),
+        total_egresos: Number(semanaCaja?.total_egresos || totales.totalEgresos || 0),
+        saldo_final: roundMoney(saldoFinalEfectivo + saldoFinalCheques),
+        saldo_final_efectivo: saldoFinalEfectivo,
+        saldo_final_cheques: saldoFinalCheques,
+      }
+    }
 
     const doc = new PDFDocument({ size: "A4", margin: 45 })
     const chunks = []
@@ -320,13 +879,72 @@ router.get("/resumen/pdf", async (req, res) => {
     
     const headerBottom = drawPremiumHeader(doc, {
       title: "TESLA MONTAJES ELECTRICOS",
-      subtitle: cajaCodigoNormalizada ? `Resumen ${LABEL_CAJA[cajaCodigoNormalizada]}` : "Resumen completo de caja",
+      subtitle: esResumenSemanal
+        ? `${cajaCodigoNormalizada ? `Resumen semanal ${LABEL_CAJA[cajaCodigoNormalizada]}` : "Resumen semanal de caja"}`
+        : (cajaCodigoNormalizada ? `Resumen ${LABEL_CAJA[cajaCodigoNormalizada]}` : "Resumen completo de caja"),
       accentText: filtroPeriodo || "Sin filtros",
       logoPath: LOGO_PATH,
     })  
 
     doc.fillColor(PDF_COLORS.ink)
     doc.y = headerBottom + 15
+
+    if (esResumenSemanal) {
+      const periodoY = doc.y
+      doc.roundedRect(45, periodoY, pageWidth - 90, 42, 6).fill("#dbeafe")
+      doc.fillColor("#1e3a8a").font("Helvetica-Bold").fontSize(9)
+      doc.text("SEMANA IMPRESA", 58, periodoY + 10, { width: 140 })
+      doc.font("Helvetica").fontSize(11)
+      doc.text(etiquetaPeriodo, 180, periodoY + 9, { width: pageWidth - 240, align: "right" })
+      doc.fillColor(PDF_COLORS.ink)
+      doc.y = periodoY + 54
+
+      const semanalY = doc.y
+      const semanalHeight = 122
+      const cardWidth = (pageWidth - 110) / 4
+      doc.roundedRect(45, semanalY, pageWidth - 90, semanalHeight, 8).fill(PDF_COLORS.card)
+      doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(12)
+      doc.text("Caja semanal", 58, semanalY + 10, { width: 180 })
+      doc.font("Helvetica-Bold").fontSize(11)
+      doc.text(etiquetaPeriodo, 58, semanalY + 28, { width: 220 })
+      doc.fillColor(PDF_COLORS.slate).font("Helvetica").fontSize(8.8)
+      doc.text("La semana nueva arranca con el saldo final de la anterior y los movimientos quedan encapsulados en su propio período.", 58, semanalY + 46, { width: pageWidth - 116 })
+
+      const cardsY = semanalY + 82
+      const labels = [
+        { titulo: "Saldo inicial", valor: cajaSemanalResumen?.saldo_inicial || 0 },
+        { titulo: "Ingresos semana", valor: cajaSemanalResumen?.total_ingresos || 0 },
+        { titulo: "Egresos semana", valor: cajaSemanalResumen?.total_egresos || 0 },
+        { titulo: "Saldo final", valor: cajaSemanalResumen?.saldo_final || 0 },
+      ]
+
+      labels.forEach((item, index) => {
+        const x = 58 + index * (cardWidth + 4)
+        const mostrarDetalleMedios = index === 0 || index === 3
+        const cardHeight = mostrarDetalleMedios ? 48 : 28
+        doc.roundedRect(x, cardsY, cardWidth, cardHeight, 6).fill(index === 3 ? "#dbeafe" : PDF_COLORS.lightAlt)
+        doc.fillColor("#334155").font("Helvetica-Bold").fontSize(7.4)
+        doc.text(item.titulo.toUpperCase(), x + 8, cardsY + 5, { width: cardWidth - 16, lineBreak: false })
+        doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(9.2)
+        doc.text(formatoMoneda(item.valor), x + 8, cardsY + 15, { width: cardWidth - 16, align: "left", lineBreak: false })
+
+        if (mostrarDetalleMedios) {
+          const efectivoValor = index === 0
+            ? cajaSemanalResumen?.saldo_inicial_efectivo || 0
+            : cajaSemanalResumen?.saldo_final_efectivo || 0
+          const chequesValor = index === 0
+            ? cajaSemanalResumen?.saldo_inicial_cheques || 0
+            : cajaSemanalResumen?.saldo_final_cheques || 0
+
+          doc.fillColor(PDF_COLORS.slate).font("Helvetica").fontSize(6.6)
+          doc.text(`Efectivo: ${formatoMoneda(efectivoValor)}`, x + 8, cardsY + 27, { width: cardWidth - 16, lineBreak: false })
+          doc.text(`Cheques: ${formatoMoneda(chequesValor)}`, x + 8, cardsY + 36, { width: cardWidth - 16, lineBreak: false })
+        }
+      })
+
+      doc.fillColor(PDF_COLORS.ink)
+      doc.y = semanalY + semanalHeight + 14
+    }
 
     const resumenY = doc.y
     doc.roundedRect(65, resumenY, pageWidth - 90, 82, 6).fill(PDF_COLORS.card)
@@ -350,32 +968,101 @@ router.get("/resumen/pdf", async (req, res) => {
 
     drawSectionTitle("Desglose por medio de pago")
 
+    const desglosePorTipo = MEDIOS_PAGO.reduce((acc, medio) => {
+      acc[medio] = { ingresos: 0, egresos: 0 }
+      return acc
+    }, {})
+
+    movimientos.forEach((mov) => {
+      ;(mov.detalles_medio_pago || []).forEach((detalle) => {
+        const medio = String(detalle?.medio_pago || "").toLowerCase()
+        const monto = parseFloat(detalle?.monto || 0)
+        if (!desglosePorTipo[medio] || !(monto > 0)) return
+
+        if (mov.tipo === "ingreso") {
+          desglosePorTipo[medio].ingresos += monto
+        } else {
+          desglosePorTipo[medio].egresos += monto
+        }
+      })
+    })
+
     const desgloseItems = MEDIOS_PAGO.map((medio) => ({
       label: LABEL_MEDIO[medio],
-      value: parseFloat(totales.desglose?.[medio] || 0),
+      ingresos: desglosePorTipo[medio].ingresos,
+      egresos: desglosePorTipo[medio].egresos,
+      total: desglosePorTipo[medio].ingresos - desglosePorTipo[medio].egresos,
     }))
+
+    const colMedioX = 55
+    const colIngresosX = 190
+    const colEgresosX = 315
+    const colTotalX = 440
+    const colMedioWidth = 120
+    const colMontoWidth = 105
+
+    const tableLeft = 45
+    const tableRight = pageWidth - 45
+
+    const drawVerticalSeparators = (y, height) => {
+      doc.strokeColor(PDF_COLORS.line).lineWidth(0.8)
+      doc.moveTo(colEgresosX - 10, y).lineTo(colEgresosX - 10, y + height).stroke()
+      doc.moveTo(colTotalX - 10, y).lineTo(colTotalX - 10, y + height).stroke()
+    }
+
+    const drawHorizontalSeparator = (y) => {
+      doc.strokeColor(PDF_COLORS.line).lineWidth(0.6)
+      doc.moveTo(tableLeft, y).lineTo(tableRight, y).stroke()
+    }
+
+    const drawTableBorders = (topY, bottomY) => {
+      doc.strokeColor(PDF_COLORS.line).lineWidth(0.8)
+      doc.moveTo(tableLeft, topY).lineTo(tableLeft, bottomY).stroke()
+      doc.moveTo(tableRight, topY).lineTo(tableRight, bottomY).stroke()
+    }
 
     const drawDesgloseHeader = () => {
       const headerY = doc.y
       doc.rect(45, headerY, pageWidth - 90, 22).fill(PDF_COLORS.navy)
+      drawVerticalSeparators(headerY, 22)
       doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(9)
-      doc.text("MEDIO", 55, headerY + 7, { width: 280 })
-      doc.text("MONTO", 410, headerY + 7, { width: 120, align: "right" })
+      doc.text("MEDIO", colMedioX, headerY + 7, { width: colMedioWidth })
+      doc.text("INGRESOS", colIngresosX, headerY + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+      doc.text("EGRESOS", colEgresosX, headerY + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+      doc.text("TOTAL", colTotalX, headerY + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+      drawHorizontalSeparator(headerY + 22)
       doc.fillColor(PDF_COLORS.ink)
       doc.y = headerY + 22
     }
 
+    const tableTopY = doc.y
     drawDesgloseHeader()
     let yDesglose = doc.y
     desgloseItems.forEach((item, idx) => {
       const bg = idx % 2 === 0 ? PDF_COLORS.light : PDF_COLORS.lightAlt
       doc.rect(45, yDesglose, pageWidth - 90, 20).fill(bg)
-      doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9.5)
-      doc.text(item.label, 55, yDesglose + 6, { width: 280 })
-      doc.text(formatoMoneda(item.value), 410, yDesglose + 6, { width: 120, align: "right" })
+      drawVerticalSeparators(yDesglose, 20)
+      doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(8.8)
+      doc.text(item.label, colMedioX, yDesglose + 6, { width: colMedioWidth, lineBreak: false })
+      doc.text(formatoMoneda(item.ingresos), colIngresosX, yDesglose + 6, { width: colMontoWidth, align: "right", lineBreak: false })
+      doc.text(formatoMoneda(item.egresos), colEgresosX, yDesglose + 6, { width: colMontoWidth, align: "right", lineBreak: false })
+      doc.text(formatoMoneda(item.total), colTotalX, yDesglose + 6, { width: colMontoWidth, align: "right", lineBreak: false })
+      drawHorizontalSeparator(yDesglose + 20)
       yDesglose += 20
     })
-    doc.y = yDesglose + 6
+
+    doc.rect(45, yDesglose, pageWidth - 90, 22).fill(PDF_COLORS.card)
+    drawVerticalSeparators(yDesglose, 22)
+    doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(9.2)
+    doc.text("TOTAL GENERAL", colMedioX, yDesglose + 7, { width: colMedioWidth })
+    doc.text(formatoMoneda(totales.totalIngresos || 0), colIngresosX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+    doc.text(formatoMoneda(totales.totalEgresos || 0), colEgresosX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+    doc.text(formatoMoneda((totales.totalIngresos || 0) - (totales.totalEgresos || 0)), colTotalX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+    drawHorizontalSeparator(yDesglose)
+    drawHorizontalSeparator(yDesglose + 22)
+    drawTableBorders(tableTopY, yDesglose + 22)
+    doc.fillColor(PDF_COLORS.ink)
+    doc.y = yDesglose + 28
 
     drawSectionTitle("Detalle de movimientos")
 
@@ -400,7 +1087,32 @@ router.get("/resumen/pdf", async (req, res) => {
       doc.fillColor("#111827")
     } else {
       movimientos.forEach((mov, idx) => {
-        if (yMov > doc.page.height - 74) {
+        const medios = (mov.detalles_medio_pago || [])
+          .filter((d) => parseFloat(d.monto || 0) > 0)
+          .map((d) => {
+            const nombre = LABEL_MEDIO[d.medio_pago] || d.medio_pago
+            const identificador = String(d.identificador || "").trim()
+            return identificador
+              ? `${nombre} (${identificador}): ${formatoMoneda(d.monto)}`
+              : `${nombre}: ${formatoMoneda(d.monto)}`
+          })
+          .join("\n")
+
+        const textoCaja = `${LABEL_CAJA[mov.caja_codigo] || mov.caja_codigo} / ${mov.tipo === "ingreso" ? "Ingreso" : "Egreso"}`
+        const textoDetalle = String(mov.detalle || mov.destinatario || "-")
+        const textoMonto = formatoMoneda(mov.monto_total)
+
+        doc.font("Helvetica").fontSize(8.5)
+        const contenidoHeight = Math.max(
+          doc.heightOfString(formatoFecha(mov.fecha), { width: 68 }),
+          doc.heightOfString(textoCaja, { width: 72 }),
+          doc.heightOfString(textoDetalle, { width: 135 }),
+          doc.heightOfString(medios || "-", { width: 150 }),
+          doc.heightOfString(textoMonto, { width: 60, align: "right" }),
+        )
+        const rowHeight = Math.max(26, contenidoHeight + 12)
+
+        if (yMov + rowHeight > doc.page.height - 74) {
           doc.addPage()
           doc.y = 60
           drawMovHeader()
@@ -408,21 +1120,16 @@ router.get("/resumen/pdf", async (req, res) => {
         }
 
         const bg = idx % 2 === 0 ? PDF_COLORS.light : PDF_COLORS.lightAlt
-        doc.rect(45, yMov, pageWidth - 90, 22).fill(bg)
-
-        const medios = (mov.detalles_medio_pago || [])
-          .filter((d) => parseFloat(d.monto || 0) > 0)
-          .map((d) => `${LABEL_MEDIO[d.medio_pago] || d.medio_pago}: ${formatoMoneda(d.monto)}`)
-          .join("\n")
+        doc.rect(45, yMov, pageWidth - 90, rowHeight).fill(bg)
 
         doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(8.5)
-        doc.text(formatoFecha(mov.fecha), 50, yMov + 7, { width: 68 })
-        doc.text(`${LABEL_CAJA[mov.caja_codigo] || mov.caja_codigo} / ${mov.tipo === "ingreso" ? "Ingreso" : "Egreso"}`, 120, yMov + 7, { width: 72, ellipsis: true })
-        doc.text(String(mov.detalle || mov.destinatario || "-"), 185, yMov + 7, { width: 135, ellipsis: true })
-        doc.text(medios || "-", 320, yMov + 6, { width: 150, ellipsis: true })
-        doc.text(formatoMoneda(mov.monto_total), 456, yMov + 7, { width: 60, align: "right" })
-        doc.strokeColor(PDF_COLORS.line).lineWidth(0.5).moveTo(60, yMov + 60).lineTo(pageWidth - 60, yMov + 60).stroke()
-        yMov += 65
+        doc.text(formatoFecha(mov.fecha), 50, yMov + 6, { width: 68 })
+        doc.text(textoCaja, 120, yMov + 6, { width: 72 })
+        doc.text(textoDetalle, 185, yMov + 6, { width: 135 })
+        doc.text(medios || "-", 320, yMov + 6, { width: 150 })
+        doc.text(textoMonto, 456, yMov + 6, { width: 60, align: "right" })
+        doc.strokeColor(PDF_COLORS.line).lineWidth(0.5).moveTo(60, yMov + rowHeight).lineTo(pageWidth - 60, yMov + rowHeight).stroke()
+        yMov += rowHeight + 4
       })
     }
 
@@ -572,7 +1279,7 @@ router.get("/:id", async (req, res) => {
 // Crear movimiento de caja
 router.post("/", async (req, res) => {
   try {
-    const { fecha, caja_codigo, tipo, detalle, monto_total, desglose, categoria, con_iva, cliente_id, presupuesto_id, destinatario } = req.body
+    const { fecha, caja_codigo, tipo, detalle, monto_total, desglose, detalles_medio_pago, categoria, con_iva, cliente_id, presupuesto_id, destinatario } = req.body
     const detalleColumn = await getDetalleColumn()
     const detallesSchema = await getDetallesSchema()
     const cajaCodigoNormalizada = String(caja_codigo || "").toLowerCase()
@@ -601,20 +1308,17 @@ router.post("/", async (req, res) => {
     }
 
     if (categoria && !CATEGORIAS_CAJA.includes(categoria)) {
-      return res.status(400).json({ error: "Categoria inválida. Debe ser 'mano_obra' o 'materiales'" })
+      return res.status(400).json({ error: "Categoria inválida. Debe ser 'mano_obra', 'materiales' o 'varios'" })
     }
 
     if (monto_total <= 0) {
       return res.status(400).json({ error: "Monto total debe ser mayor a 0" })
     }
 
-    // Validar desglose
-    if (!desglose || Object.keys(desglose).length === 0) {
-      return res.status(400).json({ error: "Debe incluir al menos un medio de pago" })
-    }
+    const detallesPago = construirDetallesPago({ desglose, detalles_medio_pago })
+    validarDetallesPago(detallesPago)
 
-    // Calcular suma de desglose y validar que sea igual al monto_total
-    const sumaDesglose = Object.values(desglose).reduce((sum, val) => sum + parseFloat(val || 0), 0)
+    const sumaDesglose = totalDetallesPago(detallesPago)
     if (Math.abs(sumaDesglose - monto_total) > 0.01) { // Tolerancia de 0.01
       return res.status(400).json({ 
         error: `La suma del desglose (${sumaDesglose}) no coincide con el monto total (${monto_total})` 
@@ -652,13 +1356,14 @@ router.post("/", async (req, res) => {
     // Crear detalles de medio de pago por separado
     let errorDetalles = null
     if (detallesSchema.mode === "filas") {
-      const detalles = Object.entries(desglose)
-        .filter(([_, monto]) => parseFloat(monto) > 0)
-        .map(([medio_pago, monto]) => ({
-          movimiento_id: movimientoId,
-          medio_pago,
-          monto: parseFloat(monto),
-        }))
+      const detalles = detallesPago.map((item) => ({
+        movimiento_id: movimientoId,
+        medio_pago: item.medio_pago,
+        monto: parseFloat(item.monto),
+        identificador: item.identificador,
+        banco: item.banco,
+        fecha_cobro: item.fecha_cobro,
+      }))
 
       if (detalles.length > 0) {
         const resultDetalles = await db.from("detalles_medio_pago").insert(detalles)
@@ -683,6 +1388,12 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Error al registrar detalles de pago: " + errorDetalles.message })
     }
 
+    await asignarCajaSemanalAMovimiento({
+      movimientoId,
+      fecha,
+      caja_codigo: cajaCodigoNormalizada,
+    })
+
     // Retornar movimiento completo
     const { data: movimientoCompleto } = await db
       .from("movimientos_caja")
@@ -705,7 +1416,7 @@ router.post("/", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params
-    const { fecha, caja_codigo, tipo, detalle, monto_total, desglose, categoria, con_iva, cliente_id, presupuesto_id, destinatario } = req.body
+    const { fecha, caja_codigo, tipo, detalle, monto_total, desglose, detalles_medio_pago, categoria, con_iva, cliente_id, presupuesto_id, destinatario } = req.body
     const detalleColumn = await getDetalleColumn()
     const detallesSchema = await getDetallesSchema()
     const cajaCodigoNormalizada = caja_codigo !== undefined ? String(caja_codigo || "").toLowerCase() : undefined
@@ -746,7 +1457,7 @@ router.put("/:id", async (req, res) => {
     }
 
     if (categoria !== undefined && categoria !== null && categoria !== "" && !CATEGORIAS_CAJA.includes(categoria)) {
-      return res.status(400).json({ error: "Categoria inválida. Debe ser 'mano_obra' o 'materiales'" })
+      return res.status(400).json({ error: "Categoria inválida. Debe ser 'mano_obra', 'materiales' o 'varios'" })
     }
 
     const clienteFinal = cliente_id !== undefined ? cliente_id : movimientoActual.cliente_id
@@ -776,6 +1487,10 @@ router.put("/:id", async (req, res) => {
       actualizaciones.destinatario = null
     }
 
+    const cajaSemanalAnteriorId = movimientoActual.caja_semanal_id
+    const fechaFinalMovimiento = fecha !== undefined ? fecha : movimientoActual.fecha
+    const cajaFinalMovimiento = caja_codigo !== undefined ? (cajaCodigoNormalizada || "tesla") : movimientoActual.caja_codigo
+
     const { data: movimientoActualizado, error: errorActualizacion } = await db
       .from("movimientos_caja")
       .update(actualizaciones)
@@ -785,19 +1500,31 @@ router.put("/:id", async (req, res) => {
     if (errorActualizacion) return res.status(400).json({ error: errorActualizacion.message })
     if (movimientoActualizado.length === 0) return res.status(404).json({ error: "Movimiento no encontrado" })
 
-    // Actualizar detalles si se proporciona desglose
-    if (desglose) {
+    // Actualizar detalles si se proporciona desglose o detalles de pago
+    if (desglose || detalles_medio_pago) {
+      const detallesPago = construirDetallesPago({ desglose, detalles_medio_pago })
+      validarDetallesPago(detallesPago)
+      const montoBaseValidacion = monto_total ?? movimientoActualizado[0]?.monto_total ?? movimientoActual.monto_total ?? 0
+      const montoTotalValidacion = parseFloat(montoBaseValidacion || 0)
+      const sumaDesglose = totalDetallesPago(detallesPago)
+      if (Math.abs(sumaDesglose - montoTotalValidacion) > 0.01) {
+        return res.status(400).json({
+          error: `La suma del desglose (${sumaDesglose}) no coincide con el monto total (${montoTotalValidacion})`
+        })
+      }
+
       // Eliminar detalles anteriores
       await db.from("detalles_medio_pago").delete().eq("movimiento_id", id)
 
       if (detallesSchema.mode === "filas") {
-        const detalles = Object.entries(desglose)
-          .filter(([_, monto]) => parseFloat(monto) > 0)
-          .map(([medio_pago, monto]) => ({
-            movimiento_id: id,
-            medio_pago,
-            monto: parseFloat(monto),
-          }))
+        const detalles = detallesPago.map((item) => ({
+          movimiento_id: id,
+          medio_pago: item.medio_pago,
+          monto: parseFloat(item.monto),
+          identificador: item.identificador,
+          banco: item.banco,
+          fecha_cobro: item.fecha_cobro,
+        }))
 
         if (detalles.length > 0) {
           const { error: errorDetalles } = await db.from("detalles_medio_pago").insert(detalles)
@@ -816,6 +1543,16 @@ router.put("/:id", async (req, res) => {
         const { error: errorDetalles } = await db.from("detalles_medio_pago").insert([detalleFila])
         if (errorDetalles) return res.status(400).json({ error: errorDetalles.message })
       }
+    }
+
+    const semanaAsignada = await asignarCajaSemanalAMovimiento({
+      movimientoId: id,
+      fecha: fechaFinalMovimiento,
+      caja_codigo: cajaFinalMovimiento,
+    })
+
+    if (cajaSemanalAnteriorId && String(cajaSemanalAnteriorId) !== String(semanaAsignada?.id || "")) {
+      await recalcularCajaSemanal(cajaSemanalAnteriorId)
     }
 
     // Retornar movimiento actualizado
@@ -840,6 +1577,16 @@ router.delete("/:id", async (req, res) => {
   try {
     const { id } = req.params
 
+    const { data: movimientoActual, error: errorMovimientoActual } = await db
+      .from("movimientos_caja")
+      .select("id, caja_semanal_id")
+      .eq("id", id)
+      .single()
+
+    if (errorMovimientoActual || !movimientoActual) {
+      return res.status(404).json({ error: "Movimiento no encontrado" })
+    }
+
     // Eliminar detalles primero
     await db.from("detalles_medio_pago").delete().eq("movimiento_id", id)
 
@@ -852,6 +1599,8 @@ router.delete("/:id", async (req, res) => {
 
     if (error) return res.status(400).json({ error: error.message })
     if (data.length === 0) return res.status(404).json({ error: "Movimiento no encontrado" })
+
+    await recalcularCajaSemanal(movimientoActual.caja_semanal_id)
 
     getIo()?.emit('caja:changed')
     res.json({ mensaje: "Movimiento eliminado", data: data[0] })

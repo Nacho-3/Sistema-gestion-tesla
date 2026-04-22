@@ -33,6 +33,7 @@ const ESTADOS_PRESUPUESTO = [
 
 const newMaterialItem = () => ({ uid: Date.now() + Math.random(), descripcion: "", cantidad: 1, precio_unitario: 0, ganancia_porcentaje: 0 })
 const newManoObraItem = () => ({ uid: Date.now() + Math.random(), descripcion: "" })
+const newInfoInternaItem = () => ({ uid: Date.now() + Math.random(), descripcion: "", mostrar_en_pdf: false })
 
 const form = ref({
   cliente_id: "",
@@ -46,11 +47,29 @@ const form = ref({
   observaciones: "",
   items_materiales: [newMaterialItem()],
   items_mano_obra: [newManoObraItem()],
+  info_interna_quien_hizo: "",
+  info_interna_quien_hizo_pdf: false,
+  info_interna_quien_aprobo: "",
+  info_interna_quien_aprobo_pdf: false,
+  items_info_interna: [],
 })
 
 const obrasDelCliente = computed(() => {
   if (!form.value.cliente_id) return []
   return obras.value.filter((obra) => String(obra.cliente_id) === String(form.value.cliente_id))
+})
+
+const getEtiquetaCliente = (cliente) => {
+  if (!cliente) return "-"
+  const empresa = String(cliente.empresa || "").trim()
+  const razonSocial = String(cliente.razon_social || "").trim()
+  return empresa || razonSocial || "-"
+}
+
+const clientesOrdenados = computed(() => {
+  return [...clientes.value].sort((a, b) =>
+    getEtiquetaCliente(a).localeCompare(getEtiquetaCliente(b), "es", { sensitivity: "base" })
+  )
 })
 
 const setCliente = (clienteId) => {
@@ -212,7 +231,7 @@ const formatMoney = (value) => {
 
 const getClienteNombre = (id) => {
   const c = clientes.value.find((item) => item.id === id)
-  return c ? (c.empresa || c.razon_social || "-") : "-"
+  return getEtiquetaCliente(c)
 }
 
 const getObraNombre = (id) => {
@@ -238,6 +257,14 @@ const removeManoObraRow = (uid) => {
   form.value.items_mano_obra = form.value.items_mano_obra.filter((item) => item.uid !== uid)
 }
 
+const addInfoInternaRow = () => {
+  form.value.items_info_interna.push(newInfoInternaItem())
+}
+
+const removeInfoInternaRow = (uid) => {
+  form.value.items_info_interna = form.value.items_info_interna.filter((item) => item.uid !== uid)
+}
+
 const resetForm = () => {
   editingId.value = null
   editingNumero.value = null
@@ -253,6 +280,11 @@ const resetForm = () => {
     observaciones: "",
     items_materiales: [newMaterialItem()],
     items_mano_obra: [newManoObraItem()],
+    info_interna_quien_hizo: "",
+    info_interna_quien_hizo_pdf: false,
+    info_interna_quien_aprobo: "",
+    info_interna_quien_aprobo_pdf: false,
+    items_info_interna: [],
   }
 }
 
@@ -327,6 +359,17 @@ const editPresupuesto = async (id) => {
             descripcion: item.descripcion || "",
           }))
         : [newManoObraItem()],
+      info_interna_quien_hizo: data.info_interna_quien_hizo || "",
+      info_interna_quien_hizo_pdf: Boolean(data.info_interna_quien_hizo_pdf),
+      info_interna_quien_aprobo: data.info_interna_quien_aprobo || "",
+      info_interna_quien_aprobo_pdf: Boolean(data.info_interna_quien_aprobo_pdf),
+      items_info_interna: Array.isArray(data.items_info_interna)
+        ? data.items_info_interna.map((item) => ({
+            uid: Date.now() + Math.random(),
+            descripcion: item.descripcion || "",
+            mostrar_en_pdf: Boolean(item.mostrar_en_pdf),
+          }))
+        : [],
     }
 
     showForm.value = true
@@ -382,6 +425,14 @@ const savePresupuesto = async () => {
       descripcion: String(item.descripcion || "").trim(),
       cantidad: 1,
       precio_unitario: 0,
+    })),
+    info_interna_quien_hizo: String(form.value.info_interna_quien_hizo || "").trim(),
+    info_interna_quien_hizo_pdf: Boolean(form.value.info_interna_quien_hizo_pdf),
+    info_interna_quien_aprobo: String(form.value.info_interna_quien_aprobo || "").trim(),
+    info_interna_quien_aprobo_pdf: Boolean(form.value.info_interna_quien_aprobo_pdf),
+    items_info_interna: form.value.items_info_interna.map((item) => ({
+      descripcion: String(item.descripcion || "").trim(),
+      mostrar_en_pdf: Boolean(item.mostrar_en_pdf),
     })),
   }
 
@@ -556,7 +607,7 @@ onUnmounted(() => {
             <span>Cliente</span>
             <select v-model="filtroCliente">
               <option value="">Todos</option>
-              <option v-for="cliente in clientes" :key="cliente.id" :value="cliente.id">{{ cliente.empresa || cliente.razon_social }}</option>
+              <option v-for="cliente in clientesOrdenados" :key="cliente.id" :value="cliente.id">{{ getEtiquetaCliente(cliente) }}</option>
             </select>
           </label>
 
@@ -723,7 +774,7 @@ onUnmounted(() => {
                   <label>Cliente</label>
                   <select :value="form.cliente_id" @change="(e) => setCliente(e.target.value)">
                     <option value="">Seleccionar</option>
-                    <option v-for="c in clientes" :key="c.id" :value="c.id">{{ c.empresa || c.razon_social }}</option>
+                    <option v-for="c in clientesOrdenados" :key="c.id" :value="c.id">{{ getEtiquetaCliente(c) }}</option>
                   </select>
                 </div>
 
@@ -836,6 +887,60 @@ onUnmounted(() => {
               <label>Observaciones</label>
               <textarea v-model="form.observaciones" rows="3" placeholder="Condiciones, alcance, notas"></textarea>
             </div>
+
+            <section class="modal-section modal-section-interna">
+              <div class="modal-section-header">
+                <div>
+                  <span class="section-kicker">Solo uso interno</span>
+                  <h4>Información interna</h4>
+                </div>
+                <small>Estos datos son privados. Cada campo tiene su propio tilde: si está marcado aparece en el PDF, si no está marcado no aparece.</small>
+              </div>
+
+              <div class="interna-cabecera-grid">
+                <div class="interna-field-row">
+                  <div class="interna-input-wrap">
+                    <label>Quien hizo el presupuesto</label>
+                    <input v-model="form.info_interna_quien_hizo" type="text" placeholder="Nombre o iniciales" />
+                  </div>
+                  <label class="interna-pdf-check">
+                    <input v-model="form.info_interna_quien_hizo_pdf" type="checkbox" />
+                    <span>Sale en PDF</span>
+                  </label>
+                </div>
+
+                <div class="interna-field-row">
+                  <div class="interna-input-wrap">
+                    <label>Quien aprobo el presupuesto</label>
+                    <input v-model="form.info_interna_quien_aprobo" type="text" placeholder="Nombre o iniciales" />
+                  </div>
+                  <label class="interna-pdf-check">
+                    <input v-model="form.info_interna_quien_aprobo_pdf" type="checkbox" />
+                    <span>Sale en PDF</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="interna-items-header">
+                <span>Items internos adicionales</span>
+                <button type="button" class="btn-secondary btn-secondary-sm" @click="addInfoInternaRow">+ Agregar item</button>
+              </div>
+
+              <div v-if="form.items_info_interna.length === 0" class="interna-empty">
+                Sin ítems internos. Usá "+ Agregar item" para añadir.
+              </div>
+
+              <div v-else class="interna-items-list">
+                <div v-for="row in form.items_info_interna" :key="row.uid" class="interna-item-row">
+                  <input v-model="row.descripcion" type="text" placeholder="Descripcion del item interno" class="interna-item-input" />
+                  <label class="interna-pdf-check">
+                    <input v-model="row.mostrar_en_pdf" type="checkbox" />
+                    <span>Sale en PDF</span>
+                  </label>
+                  <button type="button" class="btn-link danger" @click="removeInfoInternaRow(row.uid)">Quitar</button>
+                </div>
+              </div>
+            </section>
 
             <div class="actions modal-actions">
               <button type="button" class="btn-secondary" @click="closeForm">Cancelar</button>
@@ -1719,6 +1824,92 @@ th {
 .observaciones-block {
   display: grid;
   gap: 6px;
+}
+
+.modal-section-interna {
+  border: 1px solid rgba(216, 162, 90, 0.18);
+  border-radius: 14px;
+  padding: 14px 16px;
+  background: rgba(216, 162, 90, 0.04);
+}
+
+.interna-cabecera-grid {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.interna-field-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.interna-input-wrap {
+  display: grid;
+  gap: 5px;
+}
+
+.interna-pdf-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+  padding-bottom: 10px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.interna-pdf-check input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent-strong);
+  cursor: pointer;
+}
+
+.interna-items-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 16px;
+  margin-bottom: 8px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #9ba8bc;
+}
+
+.btn-secondary-sm {
+  padding: 5px 10px;
+  font-size: 0.78rem;
+}
+
+.interna-empty {
+  font-size: 0.82rem;
+  color: var(--muted);
+  padding: 8px 0;
+}
+
+.interna-items-list {
+  display: grid;
+  gap: 8px;
+}
+
+.interna-item-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.interna-item-input {
+  min-width: 0;
 }
 
 .modal-form-confirmacion {

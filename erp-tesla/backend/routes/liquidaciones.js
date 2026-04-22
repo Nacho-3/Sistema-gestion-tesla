@@ -1,6 +1,5 @@
 import express from "express"
 import fs from "fs/promises"
-// import path from "path" (duplicado eliminado)
 import db from "../db.js"
 import { getIo } from '../socket.js'
 import PDFDocument from "pdfkit"
@@ -10,6 +9,7 @@ import { drawPremiumHeader, setupPremiumFooter, sanitizeFileText, PDF_COLORS } f
 import { formatHoursAsClock } from "../utils/hourFormat.js"
 
 const router = express.Router()
+const SUELDOSPDF_BASE_FOLDER = path.join("C:\\Users\\usuario\\Desktop\\GESTION TESLA", "Sueldos")
 
 // === SUELDOS TXT EXPORT ===
 const SUELDOS_BASE_FOLDER = path.join("C:\\Users\\usuario\\Desktop\\GESTION TESLA", "Sueldos")
@@ -626,13 +626,40 @@ router.get("/:id/pdf", async (req, res) => {
 
     const nombreEmpleado = [empleado?.nombre, empleado?.apellido].filter(Boolean).join(" ") || `Empleado ${liq.empleado_id}`
     const periodo = `${String(liquidacion.mes || "").padStart(2, "0")}/${liquidacion.anio || ""}`
-    const fileName = `Liquidacion ${sanitizeFileText(nombreEmpleado)} ${String(periodo).replace("/", "-")}.pdf`
+    const fileName = `Liquidacion ${sanitizeFileText(nombreEmpleado)} ${String(liquidacion.mes || "").padStart(2, "0")}-${liquidacion.anio || ""}.pdf`
+    const subfolder = path.join(
+      SUELDOSPDF_BASE_FOLDER,
+      `${liquidacion.anio}_${String(liquidacion.mes || "").padStart(2, "0")}`
+    )
+    const filePath = path.join(subfolder, fileName)
 
     res.setHeader("Content-Type", "application/pdf")
     res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`)
 
     const doc = new PDFDocument({ size: "A4", margin: 45 })
-    doc.pipe(res)
+    const chunks = []
+
+    doc.on("data", (chunk) => chunks.push(chunk))
+
+    doc.on("end", async () => {
+      try {
+        const pdfBuffer = Buffer.concat(chunks)
+
+        await fs.mkdir(subfolder, { recursive: true })
+        await fs.writeFile(filePath, pdfBuffer)
+
+        res.setHeader("Content-Type", "application/pdf")
+        res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`)
+        res.send(pdfBuffer)
+      } catch (err) {
+        console.error("[SUELDOS PDF] Error guardando PDF:", err.message)
+        if (!res.headersSent) {
+          res.status(500).json({ error: "Error al guardar el PDF" })
+        }
+      }
+    })
+
+
     setupPremiumFooter(doc, { leftText: "Tesla Montajes Electricos - Documento interno" })
 
     const drawCopy = (copyTitle) => {

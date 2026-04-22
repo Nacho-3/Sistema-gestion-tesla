@@ -26,6 +26,10 @@ const generandoPdf = ref(false)
 const generandoPdfDetalle = ref(false)
 const filtroCaja = ref("tesla")
 const filtroBusqueda = ref("")
+const semanasCaja = ref([])
+const semanaActual = ref(null)
+const semanaSeleccionadaId = ref("")
+const cerrandoSemana = ref(false)
 
 // Filtros
 const filtroFechaInicio = ref("")
@@ -47,10 +51,9 @@ const form = ref({
   desglose: {
     efectivo: 0,
     transferencia: 0,
-    cheque: 0,
-    echeq: 0,
     retencion: 0
-  }
+  },
+  cheques: []
 })
 
 const mediosDePago = [
@@ -61,8 +64,301 @@ const mediosDePago = [
   { id: "cheque", label: "Cheque" }
 ]
 
+const mediosDePagoSimples = [
+  { id: "efectivo", label: "Efectivo" },
+  { id: "transferencia", label: "Transferencia" },
+  { id: "retencion", label: "Retención" },
+]
+
+const tiposCheque = [
+  { id: "cheque", label: "Cheque" },
+  { id: "echeq", label: "Echeq" },
+]
+
+const handleCajaChanged = () => {
+  refrescarCaja()
+}
+
+const crearChequeVacio = (tipo = "cheque") => ({
+  medio_pago: tipo,
+  monto: 0,
+  identificador: "",
+})
+
+const parseFechaLocal = (valor) => {
+  const texto = String(valor || "").split("T")[0]
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(texto)) return null
+  const [anio, mes, dia] = texto.split("-").map(Number)
+  return new Date(anio, mes - 1, dia)
+}
+
+const formatFechaISO = (fecha) => {
+  const y = fecha.getFullYear()
+  const m = String(fecha.getMonth() + 1).padStart(2, "0")
+  const d = String(fecha.getDate()).padStart(2, "0")
+  return `${y}-${m}-${d}`
+}
+
+const getRangoSemanaLocal = (fechaValor) => {
+  const fecha = parseFechaLocal(fechaValor)
+  if (!fecha) return null
+  const diaSemana = fecha.getDay()
+  const offsetLunes = diaSemana === 0 ? -6 : 1 - diaSemana
+  const inicio = new Date(fecha)
+  inicio.setDate(fecha.getDate() + offsetLunes)
+  const fin = new Date(inicio)
+  fin.setDate(inicio.getDate() + 4)
+  return {
+    fecha_inicio: formatFechaISO(inicio),
+    fecha_fin: formatFechaISO(fin),
+  }
+}
+
+const normalizarFechaSemana = (valor) => String(valor || "").split("T")[0]
+
+const normalizarSemanaCaja = (semana, defaults = {}) => {
+  if (!semana) return null
+  return {
+    ...defaults,
+    ...semana,
+    fecha_inicio: normalizarFechaSemana(semana.fecha_inicio || defaults.fecha_inicio),
+    fecha_fin: normalizarFechaSemana(semana.fecha_fin || defaults.fecha_fin),
+    saldo_inicial: Number(semana.saldo_inicial ?? defaults.saldo_inicial ?? 0),
+    saldo_inicial_efectivo: Number(semana.saldo_inicial_efectivo ?? defaults.saldo_inicial_efectivo ?? 0),
+    saldo_inicial_cheques: Number(semana.saldo_inicial_cheques ?? defaults.saldo_inicial_cheques ?? 0),
+    total_ingresos: Number(semana.total_ingresos ?? defaults.total_ingresos ?? 0),
+    total_egresos: Number(semana.total_egresos ?? defaults.total_egresos ?? 0),
+    saldo_final: Number(semana.saldo_final ?? defaults.saldo_final ?? 0),
+    saldo_final_efectivo: Number(semana.saldo_final_efectivo ?? defaults.saldo_final_efectivo ?? 0),
+    saldo_final_cheques: Number(semana.saldo_final_cheques ?? defaults.saldo_final_cheques ?? 0),
+    estado: String(semana.estado || defaults.estado || "cerrada").toLowerCase(),
+  }
+}
+
+const claveSemanaCaja = (semana) => {
+  if (!semana) return ""
+  const inicio = normalizarFechaSemana(semana.fecha_inicio)
+  const fin = normalizarFechaSemana(semana.fecha_fin)
+  return inicio && fin ? `${inicio}-${fin}` : String(semana.id || "")
+}
+
+const extraerSemanaIdNumerica = (valor) => {
+  const texto = String(valor || "").trim()
+  if (!texto) return null
+  if (/^\d+$/.test(texto)) return Number(texto)
+  const match = texto.match(/^id-(\d+)$/i)
+  return match ? Number(match[1]) : null
+}
+
+const movimientoPerteneceASemana = (movimiento, semana) => {
+  if (!semana) return true
+
+  const semanaId = extraerSemanaIdNumerica(semana.id)
+  const movimientoSemanaId = extraerSemanaIdNumerica(movimiento?.caja_semanal_id)
+
+  if (semanaId && movimientoSemanaId) {
+    return semanaId === movimientoSemanaId
+  }
+
+  const fechaMovimiento = String(movimiento?.fecha || "").split("T")[0]
+  if (!fechaMovimiento) return false
+
+  const inicio = String(semana.fecha_inicio || "")
+  const fin = String(semana.fecha_fin || "")
+
+  return (!inicio || fechaMovimiento >= inicio) && (!fin || fechaMovimiento <= fin)
+}
+
+const actualizarSaldoPorMedioLocal = (acumulador, movimiento) => {
+  const signo = String(movimiento?.tipo || "").toLowerCase() === "egreso" ? -1 : 1
+  let montoAplicado = 0
+  const detalles = Array.isArray(movimiento?.detalles_medio_pago) ? movimiento.detalles_medio_pago : []
+
+  detalles.forEach((detalle) => {
+    const medio = String(detalle?.medio_pago || "").toLowerCase()
+    const monto = Number(detalle?.monto || 0)
+    if (!(monto > 0)) return
+
+    if (medio === "efectivo") {
+      acumulador.efectivo += signo * monto
+      montoAplicado += monto
+    }
+
+    if (medio === "cheque") {
+      acumulador.cheques += signo * monto
+      montoAplicado += monto
+    }
+  })
+
+  if (detalles.length === 0 && !(montoAplicado > 0)) {
+    acumulador.efectivo += signo * Number(movimiento?.monto_total || 0)
+  }
+}
+
+const saldoSemanalCalculado = computed(() => {
+  if (!semanaActiva.value?.fecha_inicio || !semanaActiva.value?.fecha_fin) {
+    return {
+      saldo_inicial_efectivo: 0,
+      saldo_inicial_cheques: 0,
+      saldo_final_efectivo: 0,
+      saldo_final_cheques: 0,
+    }
+  }
+
+  const inicioSemana = normalizarFechaSemana(semanaActiva.value.fecha_inicio)
+  const finSemana = normalizarFechaSemana(semanaActiva.value.fecha_fin)
+  const movimientosCaja = (movimientos.value || [])
+    .filter((movimiento) => String(movimiento?.caja_codigo || "").toLowerCase() === filtroCaja.value)
+    .slice()
+    .sort((a, b) => new Date(a.fecha) - new Date(b.fecha))
+
+  const acumulador = { efectivo: 0, cheques: 0 }
+
+  movimientosCaja.forEach((movimiento) => {
+    const fechaMovimiento = normalizarFechaSemana(movimiento?.fecha)
+    if (!fechaMovimiento || fechaMovimiento >= inicioSemana) return
+    actualizarSaldoPorMedioLocal(acumulador, movimiento)
+  })
+
+  const saldoInicial = {
+    saldo_inicial_efectivo: acumulador.efectivo,
+    saldo_inicial_cheques: acumulador.cheques,
+  }
+
+  movimientosCaja.forEach((movimiento) => {
+    const fechaMovimiento = normalizarFechaSemana(movimiento?.fecha)
+    if (!fechaMovimiento || fechaMovimiento < inicioSemana || fechaMovimiento > finSemana) return
+    if (!movimientoPerteneceASemana(movimiento, semanaActiva.value)) return
+    actualizarSaldoPorMedioLocal(acumulador, movimiento)
+  })
+
+  return {
+    ...saldoInicial,
+    saldo_final_efectivo: acumulador.efectivo,
+    saldo_final_cheques: acumulador.cheques,
+  }
+})
+
 const cajaActiva = computed(() => {
   return CAJAS_DISPONIBLES.find((caja) => caja.id === filtroCaja.value) || CAJAS_DISPONIBLES[0]
+})
+
+const construirSemanasDesdeMovimientos = () => {
+  const movimientosCaja = movimientos.value
+    .filter((movimiento) => String(movimiento.caja_codigo || "").toLowerCase() === filtroCaja.value)
+    .sort((a, b) => new Date(a.fecha) - new Date(b.fecha))
+
+  if (movimientosCaja.length === 0) return []
+
+  const grupos = new Map()
+  let saldoInicial = 0
+
+  movimientosCaja.forEach((movimiento) => {
+    const key = movimiento.caja_semanal_id
+      ? `id-${movimiento.caja_semanal_id}`
+      : `fecha-${(getRangoSemanaLocal(movimiento.fecha) || {}).fecha_inicio || String(movimiento.fecha).split("T")[0]}`
+
+    if (!grupos.has(key)) grupos.set(key, [])
+    grupos.get(key).push(movimiento)
+  })
+
+  const semanas = []
+
+  for (const [key, items] of grupos.entries()) {
+    const fechas = items
+      .map((movimiento) => String(movimiento.fecha || "").split("T")[0])
+      .filter(Boolean)
+      .sort()
+
+    const rango = key.startsWith("id-")
+      ? { fecha_inicio: fechas[0], fecha_fin: fechas[fechas.length - 1] }
+      : getRangoSemanaLocal(fechas[0]) || { fecha_inicio: fechas[0], fecha_fin: fechas[fechas.length - 1] }
+
+    const totalIngresos = items
+      .filter((movimiento) => movimiento.tipo === "ingreso")
+      .reduce((sum, movimiento) => sum + Number(movimiento.monto_total || 0), 0)
+
+    const totalEgresos = items
+      .filter((movimiento) => movimiento.tipo === "egreso")
+      .reduce((sum, movimiento) => sum + Number(movimiento.monto_total || 0), 0)
+
+    const saldoFinal = saldoInicial + totalIngresos - totalEgresos
+    const semanaId = extraerSemanaIdNumerica(key)
+
+    semanas.push(normalizarSemanaCaja({
+      id: semanaId || key,
+      caja_codigo: filtroCaja.value,
+      fecha_inicio: rango.fecha_inicio,
+      fecha_fin: rango.fecha_fin,
+      saldo_inicial: saldoInicial,
+      total_ingresos: totalIngresos,
+      total_egresos: totalEgresos,
+      saldo_final: saldoFinal,
+      estado: "cerrada",
+    }))
+
+    saldoInicial = saldoFinal
+  }
+
+  return semanas
+}
+
+const semanasCajaVisibles = computed(() => {
+  const semanasBase = (semanasCaja.value || []).map((semana) => normalizarSemanaCaja(semana)).filter(Boolean)
+  const actual = semanaActual.value ? normalizarSemanaCaja(semanaActual.value, { estado: "abierta" }) : null
+
+  const mapa = new Map()
+  const registrar = (semana) => {
+    if (!semana?.fecha_inicio || !semana?.fecha_fin) return
+    const clave = claveSemanaCaja(semana)
+    const existente = mapa.get(clave)
+    if (!existente || (existente.estado !== "abierta" && semana.estado === "abierta")) {
+      mapa.set(clave, semana)
+    }
+  }
+
+  semanasBase.forEach(registrar)
+  if (actual) registrar(actual)
+
+  if (mapa.size === 0) {
+    construirSemanasDesdeMovimientos().forEach(registrar)
+  }
+
+  const semanasOrdenadas = Array.from(mapa.values()).sort((a, b) => new Date(b.fecha_inicio) - new Date(a.fecha_inicio))
+  const rangoHoy = getRangoSemanaLocal(formatFechaISO(new Date()))
+
+  if (rangoHoy) {
+    const yaExisteSemanaActual = semanasOrdenadas.some((semana) => {
+      return semana.fecha_inicio === rangoHoy.fecha_inicio && semana.fecha_fin === rangoHoy.fecha_fin
+    })
+
+    if (!yaExisteSemanaActual) {
+      const saldoBase = semanasOrdenadas.length > 0
+        ? Number(semanasOrdenadas[0]?.saldo_final || 0)
+        : 0
+
+      semanasOrdenadas.unshift(normalizarSemanaCaja({
+        id: actual?.id || `actual-${filtroCaja.value}-${rangoHoy.fecha_inicio}`,
+        caja_codigo: filtroCaja.value,
+        fecha_inicio: rangoHoy.fecha_inicio,
+        fecha_fin: rangoHoy.fecha_fin,
+        saldo_inicial: actual?.saldo_inicial ?? saldoBase,
+        total_ingresos: actual?.total_ingresos ?? 0,
+        total_egresos: actual?.total_egresos ?? 0,
+        saldo_final: actual?.saldo_final ?? saldoBase,
+        estado: actual?.estado || "abierta",
+      }))
+    }
+  }
+
+  return semanasOrdenadas
+})
+
+const semanaActiva = computed(() => {
+  if (semanaSeleccionadaId.value) {
+    return semanasCajaVisibles.value.find((semana) => String(semana.id) === String(semanaSeleccionadaId.value)) || null
+  }
+  return semanaActual.value || semanasCajaVisibles.value[0] || null
 })
 
 const subtitleCaja = computed(() => {
@@ -71,6 +367,14 @@ const subtitleCaja = computed(() => {
 
 const esIngreso = computed(() => form.value.tipo === "ingreso")
 const esEgreso = computed(() => form.value.tipo === "egreso")
+
+const chequesCargados = computed(() => {
+  return (form.value.cheques || []).filter((item) => {
+    const monto = parseFloat(item?.monto || 0)
+    const identificador = String(item?.identificador || "").trim()
+    return monto > 0 || identificador.length > 0
+  })
+})
 
 const esFormularioValido = computed(() => {
   if (!form.value.fecha || !form.value.caja_codigo || !form.value.detalle || !form.value.monto_total || form.value.monto_total <= 0) {
@@ -85,17 +389,34 @@ const esFormularioValido = computed(() => {
     return false
   }
 
-  const sumaDesglose = Object.values(form.value.desglose).reduce((sum, val) => sum + parseFloat(val || 0), 0)
+  const sumaDesglose = sumaMediosPago.value
+  const chequesValidos = chequesCargados.value.every((item) => {
+    if (!(parseFloat(item?.monto || 0) > 0)) return false
+    return String(item?.identificador || "").trim().length > 0
+  })
+  if (!chequesValidos) return false
   return Math.abs(sumaDesglose - form.value.monto_total) < 0.01
 })
 
 const tieneErrorDesglose = computed(() => {
-  const sumaDesglose = Object.values(form.value.desglose).reduce((sum, val) => sum + parseFloat(val || 0), 0)
+  const sumaDesglose = sumaMediosPago.value
   return Math.abs(sumaDesglose - form.value.monto_total) > 0.01
 })
 
+const sumaMediosPago = computed(() => {
+  const sumaSimples = Object.values(form.value.desglose).reduce((sum, val) => sum + parseFloat(val || 0), 0)
+  const sumaCheques = (form.value.cheques || []).reduce((sum, item) => sum + (parseFloat(item?.monto || 0) || 0), 0)
+  return sumaSimples + sumaCheques
+})
+
+const cajaSemanalIdConsulta = computed(() => extraerSemanaIdNumerica(semanaSeleccionadaId.value))
+
 const movimientosFiltrados = computed(() => {
   let resultado = movimientos.value
+
+  if (semanaActiva.value) {
+    resultado = resultado.filter((movimiento) => movimientoPerteneceASemana(movimiento, semanaActiva.value))
+  }
 
   if (filtroTipo.value) {
     resultado = resultado.filter(m => m.tipo === filtroTipo.value)
@@ -122,12 +443,41 @@ const movimientosFiltrados = computed(() => {
   return resultado.sort((a, b) => new Date(b.fecha) - new Date(a.fecha))
 })
 
-const balanceActual = computed(() => (totales.value.totalIngresos || 0) - (totales.value.totalEgresos || 0))
+const totalIngresosVisibles = computed(() => movimientosFiltrados.value
+  .filter((mov) => mov.tipo === "ingreso")
+  .reduce((sum, mov) => sum + Number(mov.monto_total || 0), 0))
+
+const totalEgresosVisibles = computed(() => movimientosFiltrados.value
+  .filter((mov) => mov.tipo === "egreso")
+  .reduce((sum, mov) => sum + Number(mov.monto_total || 0), 0))
+
+const balanceActual = computed(() => totalIngresosVisibles.value - totalEgresosVisibles.value)
 const cantidadIngresos = computed(() => movimientosFiltrados.value.filter((mov) => mov.tipo === "ingreso").length)
 const cantidadEgresos = computed(() => movimientosFiltrados.value.filter((mov) => mov.tipo === "egreso").length)
+const fechaInicioConsulta = computed(() => filtroFechaInicio.value)
+const fechaFinConsulta = computed(() => filtroFechaFin.value)
 const rangoActivoDescripcion = computed(() => {
+  if (semanaActiva.value?.fecha_inicio && semanaActiva.value?.fecha_fin) {
+    return `Semana ${textoRangoFechas(semanaActiva.value.fecha_inicio, semanaActiva.value.fecha_fin)}`
+  }
   if (!filtroFechaInicio.value && !filtroFechaFin.value) return "Sin rango de fechas aplicado"
   return textoRangoFechas()
+})
+
+const saldoInicialEfectivoSemana = computed(() => Number(saldoSemanalCalculado.value?.saldo_inicial_efectivo || 0))
+const saldoInicialChequesSemana = computed(() => Number(saldoSemanalCalculado.value?.saldo_inicial_cheques || 0))
+const saldoInicialSemana = computed(() => saldoInicialEfectivoSemana.value + saldoInicialChequesSemana.value)
+const ingresosSemana = computed(() => Number(semanaActiva.value?.total_ingresos || 0))
+const egresosSemana = computed(() => Number(semanaActiva.value?.total_egresos || 0))
+const saldoFinalEfectivoSemana = computed(() => Number(saldoSemanalCalculado.value?.saldo_final_efectivo || 0))
+const saldoFinalChequesSemana = computed(() => Number(saldoSemanalCalculado.value?.saldo_final_cheques || 0))
+const saldoFinalSemana = computed(() => saldoFinalEfectivoSemana.value + saldoFinalChequesSemana.value)
+const semanaEstaCerrada = computed(() => String(semanaActiva.value?.estado || "").toLowerCase() === "cerrada")
+const etiquetaSemanaActiva = computed(() => {
+  if (!semanaActiva.value?.fecha_inicio || !semanaActiva.value?.fecha_fin) return "Semana actual"
+  const inicio = new Date(`${semanaActiva.value.fecha_inicio}T00:00:00`).toLocaleDateString("es-AR")
+  const fin = new Date(`${semanaActiva.value.fecha_fin}T00:00:00`).toLocaleDateString("es-AR")
+  return `${inicio} al ${fin}`
 })
 
 const presupuestosDisponibles = computed(() => {
@@ -135,13 +485,21 @@ const presupuestosDisponibles = computed(() => {
   return presupuestos.value.filter((p) => String(p.cliente_id) === String(form.value.cliente_id))
 })
 
+const clientesOrdenados = computed(() => {
+  return [...clientes.value].sort((a, b) => {
+    const etiquetaA = getEtiquetaCliente(a)
+    const etiquetaB = getEtiquetaCliente(b)
+    return etiquetaA.localeCompare(etiquetaB, "es", { sensitivity: "base" })
+  })
+})
+
 const cargarDatos = async () => {
   loading.value = true
   error.value = ""
   try {
     const res = await api.getMovimientosCaja(
-      filtroFechaInicio.value,
-      filtroFechaFin.value,
+      fechaInicioConsulta.value,
+      fechaFinConsulta.value,
       filtroTipo.value,
       filtroCaja.value
     )
@@ -168,8 +526,77 @@ const cargarReferencias = async () => {
   }
 }
 
+const cargarSemanasCaja = async (mantenerSeleccion = true) => {
+  try {
+    const [resSemanas, resSemanaActual] = await Promise.allSettled([
+      api.getSemanasCaja(filtroCaja.value),
+      api.getSemanaCajaActual(filtroCaja.value),
+    ])
+
+    if (resSemanas.status === "fulfilled") {
+      semanasCaja.value = (resSemanas.value.data || []).map((semana) => normalizarSemanaCaja(semana)).filter(Boolean)
+    }
+
+    if (resSemanaActual.status === "fulfilled") {
+      semanaActual.value = resSemanaActual.value.data ? normalizarSemanaCaja(resSemanaActual.value.data) : null
+    } else {
+      console.error("Error al cargar semana actual:", resSemanaActual.reason)
+      semanaActual.value = semanasCaja.value.find((semana) => String(semana.estado || "") === "abierta") || null
+    }
+
+    if (semanaActual.value && !semanasCaja.value.some((semana) => claveSemanaCaja(semana) === claveSemanaCaja(semanaActual.value))) {
+      semanasCaja.value = [semanaActual.value, ...semanasCaja.value]
+    }
+
+    if (!mantenerSeleccion || !semanaSeleccionadaId.value) {
+      semanaSeleccionadaId.value = semanaActual.value?.id ? String(semanaActual.value.id) : (semanasCaja.value[0]?.id ? String(semanasCaja.value[0].id) : "")
+      return
+    }
+
+    const existeSeleccion = semanasCaja.value.some((semana) => String(semana.id) === String(semanaSeleccionadaId.value))
+    if (existeSeleccion) return
+
+    const semanaSeleccionadaNormalizada = extraerSemanaIdNumerica(semanaSeleccionadaId.value)
+    if (semanaSeleccionadaNormalizada) {
+      const semanaEquivalente = semanasCaja.value.find((semana) => Number(semana.id) === semanaSeleccionadaNormalizada)
+      if (semanaEquivalente) {
+        semanaSeleccionadaId.value = String(semanaEquivalente.id)
+        return
+      }
+    }
+
+    semanaSeleccionadaId.value = semanaActual.value?.id ? String(semanaActual.value.id) : (semanasCaja.value[0]?.id ? String(semanasCaja.value[0].id) : "")
+  } catch (err) {
+    console.error("Error al cargar semanas de caja:", err)
+    if (!mantenerSeleccion && semanaActual.value?.id) {
+      semanaSeleccionadaId.value = String(semanaActual.value.id)
+    }
+  }
+}
+
+const refrescarCaja = async ({ mantenerSeleccion = true } = {}) => {
+  await cargarDatos()
+  await cargarSemanasCaja(mantenerSeleccion)
+}
+
 const aplicarFiltros = () => {
   cargarDatos()
+}
+
+const cerrarSemanaActual = async () => {
+  if (!semanaActiva.value?.id) return
+  const ok = window.confirm(`Se va a cerrar la semana ${etiquetaSemanaActiva.value} de ${cajaActiva.value.label}. La próxima semana arrancará con este saldo final.\n\n¿Deseás continuar?`)
+  if (!ok) return
+
+  try {
+    cerrandoSemana.value = true
+    await api.cerrarSemanaCaja(semanaActiva.value.id)
+    await refrescarCaja({ mantenerSeleccion: false })
+  } catch (err) {
+    error.value = `Error al cerrar semana: ${err.response?.data?.error || err.message}`
+  } finally {
+    cerrandoSemana.value = false
+  }
 }
 
 const textoTipoFiltro = () => {
@@ -180,12 +607,12 @@ const textoTipoFiltro = () => {
 
 const textoCajaFiltro = () => cajaActiva.value.label
 
-const textoRangoFechas = () => {
-  const desde = filtroFechaInicio.value
-    ? new Date(`${filtroFechaInicio.value}T00:00:00`).toLocaleDateString("es-AR")
+const textoRangoFechas = (fechaInicio = fechaInicioConsulta.value, fechaFin = fechaFinConsulta.value) => {
+  const desde = fechaInicio
+    ? new Date(`${fechaInicio}T00:00:00`).toLocaleDateString("es-AR")
     : "sin fecha de inicio"
-  const hasta = filtroFechaFin.value
-    ? new Date(`${filtroFechaFin.value}T00:00:00`).toLocaleDateString("es-AR")
+  const hasta = fechaFin
+    ? new Date(`${fechaFin}T00:00:00`).toLocaleDateString("es-AR")
     : "sin fecha de fin"
   return `desde ${desde} hasta ${hasta}`
 }
@@ -218,6 +645,42 @@ const descargarResumenPdf = async () => {
     window.URL.revokeObjectURL(url)
   } catch (err) {
     error.value = `Error al generar PDF: ${err.response?.data?.error || err.message}`
+  } finally {
+    generandoPdf.value = false
+  }
+}
+
+const descargarSemanaPdf = async () => {
+  if (!semanaActiva.value?.fecha_inicio || !semanaActiva.value?.fecha_fin) {
+    error.value = "Seleccioná una semana antes de descargar el PDF"
+    return
+  }
+
+  const ok = window.confirm(
+    `Se va a generar el resumen de la semana ${etiquetaSemanaActiva.value} para ${textoCajaFiltro()}.
+
+¿Deseás continuar?`
+  )
+  if (!ok) return
+
+  try {
+    generandoPdf.value = true
+    const res = await api.getResumenCajaPdf(
+      semanaActiva.value.fecha_inicio,
+      semanaActiva.value.fecha_fin,
+      filtroTipo.value,
+      filtroCaja.value
+    )
+
+    const blob = new Blob([res.data], { type: "application/pdf" })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement("a")
+    link.href = url
+    link.download = `Resumen semanal ${textoCajaFiltro()} ${semanaActiva.value.fecha_inicio} al ${semanaActiva.value.fecha_fin}.pdf`
+    link.click()
+    window.URL.revokeObjectURL(url)
+  } catch (err) {
+    error.value = `Error al generar PDF semanal: ${err.response?.data?.error || err.message}`
   } finally {
     generandoPdf.value = false
   }
@@ -264,18 +727,15 @@ const crearFormularioVacio = () => ({
   desglose: {
     efectivo: 0,
     transferencia: 0,
-    cheque: 0,
-    echeq: 0,
     retencion: 0
-  }
+  },
+  cheques: []
 })
 
 const normalizarDesglose = (detalles = []) => {
   const base = {
     efectivo: 0,
     transferencia: 0,
-    cheque: 0,
-    echeq: 0,
     retencion: 0
   }
 
@@ -287,6 +747,16 @@ const normalizarDesglose = (detalles = []) => {
   })
 
   return base
+}
+
+const normalizarCheques = (detalles = []) => {
+  return (detalles || [])
+    .filter((item) => ["cheque", "echeq"].includes(String(item?.medio_pago || "").toLowerCase()))
+    .map((item) => ({
+      medio_pago: String(item?.medio_pago || "").toLowerCase(),
+      monto: parseFloat(item?.monto || 0) || 0,
+      identificador: String(item?.identificador || "").trim(),
+    }))
 }
 
 const cerrarFormulario = () => {
@@ -302,6 +772,14 @@ const abrirFormulario = () => {
   showForm.value = true
 }
 
+const agregarCheque = (tipo = "cheque") => {
+  form.value.cheques.push(crearChequeVacio(tipo))
+}
+
+const eliminarCheque = (index) => {
+  form.value.cheques.splice(index, 1)
+}
+
 const abrirEdicion = (movimiento) => {
   form.value = {
     fecha: String(movimiento.fecha || "").split("T")[0],
@@ -314,7 +792,8 @@ const abrirEdicion = (movimiento) => {
     presupuesto_id: movimiento.presupuesto_id || "",
     detalle: movimiento.detalle || "",
     monto_total: parseFloat(movimiento.monto_total) || 0,
-    desglose: normalizarDesglose(movimiento.detalles_medio_pago || [])
+    desglose: normalizarDesglose(movimiento.detalles_medio_pago || []),
+    cheques: normalizarCheques(movimiento.detalles_medio_pago || [])
   }
   editandoMovimientoId.value = movimiento.id
   error.value = ""
@@ -335,10 +814,15 @@ const payloadMovimiento = () => ({
   desglose: {
     efectivo: parseFloat(form.value.desglose.efectivo) || 0,
     transferencia: parseFloat(form.value.desglose.transferencia) || 0,
-    cheque: parseFloat(form.value.desglose.cheque) || 0,
-    echeq: parseFloat(form.value.desglose.echeq) || 0,
     retencion: parseFloat(form.value.desglose.retencion) || 0
-  }
+  },
+  detalles_medio_pago: chequesCargados.value
+    .filter((item) => parseFloat(item?.monto || 0) > 0 && String(item?.identificador || "").trim())
+    .map((item) => ({
+      medio_pago: item.medio_pago,
+      monto: parseFloat(item.monto) || 0,
+      identificador: String(item.identificador || "").trim(),
+    }))
 })
 
 const guardarMovimiento = async () => {
@@ -405,16 +889,55 @@ const obtenerLabelMedio = (codigo) => {
   return medio ? medio.label : codigo
 }
 
+const getEtiquetaCliente = (cliente) => {
+  if (!cliente) return "-"
+  const empresa = String(cliente.empresa || "").trim()
+  const razonSocial = String(cliente.razon_social || "").trim()
+  return empresa || razonSocial || "-"
+}
+
 const getNombreCliente = (clienteId) => {
   if (!clienteId) return "-"
   const cliente = clientes.value.find((c) => String(c.id) === String(clienteId))
-  return cliente?.razon_social || `Cliente ${clienteId}`
+  return getEtiquetaCliente(cliente) !== "-" ? getEtiquetaCliente(cliente) : `Cliente ${clienteId}`
 }
 
 const getNumeroPresupuesto = (presupuestoId) => {
   if (!presupuestoId) return "-"
   const presupuesto = presupuestos.value.find((p) => String(p.id) === String(presupuestoId))
   return presupuesto?.numero ? `#${presupuesto.numero}` : `Presupuesto ${presupuestoId}`
+}
+
+const getLabelCategoria = (categoria) => {
+  if (categoria === "mano_obra") return "Mano de obra"
+  if (categoria === "materiales") return "Materiales"
+  if (categoria === "varios") return "Varios"
+  return "-"
+}
+
+const getChequesMovimiento = (movimiento) => {
+  return (movimiento?.detalles_medio_pago || []).filter((detalle) => {
+    return ["cheque", "echeq"].includes(String(detalle?.medio_pago || "").toLowerCase())
+  })
+}
+
+const getCantidadCheques = (movimiento) => getChequesMovimiento(movimiento).length
+
+const getIdentificadoresCheque = (movimiento) => {
+  const ids = getChequesMovimiento(movimiento)
+    .map((detalle) => String(detalle?.identificador || "").trim())
+    .filter(Boolean)
+
+  return ids.join(" · ")
+}
+
+const getResumenCheques = (movimiento) => {
+  const cantidad = getCantidadCheques(movimiento)
+  if (!cantidad) return ""
+
+  const ids = getIdentificadoresCheque(movimiento)
+  const textoCantidad = `${cantidad} ${cantidad === 1 ? "cheque" : "cheques"}`
+  return ids ? `${textoCantidad} · ${ids}` : textoCantidad
 }
 
 const getLabelCaja = (codigo) => {
@@ -430,7 +953,14 @@ const formatoMoneda = (valor) => {
 }
 
 watch(filtroCaja, () => {
-  cargarDatos()
+  semanaSeleccionadaId.value = ""
+  semanasCaja.value = []
+  semanaActual.value = null
+  refrescarCaja({ mantenerSeleccion: false })
+})
+
+watch(semanaSeleccionadaId, () => {
+  error.value = ""
 })
 
 watch(() => form.value.tipo, (tipo) => {
@@ -460,12 +990,12 @@ watch(() => form.value.cliente_id, (clienteId) => {
 })
 
 onMounted(() => {
-  cargarDatos()
+  refrescarCaja({ mantenerSeleccion: false })
   cargarReferencias()
-  socket.on('caja:changed', cargarDatos)
+  socket.on('caja:changed', handleCajaChanged)
 })
 onUnmounted(() => {
-  socket.off('caja:changed', cargarDatos)
+  socket.off('caja:changed', handleCajaChanged)
 })
 </script>
 
@@ -482,10 +1012,15 @@ onUnmounted(() => {
           <p>Seguí ingresos, egresos y composición por medio de pago desde una sola vista, con filtros rápidos y acceso directo a cada movimiento.</p>
         </div>
         <div class="caja-topbar-actions">
-          <button class="btn btn-pdf" :disabled="generandoPdf" @click="descargarResumenPdf">
-            {{ generandoPdf ? "Generando PDF..." : "Descargar Resumen PDF" }}
-          </button>
-          <button class="btn btn-primary" @click="abrirFormulario">
+          <div class="caja-pdf-actions">
+            <button class="btn btn-pdf" :disabled="generandoPdf" @click="descargarResumenPdf">
+              {{ generandoPdf ? "Generando PDF..." : "Descargar Resumen PDF" }}
+            </button>
+            <button class="btn btn-pdf btn-pdf-week" :disabled="generandoPdf || !semanaActiva" @click="descargarSemanaPdf">
+              {{ generandoPdf ? "Generando PDF..." : "Descargar semana seleccionada" }}
+            </button>
+          </div>
+          <button class="btn btn-primary" :disabled="semanaEstaCerrada" @click="abrirFormulario">
             + Nuevo Movimiento
           </button>
         </div>
@@ -504,6 +1039,60 @@ onUnmounted(() => {
         </button>
       </div>
 
+      <section class="caja-semana-shell" v-if="semanaActiva">
+        <div class="caja-semana-header">
+          <div class="caja-semana-copy">
+            <span class="section-kicker">Caja semanal</span>
+            <h3>{{ etiquetaSemanaActiva }}</h3>
+            <p>La semana nueva arranca con el saldo final de la anterior y los movimientos quedan encapsulados en su propio período.</p>
+          </div>
+          <div class="caja-semana-actions">
+            <label class="caja-semana-select">
+              <span>Semana</span>
+              <select v-model="semanaSeleccionadaId" class="select-sm">
+                <option v-for="semana in semanasCajaVisibles" :key="semana.id" :value="String(semana.id)">
+                  {{ new Date(`${semana.fecha_inicio}T00:00:00`).toLocaleDateString("es-AR") }} - {{ new Date(`${semana.fecha_fin}T00:00:00`).toLocaleDateString("es-AR") }} {{ String(semana.estado) === 'abierta' ? '(actual)' : '' }}
+                </option>
+              </select>
+            </label>
+            <button
+              v-if="!semanaEstaCerrada"
+              class="btn btn-week-close"
+              :disabled="cerrandoSemana"
+              @click="cerrarSemanaActual"
+            >
+              {{ cerrandoSemana ? "Cerrando..." : "Cerrar semana" }}
+            </button>
+            <span :class="['week-badge', semanaEstaCerrada ? 'week-badge-closed' : 'week-badge-open']">
+              {{ semanaEstaCerrada ? "Cerrada" : "Abierta" }}
+            </span>
+          </div>
+        </div>
+
+        <div class="caja-semana-grid">
+          <article class="caja-semana-card">
+            <span>Saldo inicial</span>
+            <strong>{{ formatoMoneda(saldoInicialSemana) }}</strong>
+            <small class="caja-semana-meta">Efectivo: {{ formatoMoneda(saldoInicialEfectivoSemana) }}</small>
+            <small class="caja-semana-meta">Cheques: {{ formatoMoneda(saldoInicialChequesSemana) }}</small>
+          </article>
+          <article class="caja-semana-card caja-semana-card-in">
+            <span>Ingresos semana</span>
+            <strong>{{ formatoMoneda(ingresosSemana) }}</strong>
+          </article>
+          <article class="caja-semana-card caja-semana-card-out">
+            <span>Egresos semana</span>
+            <strong>{{ formatoMoneda(egresosSemana) }}</strong>
+          </article>
+          <article class="caja-semana-card caja-semana-card-balance">
+            <span>Saldo final</span>
+            <strong>{{ formatoMoneda(saldoFinalSemana) }}</strong>
+            <small class="caja-semana-meta">Efectivo: {{ formatoMoneda(saldoFinalEfectivoSemana) }}</small>
+            <small class="caja-semana-meta">Cheques: {{ formatoMoneda(saldoFinalChequesSemana) }}</small>
+          </article>
+        </div>
+      </section>
+
       <section class="caja-stats-grid">
         <article class="caja-stat-card caja-stat-balance">
           <span class="stat-label">Balance actual</span>
@@ -513,12 +1102,12 @@ onUnmounted(() => {
         <article class="caja-stat-card caja-stat-ingresos">
           <span class="stat-label">Ingresos filtrados</span>
           <strong class="stat-value">{{ cantidadIngresos }}</strong>
-          <small>{{ formatoMoneda(totales.totalIngresos || 0) }}</small>
+          <small>{{ formatoMoneda(totalIngresosVisibles) }}</small>
         </article>
         <article class="caja-stat-card caja-stat-egresos">
           <span class="stat-label">Egresos filtrados</span>
           <strong class="stat-value">{{ cantidadEgresos }}</strong>
-          <small>{{ formatoMoneda(totales.totalEgresos || 0) }}</small>
+          <small>{{ formatoMoneda(totalEgresosVisibles) }}</small>
         </article>
         <article class="caja-stat-card caja-stat-movimientos">
           <span class="stat-label">Movimientos visibles</span>
@@ -561,15 +1150,15 @@ onUnmounted(() => {
       <div class="resumen-totales">
         <div class="total-card total-ingresos">
           <span class="label">Total Ingresos</span>
-          <span class="value">{{ formatoMoneda(totales.totalIngresos || 0) }}</span>
+          <span class="value">{{ formatoMoneda(totalIngresosVisibles) }}</span>
         </div>
         <div class="total-card total-egresos">
           <span class="label">Total Egresos</span>
-          <span class="value">{{ formatoMoneda(totales.totalEgresos || 0) }}</span>
+          <span class="value">{{ formatoMoneda(totalEgresosVisibles) }}</span>
         </div>
         <div class="total-card total-balance">
           <span class="label">Balance</span>
-          <span class="value">{{ formatoMoneda((totales.totalIngresos || 0) - (totales.totalEgresos || 0)) }}</span>
+          <span class="value">{{ formatoMoneda(balanceActual) }}</span>
         </div>
       </div>
 
@@ -609,8 +1198,10 @@ onUnmounted(() => {
           <tr>
             <th>Fecha</th>
             <th>Tipo</th>
+            <th>Categoría</th>
             <th>Destino / Referencia</th>
             <th>Detalle</th>
+            <th>Cheques / IDs</th>
             <th>Monto Total</th>
             <th>Acciones</th>
           </tr>
@@ -623,8 +1214,20 @@ onUnmounted(() => {
                 {{ mov.tipo === 'ingreso' ? 'Ingreso' : 'Egreso' }}
               </span>
             </td>
-            <td>{{ mov.tipo === 'egreso' ? (mov.destinatario || '-') : (getNumeroPresupuesto(mov.presupuesto_id) !== '-' ? getNumeroPresupuesto(mov.presupuesto_id) : getNombreCliente(mov.cliente_id)) }}</td>
+            <td>
+              <span>{{ mov.tipo === 'ingreso' ? getLabelCategoria(mov.categoria) : '-' }}</span>
+            </td>
+            <td>
+              <div class="tabla-referencia">
+                <strong>{{ mov.tipo === 'egreso' ? (mov.destinatario || '-') : (getNumeroPresupuesto(mov.presupuesto_id) !== '-' ? getNumeroPresupuesto(mov.presupuesto_id) : getNombreCliente(mov.cliente_id)) }}</strong>
+                <small v-if="getIdentificadoresCheque(mov)">Cheque(s): {{ getIdentificadoresCheque(mov) }}</small>
+              </div>
+            </td>
             <td>{{ mov.detalle }}</td>
+            <td class="td-cheques">
+              <span v-if="getCantidadCheques(mov)">{{ getResumenCheques(mov) }}</span>
+              <span v-else>-</span>
+            </td>
             <td class="monto-total">{{ formatoMoneda(mov.monto_total) }}</td>
             <td class="acciones">
               <button class="btn btn-sm btn-info" @click="abrirEdicion(mov)">
@@ -698,7 +1301,7 @@ onUnmounted(() => {
             </div>
             <div class="info-item">
               <label>Categoría</label>
-              <p>{{ movimientoSeleccionado.categoria === 'materiales' ? 'Materiales' : (movimientoSeleccionado.categoria === 'mano_obra' ? 'Mano de obra' : '-') }}</p>
+              <p>{{ movimientoSeleccionado.categoria === 'materiales' ? 'Materiales' : (movimientoSeleccionado.categoria === 'mano_obra' ? 'Mano de obra' : (movimientoSeleccionado.categoria === 'varios' ? 'Varios' : '-')) }}</p>
             </div>
             <div class="info-item">
               <label>Concepto IVA</label>
@@ -716,6 +1319,10 @@ onUnmounted(() => {
               <label>Presupuesto asociado</label>
               <p>{{ getNumeroPresupuesto(movimientoSeleccionado.presupuesto_id) }}</p>
             </div>
+            <div class="info-item" v-if="getCantidadCheques(movimientoSeleccionado)">
+              <label>Cheques asociados</label>
+              <p>{{ getResumenCheques(movimientoSeleccionado) }}</p>
+            </div>
           </div>
         </div>
 
@@ -727,6 +1334,7 @@ onUnmounted(() => {
                  :key="detalle.id" 
                  class="desglose-item">
               <span class="medio-label">{{ obtenerLabelMedio(detalle.medio_pago) }}</span>
+              <span v-if="detalle.identificador" class="medio-identificador">ID: {{ detalle.identificador }}</span>
               <span class="medio-monto">{{ formatoMoneda(detalle.monto) }}</span>
             </div>
           </div>
@@ -803,6 +1411,7 @@ onUnmounted(() => {
               <select v-model="form.categoria" required>
                 <option value="mano_obra">Mano de obra</option>
                 <option value="materiales">Materiales</option>
+                <option value="varios">Varios</option>
               </select>
             </label>
             <label class="form-group form-card-field">
@@ -824,8 +1433,8 @@ onUnmounted(() => {
               <span>Cliente (opcional)</span>
               <select v-model="form.cliente_id">
                 <option value="">Sin cliente</option>
-                <option v-for="cliente in clientes" :key="cliente.id" :value="cliente.id">
-                  {{ cliente.razon_social }}
+                <option v-for="cliente in clientesOrdenados" :key="cliente.id" :value="cliente.id">
+                  {{ getEtiquetaCliente(cliente) }}
                 </option>
               </select>
             </label>
@@ -847,7 +1456,7 @@ onUnmounted(() => {
 
           <label class="form-group form-card-field form-card-field-accent">
             <span>Monto total *</span>
-            <input v-model.number="form.monto_total" type="number" placeholder="0.00" step="0.01" required />
+            <input v-model.number="form.monto_total" type="number" @wheel.prevent placeholder="0.00" step="0.01" required />
           </label>
         </section>
 
@@ -869,20 +1478,80 @@ onUnmounted(() => {
               <p>Usá este bloque para distribuir el movimiento entre efectivo, transferencias, cheques, eCheq y retenciones.</p>
             </div>
             <div class="desglose-grid-compact">
-              <div v-for="medio in mediosDePago" :key="medio.id" class="desglose-compact-item">
+              <div v-for="medio in mediosDePagoSimples" :key="medio.id" class="desglose-compact-item">
                 <label>{{ medio.label }}</label>
                 <input 
                   v-model.number="form.desglose[medio.id]" 
-                  type="number" 
+                  type="number"
+                  @wheel.prevent
                   placeholder="0.00" 
                   step="0.01"
                 />
               </div>
             </div>
+            <div class="cheques-section">
+              <div class="cheques-section-header">
+                <div>
+                  <span class="section-kicker">Cheques</span>
+                  <h4>Cheques y eCheq</h4>
+                  <div class="cheques-header-side">
+                    <small>Agregá solo si el movimiento incluye uno o varios cheques.</small>
+                    <span class="cheques-count">{{ form.cheques.length }} cargado<span v-if="form.cheques.length !== 1">s</span></span>
+                  </div>
+                </div>
+                <small>Agregá solo si el movimiento incluye cheques.</small>
+              </div>
+
+              <div class="cheques-intro">
+                <div class="cheques-intro-copy">
+                  <strong>Identifica cada cheque por separado.</strong>
+                  <p>Podes cargar uno o varios, y a cada uno asignarle su identificador alfanumerico.</p>
+                </div>
+                <div class="cheques-actions cheques-actions-prominent">
+                  <button type="button" class="btn btn-cheque-add" @click="agregarCheque('cheque')">Agregar cheque</button>
+                  <button type="button" class="btn btn-cheque-add btn-cheque-add-alt" @click="agregarCheque('echeq')">Agregar eCheq</button>
+                 
+                </div>
+              </div>
+
+              <div v-if="form.cheques.length > 0" class="cheques-list">
+                <div v-for="(cheque, index) in form.cheques" :key="index" class="cheque-card">
+                  <div class="cheque-card-top">
+                    <span class="cheque-card-index">Cheque {{ index + 1 }}</span>
+                    <span class="cheque-card-caption">Monto e identificador del documento</span>
+                  </div>
+                  <div class="cheque-card-row cheque-card-row-main">
+                    <label class="form-group form-card-field">
+                      <span>Tipo</span>
+                      <select v-model="cheque.medio_pago">
+                        <option v-for="tipoCheque in tiposCheque" :key="tipoCheque.id" :value="tipoCheque.id">
+                          {{ tipoCheque.label }}
+                        </option>
+                      </select>
+                    </label>
+                    <label class="form-group form-card-field">
+                      <span>Monto</span>
+                      <input v-model.number="cheque.monto" type="number" @wheel.prevent min="0" step="0.01" placeholder="0.00" />
+                    </label>
+                    <label class="form-group form-card-field">
+                      <span>Identificador *</span>
+                      <input v-model="cheque.identificador" type="text" placeholder="Ej: CHQ-A12345" />
+                    </label>
+                    <div class="cheque-card-remove">
+                      <button type="button" class="btn btn-cheque-remove" @click="eliminarCheque(index)">Quitar cheque</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div v-else class="cheques-empty-card">
+                <span class="cheques-empty-label">Sin cheques cargados</span>
+                <p>Si este movimiento fue pagado con cheque o eCheq, agregalo desde los botones de arriba y completa su identificador.</p>
+              </div>
+            </div>
             <div class="desglose-validacion-compact" :class="{ error: tieneErrorDesglose, ok: !tieneErrorDesglose }">
               <div class="desglose-validacion-copy">
                 <span>Total distribuido</span>
-                <strong>{{ formatoMoneda(Object.values(form.desglose).reduce((sum, val) => sum + parseFloat(val || 0), 0)) }}</strong>
+                <strong>{{ formatoMoneda(sumaMediosPago) }}</strong>
               </div>
               <span v-if="tieneErrorDesglose" class="error-badge">No coincide con el total</span>
               <span v-else class="success-badge">Desglose correcto</span>
@@ -995,10 +1664,155 @@ onUnmounted(() => {
   flex-wrap: wrap;
 }
 
+.caja-pdf-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.btn-pdf-week {
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.95), rgba(29, 78, 216, 0.95));
+  color: #eff6ff;
+}
+
 .caja-tabs {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 0.75rem;
+}
+
+.caja-semana-shell {
+  padding: 1.25rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.12), transparent 28%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.78), rgba(15, 23, 42, 0.94));
+}
+
+.caja-semana-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.caja-semana-copy {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.caja-semana-copy h3 {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 1.35rem;
+}
+
+.caja-semana-copy p {
+  margin: 0;
+  max-width: 68ch;
+  color: #94a3b8;
+  line-height: 1.5;
+}
+
+.caja-semana-actions {
+  display: flex;
+  align-items: end;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.caja-semana-select {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 260px;
+  color: #d1d5db;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.caja-semana-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.9rem;
+}
+
+.caja-semana-card {
+  display: grid;
+  gap: 0.35rem;
+  padding: 1rem 1.05rem;
+  border-radius: 0.95rem;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.72), rgba(15, 23, 42, 0.92));
+}
+
+.caja-semana-card span {
+  color: #94a3b8;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.caja-semana-card strong {
+  color: #f8fafc;
+  font-size: 1.35rem;
+}
+
+.caja-semana-meta {
+  color: #cbd5e1;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.caja-semana-card-in strong {
+  color: #86efac;
+}
+
+.caja-semana-card-out strong {
+  color: #fca5a5;
+}
+
+.caja-semana-card-balance strong {
+  color: #7dd3fc;
+}
+
+.btn-week-close {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  color: #fff7ed;
+  border-color: rgba(251, 191, 36, 0.42);
+}
+
+.btn-week-close:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 18px rgba(245, 158, 11, 0.28);
+}
+
+.week-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.9rem;
+  padding: 0.72rem 0.95rem;
+  border-radius: 0.8rem;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.week-badge-open {
+  color: #bbf7d0;
+  background: rgba(22, 163, 74, 0.18);
+  border: 1px solid rgba(74, 222, 128, 0.24);
+}
+
+.week-badge-closed {
+  color: #fde68a;
+  background: rgba(202, 138, 4, 0.18);
+  border: 1px solid rgba(250, 204, 21, 0.24);
 }
 
 .caja-tab {
@@ -1072,6 +1886,25 @@ onUnmounted(() => {
 
 .input-search {
   min-width: 280px;
+}
+
+.tabla-referencia {
+  display: grid;
+  gap: 0.18rem;
+}
+
+.td-cheques {
+  min-width: 190px;
+  color: #bfdbfe;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.tabla-referencia small,
+.medio-identificador {
+  color: #93c5fd;
+  font-size: 0.78rem;
+  font-weight: 600;
 }
 
 .toolbar-acciones {
@@ -1819,6 +2652,239 @@ onUnmounted(() => {
   font-size: 1rem;
 }
 
+.cheques-section {
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.9rem;
+  padding: 1rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.1), transparent 28%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.78), rgba(15, 23, 42, 0.94));
+}
+
+.cheques-section-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.cheques-section-header > div {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.cheques-section-header > small {
+  display: none;
+}
+
+.cheques-header-side {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.cheques-header-side small {
+  color: #94a3b8;
+  line-height: 1.45;
+}
+
+.cheques-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid rgba(125, 211, 252, 0.24);
+  background: rgba(30, 64, 175, 0.24);
+  color: #bfdbfe;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.cheques-intro {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.95rem 1rem;
+  border-radius: 0.95rem;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.72), rgba(15, 23, 42, 0.92));
+}
+
+.cheques-intro-copy {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.cheques-intro-copy strong {
+  color: #f8fafc;
+  font-size: 0.96rem;
+}
+
+.cheques-intro-copy p {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.cheques-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.cheques-actions-prominent {
+  justify-content: flex-end;
+}
+
+.btn-cheque-add {
+  margin-top: 0;
+  padding: 0.72rem 1rem;
+  border-radius: 0.85rem;
+  border: 1px solid rgba(96, 165, 250, 0.24);
+  background: linear-gradient(180deg, rgba(29, 78, 216, 0.34), rgba(30, 64, 175, 0.24));
+  color: #dbeafe;
+  font-size: 0.84rem;
+  font-weight: 700;
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.btn-cheque-add:hover {
+  transform: translateY(-1px);
+  border-color: rgba(125, 211, 252, 0.34);
+  background: linear-gradient(180deg, rgba(37, 99, 235, 0.44), rgba(30, 64, 175, 0.3));
+}
+
+.btn-cheque-add-alt {
+  background: linear-gradient(180deg, rgba(8, 145, 178, 0.28), rgba(14, 116, 144, 0.22));
+  border-color: rgba(103, 232, 249, 0.22);
+}
+
+.btn-cheque-save {
+  margin-top: 0;
+  padding: 0.72rem 1rem;
+  border-radius: 0.85rem;
+  border: 1px solid rgba(74, 222, 128, 0.24);
+  background: linear-gradient(180deg, rgba(22, 163, 74, 0.34), rgba(21, 128, 61, 0.24));
+  color: #dcfce7;
+  font-size: 0.84rem;
+  font-weight: 700;
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.btn-cheque-save:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(134, 239, 172, 0.34);
+  background: linear-gradient(180deg, rgba(22, 163, 74, 0.44), rgba(21, 128, 61, 0.3));
+}
+
+.btn-cheque-save:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.cheques-list {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.cheque-card {
+  padding: 0.95rem;
+  border-radius: 0.9rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.42);
+  display: grid;
+  gap: 0.75rem;
+}
+
+.cheque-card-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.cheque-card-index {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.28rem 0.6rem;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.18);
+  color: #bfdbfe;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.cheque-card-caption {
+  color: #94a3b8;
+  font-size: 0.8rem;
+}
+
+.cheque-card-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.cheque-card-row-main {
+  grid-template-columns: 140px 1fr 1.2fr auto;
+  align-items: end;
+}
+
+.cheque-card-remove {
+  display: flex;
+  align-items: end;
+}
+
+.btn-cheque-remove {
+  margin-top: 0;
+  min-height: 44px;
+  padding: 0.72rem 0.95rem;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(248, 113, 113, 0.26);
+  background: linear-gradient(180deg, rgba(127, 29, 29, 0.28), rgba(69, 10, 10, 0.22));
+  color: #fecaca;
+  font-size: 0.8rem;
+  font-weight: 700;
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.btn-cheque-remove:hover {
+  transform: translateY(-1px);
+  border-color: rgba(252, 165, 165, 0.36);
+  background: linear-gradient(180deg, rgba(153, 27, 27, 0.38), rgba(127, 29, 29, 0.28));
+}
+
+.cheques-empty-card {
+  display: grid;
+  gap: 0.35rem;
+  padding: 1rem;
+  border-radius: 0.95rem;
+  border: 1px dashed rgba(148, 163, 184, 0.26);
+  background: rgba(15, 23, 42, 0.36);
+}
+
+.cheques-empty-label {
+  color: #f8fafc;
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.cheques-empty-card p {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
 .form-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -2183,7 +3249,9 @@ onUnmounted(() => {
   .caja-topbar,
   .detalle-hero,
   .section-heading,
+  .caja-semana-header,
   .modal-section-header,
+  .cheques-intro,
   .desglose-compacto-header,
   .modal-header-movimiento {
     flex-direction: column;
@@ -2208,6 +3276,18 @@ onUnmounted(() => {
 
   .desglose-grid-compact {
     grid-template-columns: 1fr;
+  }
+
+  .caja-semana-select {
+    min-width: 100%;
+  }
+
+  .cheque-card-row-main {
+    grid-template-columns: 1fr;
+  }
+
+  .cheque-card-remove {
+    align-items: stretch;
   }
 
   .desglose-compact-item:last-child {

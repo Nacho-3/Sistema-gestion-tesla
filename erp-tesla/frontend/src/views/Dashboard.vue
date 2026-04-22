@@ -6,9 +6,9 @@ import LayoutShell from "../components/LayoutShell.vue"
 import { formatHoursAsClock } from "../utils/hourFormat"
 
 const CAJAS_DASHBOARD = [
-  { key: "Tesla", label: "Caja Tesla" },
-  { key: "Teslita", label: "Caja Teslita" },
-  { key: "Juani", label: "Caja Juani" },
+  { key: "tesla", label: "Caja Tesla" },
+  { key: "teslita", label: "Caja Teslita" },
+  { key: "juani", label: "Caja Juani" },
 ]
 
 const resumen = ref({
@@ -18,9 +18,9 @@ const resumen = ref({
   ingresos_mes: 0,
   egresos_mes: 0,
   cajas_mes: {
-    Tesla: { ingresos: 0, egresos: 0, saldo: 0 },
-    Teslita: { ingresos: 0, egresos: 0, saldo: 0 },
-    Juani: { ingresos: 0, egresos: 0, saldo: 0 },
+    tesla: { ingresos: 0, egresos: 0, saldo: 0 },
+    teslita: { ingresos: 0, egresos: 0, saldo: 0 },
+    juani: { ingresos: 0, egresos: 0, saldo: 0 },
   },
   presupuestos_pendientes: []
 })
@@ -59,9 +59,9 @@ const resetearResumenMensual = () => {
   resumen.value.ingresos_mes = 0
   resumen.value.egresos_mes = 0
   resumen.value.cajas_mes = {
-    Tesla: { ingresos: 0, egresos: 0, saldo: 0 },
-    Teslita: { ingresos: 0, egresos: 0, saldo: 0 },
-    Juani: { ingresos: 0, egresos: 0, saldo: 0 },
+    tesla: { ingresos: 0, egresos: 0, saldo: 0 },
+    teslita: { ingresos: 0, egresos: 0, saldo: 0 },
+    juani: { ingresos: 0, egresos: 0, saldo: 0 },
   }
   resumen.value.presupuestos_pendientes = []
   ultimosMovimientos.value = []
@@ -93,9 +93,9 @@ const cargarResumen = async () => {
       ingresos_mes: toNumber(data.ingresos_mes),
       egresos_mes: toNumber(data.egresos_mes),
       cajas_mes: data.cajas_mes || {
-        Tesla: { ingresos: 0, egresos: 0, saldo: 0 },
-        Teslita: { ingresos: 0, egresos: 0, saldo: 0 },
-        Juani: { ingresos: 0, egresos: 0, saldo: 0 },
+        tesla: { ingresos: 0, egresos: 0, saldo: 0 },
+        teslita: { ingresos: 0, egresos: 0, saldo: 0 },
+        juani: { ingresos: 0, egresos: 0, saldo: 0 },
       },
       presupuestos_pendientes: Array.isArray(data.presupuestos_pendientes) ? data.presupuestos_pendientes : [],
     }
@@ -183,7 +183,7 @@ onUnmounted(() => {
               <span class="stat-kicker">Caja</span>
               <h2>{{ caja.label }}</h2>
             </div>
-            <span class="caja-pill">{{ caja.key }}</span>
+            <!--<span class="caja-pill">{{ caja.key }}</span>-->
           </div>
           <p class="stat-value saldo">
             $ {{ getCajaResumen(caja.key).saldo.toLocaleString("es-AR", { minimumFractionDigits: 2 }) }}
@@ -300,8 +300,8 @@ onUnmounted(() => {
 }
 
 .dashboard-topbar-badge,
-.panel-count,
-.caja-pill {
+.panel-count
+/*.caja-pill*/ {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -439,6 +439,7 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
+  align-items: start;
 }
 
 .panel-col {
@@ -451,6 +452,8 @@ onUnmounted(() => {
   box-shadow:
     0 18px 38px rgba(15, 23, 42, 0.35),
     0 0 0 1px rgba(15, 23, 42, 0.3);
+  height: fit-content;
+  align-self: start;
 }
 
 .panel-col h3 {
