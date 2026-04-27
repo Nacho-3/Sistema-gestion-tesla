@@ -15,7 +15,6 @@ const clientes = ref([])
 const presupuestos = ref([])
 const vistaActual = ref("lista") // "lista" o "detalle"
 const movimientoSeleccionado = ref(null)
-const totales = ref({})
 const loading = ref(false)
 const error = ref("")
 const showForm = ref(false)
@@ -29,7 +28,11 @@ const filtroBusqueda = ref("")
 const semanasCaja = ref([])
 const semanaActual = ref(null)
 const semanaSeleccionadaId = ref("")
-const cerrandoSemana = ref(false)
+const mostrarModalCerrarSemana = ref(false)
+const saldoBancoCierre = ref("")
+const saldoPendienteEcheqCierre = ref("")
+const proximaSemanaInfo = ref(null)
+const confirmandoCierre = ref(false)
 
 // Filtros
 const filtroFechaInicio = ref("")
@@ -47,6 +50,7 @@ const form = ref({
   cliente_id: "",
   presupuesto_id: "",
   detalle: "",
+  observaciones: "",
   monto_total: 0,
   desglose: {
     efectivo: 0,
@@ -79,8 +83,10 @@ const handleCajaChanged = () => {
   refrescarCaja()
 }
 
-const crearChequeVacio = (tipo = "cheque") => ({
-  medio_pago: tipo,
+
+// Siempre crear cheques nuevos como 'cheque' por defecto
+const crearChequeVacio = () => ({
+  medio_pago: "cheque",
   monto: 0,
   identificador: "",
 })
@@ -131,6 +137,8 @@ const normalizarSemanaCaja = (semana, defaults = {}) => {
     saldo_final: Number(semana.saldo_final ?? defaults.saldo_final ?? 0),
     saldo_final_efectivo: Number(semana.saldo_final_efectivo ?? defaults.saldo_final_efectivo ?? 0),
     saldo_final_cheques: Number(semana.saldo_final_cheques ?? defaults.saldo_final_cheques ?? 0),
+    saldo_banco: semana.saldo_banco === null || semana.saldo_banco === undefined ? null : Number(semana.saldo_banco),
+    saldo_pendiente_echeq: semana.saldo_pendiente_echeq === null || semana.saldo_pendiente_echeq === undefined ? null : Number(semana.saldo_pendiente_echeq),
     estado: String(semana.estado || defaults.estado || "cerrada").toLowerCase(),
   }
 }
@@ -168,76 +176,6 @@ const movimientoPerteneceASemana = (movimiento, semana) => {
 
   return (!inicio || fechaMovimiento >= inicio) && (!fin || fechaMovimiento <= fin)
 }
-
-const actualizarSaldoPorMedioLocal = (acumulador, movimiento) => {
-  const signo = String(movimiento?.tipo || "").toLowerCase() === "egreso" ? -1 : 1
-  let montoAplicado = 0
-  const detalles = Array.isArray(movimiento?.detalles_medio_pago) ? movimiento.detalles_medio_pago : []
-
-  detalles.forEach((detalle) => {
-    const medio = String(detalle?.medio_pago || "").toLowerCase()
-    const monto = Number(detalle?.monto || 0)
-    if (!(monto > 0)) return
-
-    if (medio === "efectivo") {
-      acumulador.efectivo += signo * monto
-      montoAplicado += monto
-    }
-
-    if (medio === "cheque") {
-      acumulador.cheques += signo * monto
-      montoAplicado += monto
-    }
-  })
-
-  if (detalles.length === 0 && !(montoAplicado > 0)) {
-    acumulador.efectivo += signo * Number(movimiento?.monto_total || 0)
-  }
-}
-
-const saldoSemanalCalculado = computed(() => {
-  if (!semanaActiva.value?.fecha_inicio || !semanaActiva.value?.fecha_fin) {
-    return {
-      saldo_inicial_efectivo: 0,
-      saldo_inicial_cheques: 0,
-      saldo_final_efectivo: 0,
-      saldo_final_cheques: 0,
-    }
-  }
-
-  const inicioSemana = normalizarFechaSemana(semanaActiva.value.fecha_inicio)
-  const finSemana = normalizarFechaSemana(semanaActiva.value.fecha_fin)
-  const movimientosCaja = (movimientos.value || [])
-    .filter((movimiento) => String(movimiento?.caja_codigo || "").toLowerCase() === filtroCaja.value)
-    .slice()
-    .sort((a, b) => new Date(a.fecha) - new Date(b.fecha))
-
-  const acumulador = { efectivo: 0, cheques: 0 }
-
-  movimientosCaja.forEach((movimiento) => {
-    const fechaMovimiento = normalizarFechaSemana(movimiento?.fecha)
-    if (!fechaMovimiento || fechaMovimiento >= inicioSemana) return
-    actualizarSaldoPorMedioLocal(acumulador, movimiento)
-  })
-
-  const saldoInicial = {
-    saldo_inicial_efectivo: acumulador.efectivo,
-    saldo_inicial_cheques: acumulador.cheques,
-  }
-
-  movimientosCaja.forEach((movimiento) => {
-    const fechaMovimiento = normalizarFechaSemana(movimiento?.fecha)
-    if (!fechaMovimiento || fechaMovimiento < inicioSemana || fechaMovimiento > finSemana) return
-    if (!movimientoPerteneceASemana(movimiento, semanaActiva.value)) return
-    actualizarSaldoPorMedioLocal(acumulador, movimiento)
-  })
-
-  return {
-    ...saldoInicial,
-    saldo_final_efectivo: acumulador.efectivo,
-    saldo_final_cheques: acumulador.cheques,
-  }
-})
 
 const cajaActiva = computed(() => {
   return CAJAS_DISPONIBLES.find((caja) => caja.id === filtroCaja.value) || CAJAS_DISPONIBLES[0]
@@ -410,12 +348,14 @@ const sumaMediosPago = computed(() => {
 })
 
 const cajaSemanalIdConsulta = computed(() => extraerSemanaIdNumerica(semanaSeleccionadaId.value))
+const hayFiltroFecha = computed(() => Boolean(filtroFechaInicio.value || filtroFechaFin.value))
+const semanaAplicadaAFiltros = computed(() => (hayFiltroFecha.value ? null : semanaActiva.value))
 
 const movimientosFiltrados = computed(() => {
   let resultado = movimientos.value
 
-  if (semanaActiva.value) {
-    resultado = resultado.filter((movimiento) => movimientoPerteneceASemana(movimiento, semanaActiva.value))
+  if (semanaAplicadaAFiltros.value) {
+    resultado = resultado.filter((movimiento) => movimientoPerteneceASemana(movimiento, semanaAplicadaAFiltros.value))
   }
 
   if (filtroTipo.value) {
@@ -431,6 +371,7 @@ const movimientosFiltrados = computed(() => {
 
       return [
         movimiento.detalle,
+        movimiento.observaciones,
         referencia,
         movimiento.tipo,
         movimiento.categoria,
@@ -456,21 +397,25 @@ const cantidadIngresos = computed(() => movimientosFiltrados.value.filter((mov) 
 const cantidadEgresos = computed(() => movimientosFiltrados.value.filter((mov) => mov.tipo === "egreso").length)
 const fechaInicioConsulta = computed(() => filtroFechaInicio.value)
 const fechaFinConsulta = computed(() => filtroFechaFin.value)
+const puedeDescargarResumenGeneral = computed(() => Boolean(filtroFechaInicio.value && filtroFechaFin.value))
 const rangoActivoDescripcion = computed(() => {
-  if (semanaActiva.value?.fecha_inicio && semanaActiva.value?.fecha_fin) {
-    return `Semana ${textoRangoFechas(semanaActiva.value.fecha_inicio, semanaActiva.value.fecha_fin)}`
+  if (hayFiltroFecha.value) {
+    return `Filtro por fechas ${textoRangoFechas()}`
+  }
+  if (semanaAplicadaAFiltros.value?.fecha_inicio && semanaAplicadaAFiltros.value?.fecha_fin) {
+    return `Semana ${textoRangoFechas(semanaAplicadaAFiltros.value.fecha_inicio, semanaAplicadaAFiltros.value.fecha_fin)}`
   }
   if (!filtroFechaInicio.value && !filtroFechaFin.value) return "Sin rango de fechas aplicado"
   return textoRangoFechas()
 })
 
-const saldoInicialEfectivoSemana = computed(() => Number(saldoSemanalCalculado.value?.saldo_inicial_efectivo || 0))
-const saldoInicialChequesSemana = computed(() => Number(saldoSemanalCalculado.value?.saldo_inicial_cheques || 0))
+const saldoInicialEfectivoSemana = computed(() => Number(semanaActiva.value?.saldo_inicial_efectivo || 0))
+const saldoInicialChequesSemana = computed(() => Number(semanaActiva.value?.saldo_inicial_cheques || 0))
 const saldoInicialSemana = computed(() => saldoInicialEfectivoSemana.value + saldoInicialChequesSemana.value)
 const ingresosSemana = computed(() => Number(semanaActiva.value?.total_ingresos || 0))
 const egresosSemana = computed(() => Number(semanaActiva.value?.total_egresos || 0))
-const saldoFinalEfectivoSemana = computed(() => Number(saldoSemanalCalculado.value?.saldo_final_efectivo || 0))
-const saldoFinalChequesSemana = computed(() => Number(saldoSemanalCalculado.value?.saldo_final_cheques || 0))
+const saldoFinalEfectivoSemana = computed(() => Number(semanaActiva.value?.saldo_final_efectivo || 0))
+const saldoFinalChequesSemana = computed(() => Number(semanaActiva.value?.saldo_final_cheques || 0))
 const saldoFinalSemana = computed(() => saldoFinalEfectivoSemana.value + saldoFinalChequesSemana.value)
 const semanaEstaCerrada = computed(() => String(semanaActiva.value?.estado || "").toLowerCase() === "cerrada")
 const etiquetaSemanaActiva = computed(() => {
@@ -493,6 +438,37 @@ const clientesOrdenados = computed(() => {
   })
 })
 
+const desgloseMedios = computed(() => {
+  const mapa = mediosDePago.reduce((acc, medio) => {
+    acc[medio.id] = { ingresos: 0, egresos: 0, balance: 0 }
+    return acc
+  }, {})
+
+  movimientosFiltrados.value.forEach((movimiento) => {
+    const signoIngreso = String(movimiento?.tipo || "") === "ingreso"
+    ;(movimiento.detalles_medio_pago || []).forEach((detalle) => {
+      const medio = String(detalle?.medio_pago || "").toLowerCase()
+      const monto = Number(detalle?.monto || 0)
+      if (!mapa[medio] || !(monto > 0)) return
+
+      if (signoIngreso) {
+        mapa[medio].ingresos += monto
+        mapa[medio].balance += monto
+      } else {
+        mapa[medio].egresos += monto
+        mapa[medio].balance -= monto
+      }
+    })
+  })
+
+  return mediosDePago.map((medio) => ({
+    ...medio,
+    ingresos: mapa[medio.id].ingresos,
+    egresos: mapa[medio.id].egresos,
+    balance: mapa[medio.id].balance,
+  }))
+})
+
 const cargarDatos = async () => {
   loading.value = true
   error.value = ""
@@ -501,10 +477,11 @@ const cargarDatos = async () => {
       fechaInicioConsulta.value,
       fechaFinConsulta.value,
       filtroTipo.value,
-      filtroCaja.value
+      filtroCaja.value,
+      undefined,
+      filtroBusqueda.value
     )
     movimientos.value = res.data.movimientos || []
-    totales.value = res.data.totales || {}
   } catch (err) {
     error.value = `Error al cargar: ${err.response?.data?.error || err.message}`
   } finally {
@@ -580,22 +557,62 @@ const refrescarCaja = async ({ mantenerSeleccion = true } = {}) => {
 }
 
 const aplicarFiltros = () => {
+  if (hayFiltroFecha.value) {
+    semanaSeleccionadaId.value = ""
+  }
   cargarDatos()
 }
 
-const cerrarSemanaActual = async () => {
-  if (!semanaActiva.value?.id) return
-  const ok = window.confirm(`Se va a cerrar la semana ${etiquetaSemanaActiva.value} de ${cajaActiva.value.label}. La próxima semana arrancará con este saldo final.\n\n¿Deseás continuar?`)
-  if (!ok) return
+const manejarCambioFiltroFecha = () => {
+  if (filtroFechaInicio.value || filtroFechaFin.value) {
+    semanaSeleccionadaId.value = ""
+  }
+}
 
+const abrirModalCerrarSemana = () => {
+  if (!semanaActiva.value?.id) return
+  
+  // Calculamos las fechas de la próxima semana para mostrar seguridad al usuario
+  const fechaFin = semanaActiva.value.fecha_fin
+  if (fechaFin) {
+    const d = new Date(`${fechaFin}T00:00:00`)
+    const proxInicio = new Date(d)
+    proxInicio.setDate(d.getDate() + 3) // Lunes
+    const proxFin = new Date(proxInicio)
+    proxFin.setDate(proxInicio.getDate() + 4) // Viernes
+    
+    proximaSemanaInfo.value = {
+      inicio: proxInicio.toLocaleDateString("es-AR"),
+      fin: proxFin.toLocaleDateString("es-AR")
+    }
+  }
+
+  saldoBancoCierre.value = ""
+  saldoPendienteEcheqCierre.value = ""
+  mostrarModalCerrarSemana.value = true
+}
+
+const confirmarCerrarSemana = async () => {
+  if (!semanaActiva.value?.id) return
+  
   try {
-    cerrandoSemana.value = true
-    await api.cerrarSemanaCaja(semanaActiva.value.id)
-    await refrescarCaja({ mantenerSeleccion: false })
+    confirmandoCierre.value = true
+    const body = {
+      saldo_banco: saldoBancoCierre.value !== "" ? Number(saldoBancoCierre.value) : null,
+      saldo_pendiente_echeq: saldoPendienteEcheqCierre.value !== "" ? Number(saldoPendienteEcheqCierre.value) : null,
+    }
+    const res = await api.cerrarSemanaCaja(semanaActiva.value.id, body)
+    const proximaSemanaId = res?.data?.proximaSemana?.id
+    if (proximaSemanaId) {
+      semanaSeleccionadaId.value = String(proximaSemanaId)
+    }
+    await refrescarCaja({ mantenerSeleccion: true })
+    mostrarModalCerrarSemana.value = false
+    proximaSemanaInfo.value = null
   } catch (err) {
     error.value = `Error al cerrar semana: ${err.response?.data?.error || err.message}`
   } finally {
-    cerrandoSemana.value = false
+    confirmandoCierre.value = false
   }
 }
 
@@ -618,6 +635,11 @@ const textoRangoFechas = (fechaInicio = fechaInicioConsulta.value, fechaFin = fe
 }
 
 const descargarResumenPdf = async () => {
+  if (!filtroFechaInicio.value || !filtroFechaFin.value) {
+    error.value = "Para descargar el resumen general debés seleccionar fecha de inicio y fecha de fin"
+    return
+  }
+
   const ok = window.confirm(
     `Se va a generar el resumen de caja ${textoRangoFechas()}, incluyendo ${textoTipoFiltro()}.\n\n¿Deseás continuar?`
   )
@@ -629,7 +651,9 @@ const descargarResumenPdf = async () => {
       filtroFechaInicio.value,
       filtroFechaFin.value,
       filtroTipo.value,
-      filtroCaja.value
+      filtroCaja.value,
+      "general",
+      filtroBusqueda.value
     )
 
     const blob = new Blob([res.data], { type: "application/pdf" })
@@ -669,7 +693,8 @@ const descargarSemanaPdf = async () => {
       semanaActiva.value.fecha_inicio,
       semanaActiva.value.fecha_fin,
       filtroTipo.value,
-      filtroCaja.value
+      filtroCaja.value,
+      "semanal"
     )
 
     const blob = new Blob([res.data], { type: "application/pdf" })
@@ -723,6 +748,7 @@ const crearFormularioVacio = () => ({
   cliente_id: "",
   presupuesto_id: "",
   detalle: "",
+  observaciones: "",
   monto_total: 0,
   desglose: {
     efectivo: 0,
@@ -772,8 +798,9 @@ const abrirFormulario = () => {
   showForm.value = true
 }
 
-const agregarCheque = (tipo = "cheque") => {
-  form.value.cheques.push(crearChequeVacio(tipo))
+
+const agregarCheque = () => {
+  form.value.cheques.push(crearChequeVacio())
 }
 
 const eliminarCheque = (index) => {
@@ -791,6 +818,7 @@ const abrirEdicion = (movimiento) => {
     cliente_id: movimiento.cliente_id || "",
     presupuesto_id: movimiento.presupuesto_id || "",
     detalle: movimiento.detalle || "",
+    observaciones: movimiento.observaciones || "",
     monto_total: parseFloat(movimiento.monto_total) || 0,
     desglose: normalizarDesglose(movimiento.detalles_medio_pago || []),
     cheques: normalizarCheques(movimiento.detalles_medio_pago || [])
@@ -810,6 +838,7 @@ const payloadMovimiento = () => ({
   cliente_id: form.value.tipo === "ingreso" ? (form.value.cliente_id || null) : null,
   presupuesto_id: form.value.tipo === "ingreso" ? (form.value.presupuesto_id || null) : null,
   detalle: form.value.detalle,
+  observaciones: String(form.value.observaciones || "").trim() || null,
   monto_total: parseFloat(form.value.monto_total),
   desglose: {
     efectivo: parseFloat(form.value.desglose.efectivo) || 0,
@@ -839,7 +868,7 @@ const guardarMovimiento = async () => {
       await api.createMovimientoCaja(payload)
     }
 
-    await cargarDatos()
+    await refrescarCaja()
     cerrarFormulario()
   } catch (err) {
     error.value = editandoMovimientoId.value
@@ -874,7 +903,7 @@ const confirmarEliminar = (movimiento) => {
 const eliminarMovimiento = async () => {
   try {
     await api.deleteMovimientoCaja(movimientoAEliminar.value.id)
-    await cargarDatos()
+    await refrescarCaja()
     showConfirm.value = false
     movimientoAEliminar.value = null
     error.value = ""
@@ -1013,9 +1042,6 @@ onUnmounted(() => {
         </div>
         <div class="caja-topbar-actions">
           <div class="caja-pdf-actions">
-            <button class="btn btn-pdf" :disabled="generandoPdf" @click="descargarResumenPdf">
-              {{ generandoPdf ? "Generando PDF..." : "Descargar Resumen PDF" }}
-            </button>
             <button class="btn btn-pdf btn-pdf-week" :disabled="generandoPdf || !semanaActiva" @click="descargarSemanaPdf">
               {{ generandoPdf ? "Generando PDF..." : "Descargar semana seleccionada" }}
             </button>
@@ -1058,10 +1084,9 @@ onUnmounted(() => {
             <button
               v-if="!semanaEstaCerrada"
               class="btn btn-week-close"
-              :disabled="cerrandoSemana"
-              @click="cerrarSemanaActual"
+              @click="abrirModalCerrarSemana"
             >
-              {{ cerrandoSemana ? "Cerrando..." : "Cerrar semana" }}
+              Cerrar semana
             </button>
             <span :class="['week-badge', semanaEstaCerrada ? 'week-badge-closed' : 'week-badge-open']">
               {{ semanaEstaCerrada ? "Cerrada" : "Abierta" }}
@@ -1087,80 +1112,74 @@ onUnmounted(() => {
           <article class="caja-semana-card caja-semana-card-balance">
             <span>Saldo final</span>
             <strong>{{ formatoMoneda(saldoFinalSemana) }}</strong>
-            <small class="caja-semana-meta">Efectivo: {{ formatoMoneda(saldoFinalEfectivoSemana) }}</small>
-            <small class="caja-semana-meta">Cheques: {{ formatoMoneda(saldoFinalChequesSemana) }}</small>
+            <div class="caja-semana-desglose-final">
+              <small class="caja-semana-meta">Efectivo: {{ formatoMoneda(saldoFinalEfectivoSemana) }}</small>
+              <small class="caja-semana-meta">Cheques: {{ formatoMoneda(saldoFinalChequesSemana) }}</small>
+            </div>
+            <div v-if="semanaActiva.saldo_banco !== null && semanaActiva.saldo_banco !== undefined" class="caja-semana-bank-box">
+              <span class="bank-label">Saldo Banco</span>
+              <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_banco) }}</strong>
+            </div>
+            <div v-if="semanaActiva.saldo_pendiente_echeq !== null && semanaActiva.saldo_pendiente_echeq !== undefined" class="caja-semana-bank-box caja-semana-echeq-box">
+              <span class="bank-label">eCheqs pendientes</span>
+              <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_pendiente_echeq) }}</strong>
+            </div>
           </article>
         </div>
-      </section>
 
-      <section class="caja-stats-grid">
-        <article class="caja-stat-card caja-stat-balance">
-          <span class="stat-label">Balance actual</span>
-          <strong class="stat-value">{{ formatoMoneda(balanceActual) }}</strong>
-          <small>{{ rangoActivoDescripcion }}</small>
-        </article>
-        <article class="caja-stat-card caja-stat-ingresos">
-          <span class="stat-label">Ingresos filtrados</span>
-          <strong class="stat-value">{{ cantidadIngresos }}</strong>
-          <small>{{ formatoMoneda(totalIngresosVisibles) }}</small>
-        </article>
-        <article class="caja-stat-card caja-stat-egresos">
-          <span class="stat-label">Egresos filtrados</span>
-          <strong class="stat-value">{{ cantidadEgresos }}</strong>
-          <small>{{ formatoMoneda(totalEgresosVisibles) }}</small>
-        </article>
-        <article class="caja-stat-card caja-stat-movimientos">
-          <span class="stat-label">Movimientos visibles</span>
-          <strong class="stat-value">{{ movimientosFiltrados.length }}</strong>
-          <small>{{ textoTipoFiltro() }}</small>
-        </article>
+        <section class="caja-stats-grid">
+          <article class="caja-stat-card caja-stat-balance">
+            <span class="stat-label">Balance actual</span>
+            <strong class="stat-value">{{ formatoMoneda(balanceActual) }}</strong>
+            <small>{{ rangoActivoDescripcion }}</small>
+          </article>
+          <article class="caja-stat-card caja-stat-ingresos">
+            <span class="stat-label">Ingresos filtrados</span>
+            <strong class="stat-value">{{ cantidadIngresos }}</strong>
+            <small>{{ formatoMoneda(totalIngresosVisibles) }}</small>
+          </article>
+          <article class="caja-stat-card caja-stat-egresos">
+            <span class="stat-label">Egresos filtrados</span>
+            <strong class="stat-value">{{ cantidadEgresos }}</strong>
+            <small>{{ formatoMoneda(totalEgresosVisibles) }}</small>
+          </article>
+          <article class="caja-stat-card caja-stat-movimientos">
+            <span class="stat-label">Movimientos visibles</span>
+            <strong class="stat-value">{{ movimientosFiltrados.length }}</strong>
+            <small>{{ textoTipoFiltro() }}</small>
+          </article>
+        </section>
       </section>
 
       <section class="caja-toolbar-shell">
         <div class="toolbar toolbar-caja">
-          <div class="toolbar-search">
-            <label class="toolbar-search-label">
-              <span>Buscar movimiento</span>
-              <input v-model="filtroBusqueda" type="text" class="input-sm input-search" placeholder="Detalle, cliente, destinatario, presupuesto..." />
-            </label>
-          </div>
-          <div class="filtros filtros-caja">
-            <label>
-              <span>Desde</span>
-              <input v-model="filtroFechaInicio" type="date" class="input-sm" />
-            </label>
-            <label>
-              <span>Hasta</span>
-              <input v-model="filtroFechaFin" type="date" class="input-sm" />
-            </label>
-            <label>
-              <span>Tipo</span>
-              <select v-model="filtroTipo" class="select-sm">
+          <label class="toolbar-search-label toolbar-search">
+            <span>Buscar movimiento</span>
+            <input v-model="filtroBusqueda" type="text" class="input-sm input-search" placeholder="Detalle, cliente, destinatario, presupuesto..." />
+          </label>
+          <label class="toolbar-filter-label">
+            <span>Desde</span>
+            <input v-model="filtroFechaInicio" type="date" class="input-sm" @change="manejarCambioFiltroFecha" />
+          </label>
+          <label class="toolbar-filter-label">
+            <span>Hasta</span>
+            <input v-model="filtroFechaFin" type="date" class="input-sm" @change="manejarCambioFiltroFecha" />
+          </label>
+          <label class="toolbar-filter-label">
+            <span>Tipo</span>
+            <select v-model="filtroTipo" class="select-sm">
               <option value="">Todos</option>
               <option value="ingreso">Ingresos</option>
               <option value="egreso">Egresos</option>
             </select>
           </label>
-            <button class="btn btn-sm btn-secondary" @click="aplicarFiltros">Aplicar filtros</button>
-            <button class="btn btn-sm btn-secondary btn-ghost" @click="filtroBusqueda = ''; filtroFechaInicio = ''; filtroFechaFin = ''; filtroTipo = ''; aplicarFiltros()">Limpiar</button>
-          </div>
+          <button class="btn btn-filter-apply toolbar-action-btn" @click="aplicarFiltros">Aplicar filtros</button>
+          <button class="btn btn-filter-clear toolbar-action-btn" @click="filtroBusqueda = ''; filtroFechaInicio = ''; filtroFechaFin = ''; filtroTipo = ''; aplicarFiltros()">Limpiar filtros</button>
+          <button class="btn btn-pdf btn-pdf-toolbar toolbar-action-btn" :disabled="generandoPdf || !puedeDescargarResumenGeneral" @click="descargarResumenPdf">
+            {{ generandoPdf ? "Generando PDF..." : "Descargar Resumen PDF" }}
+          </button>
         </div>
       </section>
-
-      <div class="resumen-totales">
-        <div class="total-card total-ingresos">
-          <span class="label">Total Ingresos</span>
-          <span class="value">{{ formatoMoneda(totalIngresosVisibles) }}</span>
-        </div>
-        <div class="total-card total-egresos">
-          <span class="label">Total Egresos</span>
-          <span class="value">{{ formatoMoneda(totalEgresosVisibles) }}</span>
-        </div>
-        <div class="total-card total-balance">
-          <span class="label">Balance</span>
-          <span class="value">{{ formatoMoneda(balanceActual) }}</span>
-        </div>
-      </div>
 
       <!-- Desglose por medio de pago -->
       <div class="desglose-medios">
@@ -1171,9 +1190,20 @@ onUnmounted(() => {
           </div>
         </div>
         <div class="medios-grid">
-          <div class="medio-card" v-for="medio in mediosDePago" :key="medio.id">
+          <div class="medio-card" v-for="medio in desgloseMedios" :key="medio.id">
             <span class="label">{{ medio.label }}</span>
-            <span class="value">{{ formatoMoneda(totales.desglose?.[medio.id] || 0) }}</span>
+            <div class="medio-detalle-linea">
+              <small>Ingresos</small>
+              <strong class="medio-ingreso">{{ formatoMoneda(medio.ingresos || 0) }}</strong>
+            </div>
+            <div class="medio-detalle-linea">
+              <small>Egresos</small>
+              <strong class="medio-egreso">{{ formatoMoneda(medio.egresos || 0) }}</strong>
+            </div>
+            <div class="medio-detalle-linea">
+              <small>Balance</small>
+              <strong class="medio-balance">{{ formatoMoneda(medio.balance || 0) }}</strong>
+            </div>
           </div>
         </div>
       </div>
@@ -1201,6 +1231,7 @@ onUnmounted(() => {
             <th>Categoría</th>
             <th>Destino / Referencia</th>
             <th>Detalle</th>
+            <th>Observaciones</th>
             <th>Cheques / IDs</th>
             <th>Monto Total</th>
             <th>Acciones</th>
@@ -1224,6 +1255,7 @@ onUnmounted(() => {
               </div>
             </td>
             <td>{{ mov.detalle }}</td>
+            <td>{{ mov.observaciones || '-' }}</td>
             <td class="td-cheques">
               <span v-if="getCantidadCheques(mov)">{{ getResumenCheques(mov) }}</span>
               <span v-else>-</span>
@@ -1264,70 +1296,72 @@ onUnmounted(() => {
       </section>
 
       <div v-if="movimientoSeleccionado" class="detalle-card">
-        <!-- Header -->
-        <div class="detalle-header">
+        <div class="section-heading">
           <div>
-            <h2>{{ movimientoSeleccionado.tipo === 'ingreso' ? 'Ingreso' : 'Egreso' }}</h2>
-            <p class="subtitle">{{ new Date(movimientoSeleccionado.fecha).toLocaleDateString('es-AR') }}</p>
+            <span class="section-kicker">Datos del movimiento</span>
+            <h3>Informacion principal</h3>
+            <p>Aca se muestran solo los detalles del movimiento seleccionado.</p>
           </div>
-          <span :class="`badge badge-${movimientoSeleccionado.tipo}`">
-            {{ movimientoSeleccionado.tipo === 'ingreso' ? 'Ingreso' : 'Egreso' }}
-          </span>
         </div>
 
-        <!-- Detalles principales -->
-        <div class="section">
-          <h3>Datos del Movimiento</h3>
-          <div class="info-grid">
-            <div class="info-item">
-              <label>Detalle</label>
-              <p>{{ movimientoSeleccionado.detalle }}</p>
-            </div>
-            <div class="info-item">
-              <label>Monto Total</label>
-              <p class="monto-grande">{{ formatoMoneda(movimientoSeleccionado.monto_total) }}</p>
-            </div>
-            <div class="info-item">
-              <label>Tipo</label>
-              <p>{{ movimientoSeleccionado.tipo === 'ingreso' ? 'Ingreso' : 'Egreso' }}</p>
-            </div>
-            <div class="info-item">
-              <label>Fecha</label>
-              <p>{{ new Date(movimientoSeleccionado.fecha).toLocaleDateString('es-AR') }}</p>
-            </div>
-            <div class="info-item">
-              <label>Caja</label>
-              <p>{{ getLabelCaja(movimientoSeleccionado.caja_codigo) }}</p>
-            </div>
-            <div class="info-item">
-              <label>Categoría</label>
-              <p>{{ movimientoSeleccionado.categoria === 'materiales' ? 'Materiales' : (movimientoSeleccionado.categoria === 'mano_obra' ? 'Mano de obra' : (movimientoSeleccionado.categoria === 'varios' ? 'Varios' : '-')) }}</p>
-            </div>
-            <div class="info-item">
-              <label>Concepto IVA</label>
-              <p>{{ movimientoSeleccionado.con_iva ? 'Con IVA' : 'Sin IVA' }}</p>
-            </div>
-            <div class="info-item" v-if="movimientoSeleccionado.tipo === 'egreso'">
-              <label>Destinatario</label>
-              <p>{{ movimientoSeleccionado.destinatario || '-' }}</p>
-            </div>
-            <div class="info-item">
-              <label>Cliente asociado</label>
-              <p>{{ getNombreCliente(movimientoSeleccionado.cliente_id) }}</p>
-            </div>
-            <div class="info-item">
-              <label>Presupuesto asociado</label>
-              <p>{{ getNumeroPresupuesto(movimientoSeleccionado.presupuesto_id) }}</p>
-            </div>
-            <div class="info-item" v-if="getCantidadCheques(movimientoSeleccionado)">
-              <label>Cheques asociados</label>
-              <p>{{ getResumenCheques(movimientoSeleccionado) }}</p>
-            </div>
+        <div class="detalle-info-grid">
+          <div class="info-item">
+            <label>Fecha</label>
+            <p>{{ new Date(`${movimientoSeleccionado.fecha}T00:00:00`).toLocaleDateString("es-AR") }}</p>
+          </div>
+          <div class="info-item">
+            <label>Caja</label>
+            <p>{{ getLabelCaja(movimientoSeleccionado.caja_codigo) }}</p>
+          </div>
+          <div class="info-item">
+            <label>Tipo</label>
+            <p>{{ movimientoSeleccionado.tipo === 'ingreso' ? 'Ingreso' : 'Egreso' }}</p>
+          </div>
+          <div class="info-item">
+            <label>Monto total</label>
+            <p>{{ formatoMoneda(movimientoSeleccionado.monto_total || 0) }}</p>
+          </div>
+          <div class="info-item">
+            <label>Detalle</label>
+            <p>{{ movimientoSeleccionado.detalle || '-' }}</p>
+          </div>
+          <div class="info-item">
+            <label>Observaciones</label>
+            <p>{{ movimientoSeleccionado.observaciones || '-' }}</p>
+          </div>
+          <div class="info-item">
+            <label>Categoria</label>
+            <p>{{ movimientoSeleccionado.categoria === 'materiales' ? 'Materiales' : (movimientoSeleccionado.categoria === 'mano_obra' ? 'Mano de obra' : (movimientoSeleccionado.categoria === 'varios' ? 'Varios' : '-')) }}</p>
+          </div>
+          <div class="info-item">
+            <label>Concepto IVA</label>
+            <p>{{ movimientoSeleccionado.con_iva ? 'Con IVA' : 'Sin IVA' }}</p>
+          </div>
+          <div class="info-item" v-if="movimientoSeleccionado.tipo === 'egreso'">
+            <label>Destinatario</label>
+            <p>{{ movimientoSeleccionado.destinatario || '-' }}</p>
+          </div>
+          <div class="info-item">
+            <label>Cliente asociado</label>
+            <p>{{ getNombreCliente(movimientoSeleccionado.cliente_id) }}</p>
+          </div>
+          <div class="info-item">
+            <label>Presupuesto asociado</label>
+            <p>{{ getNumeroPresupuesto(movimientoSeleccionado.presupuesto_id) }}</p>
+          </div>
+          <div class="info-item" v-if="getCantidadCheques(movimientoSeleccionado)">
+            <label>Cheques asociados</label>
+            <p>{{ getResumenCheques(movimientoSeleccionado) }}</p>
+          </div>
+          <div class="info-item">
+            <label>ID de movimiento</label>
+            <p>#{{ movimientoSeleccionado.id }}</p>
           </div>
         </div>
+      </div>
 
         <!-- Desglose de medios de pago -->
-        <div class="section">
+      <div class="section">
           <h3>Desglose por Medio de Pago</h3>
           <div v-if="movimientoSeleccionado.detalles_medio_pago?.length > 0" class="desglose-grid">
             <div v-for="detalle in movimientoSeleccionado.detalles_medio_pago" 
@@ -1339,9 +1373,10 @@ onUnmounted(() => {
             </div>
           </div>
           <p v-else class="empty-desglose">Sin detalles de medio de pago</p>
-        </div>
       </div>
+      
     </div>
+
   </LayoutShell>
 
   <!-- Modal para crear movimiento -->
@@ -1374,7 +1409,7 @@ onUnmounted(() => {
           </div>
         </div>
         
-        <section class="modal-section">
+        <section class="modal-section modal-section-main">
           <div class="modal-section-header">
             <div>
               <span class="section-kicker">Datos principales</span>
@@ -1383,7 +1418,9 @@ onUnmounted(() => {
             <small>Definí fecha, caja, tipo y descripción general antes de cargar el desglose.</small>
           </div>
 
-          <div class="form-row form-row-primary">
+          <div class="modal-main-grid">
+            <div class="modal-main-fields">
+              <div class="form-row form-row-primary">
             <label class="form-group form-card-field">
               <span>Fecha *</span>
               <input v-model="form.fecha" type="date" required />
@@ -1403,9 +1440,20 @@ onUnmounted(() => {
                 <option value="egreso">Egreso</option>
               </select>
             </label>
-          </div>
+              </div>
 
-          <div class="form-row" v-if="esIngreso">
+              <div class="form-row form-row-emphasis">
+                <label class="form-group form-card-field form-card-field-accent monto-panel-field">
+                  <span>Monto total *</span>
+                  <input v-model.number="form.monto_total" type="number" @wheel.prevent placeholder="0.00" step="0.01" required />
+                </label>
+                <label class="form-group form-card-field form-card-field-detail">
+                  <span>Detalle *</span>
+                  <input v-model="form.detalle" type="text" placeholder="Descripción clara del movimiento" required />
+                </label>
+              </div>
+
+              <div class="form-row form-row-secondary" v-if="esIngreso">
             <label class="form-group form-card-field">
               <span>Categoría *</span>
               <select v-model="form.categoria" required>
@@ -1423,12 +1471,12 @@ onUnmounted(() => {
             </label>
           </div>
 
-          <label v-if="esEgreso" class="form-group form-card-field">
+          <label v-if="esEgreso" class="form-group form-card-field form-card-field-wide">
             <span>Destinatario *</span>
             <input v-model="form.destinatario" type="text" placeholder="Persona o empresa que recibe el pago" required />
           </label>
 
-          <div v-if="esIngreso" class="form-row">
+          <div v-if="esIngreso" class="form-row form-row-secondary">
             <label class="form-group form-card-field">
               <span>Cliente (opcional)</span>
               <select v-model="form.cliente_id">
@@ -1449,15 +1497,24 @@ onUnmounted(() => {
             </label>
           </div>
 
-          <label class="form-group form-card-field">
-            <span>Detalle *</span>
-            <input v-model="form.detalle" type="text" placeholder="Descripción del movimiento" required />
-          </label>
+          </div>
 
-          <label class="form-group form-card-field form-card-field-accent">
+            <aside class="monto-panel">
+          <label class="form-group form-card-field form-card-field-accent monto-panel-field">
             <span>Monto total *</span>
             <input v-model.number="form.monto_total" type="number" @wheel.prevent placeholder="0.00" step="0.01" required />
           </label>
+              <div class="monto-panel-helper">
+                <span class="section-kicker">Referencia</span>
+                <strong>{{ form.tipo === 'ingreso' ? 'Ingreso' : 'Egreso' }} a registrar</strong>
+                <p>Completá primero el importe total y después distribuí el movimiento entre los medios de pago.</p>
+              </div>
+              <div class="monto-panel-summary">
+                <span class="monto-panel-label">Total actual</span>
+                <strong>{{ formatoMoneda(form.monto_total || 0) }}</strong>
+              </div>
+            </aside>
+          </div>
         </section>
 
         <section class="modal-section modal-section-highlighted">
@@ -1508,8 +1565,9 @@ onUnmounted(() => {
                   <p>Podes cargar uno o varios, y a cada uno asignarle su identificador alfanumerico.</p>
                 </div>
                 <div class="cheques-actions cheques-actions-prominent">
-                  <button type="button" class="btn btn-cheque-add" @click="agregarCheque('cheque')">Agregar cheque</button>
-                  <button type="button" class="btn btn-cheque-add btn-cheque-add-alt" @click="agregarCheque('echeq')">Agregar eCheq</button>
+
+                  <button type="button" class="btn btn-cheque-add" @click="agregarCheque">Agregar cheque</button>
+                  <button type="button" class="btn btn-cheque-add btn-cheque-add-alt" @click="form.value.cheques.push({ medio_pago: 'echeq', monto: 0, identificador: '' })">Agregar eCheq</button>
                  
                 </div>
               </div>
@@ -1559,6 +1617,25 @@ onUnmounted(() => {
           </div>
         </section>
 
+        <section class="modal-section">
+          <div class="modal-section-header">
+            <div>
+              <span class="section-kicker">Observaciones</span>
+              <h4>Notas internas del movimiento</h4>
+            </div>
+            <small>Este campo es opcional y no afecta los cálculos de caja.</small>
+          </div>
+
+          <label class="form-group form-card-field">
+            <span>Observaciones (opcional)</span>
+            <textarea
+              v-model="form.observaciones"
+              rows="3"
+              placeholder="Ej: aclaraciones del comprobante, contexto del pago, seguimiento interno..."
+            ></textarea>
+          </label>
+        </section>
+
         <div class="modal-actions">
           <button type="submit" class="btn-primary" :disabled="!esFormularioValido">
             {{ editandoMovimientoId ? "Guardar Cambios" : "Crear Movimiento" }}
@@ -1568,6 +1645,47 @@ onUnmounted(() => {
           </button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Modal para cerrar semana y registrar banco -->
+  <div v-if="mostrarModalCerrarSemana" class="modal-overlay" @click.self="mostrarModalCerrarSemana = false">
+    <div class="modal modal-confirmacion">
+      <div class="modal-header modal-header-confirmacion">
+        <div class="modal-header-copy">
+          <span class="section-kicker">Cierre de periodo</span>
+          <h3>Cerrar semana actual</h3>
+          <p>Se bloquearán los movimientos de esta semana. La próxima semana arrancará con el saldo final de hoy.</p>
+        </div>
+        <button type="button" class="btn-close" @click="mostrarModalCerrarSemana = false">×</button>
+      </div>
+
+      <div class="modal-form">
+        <div class="info-rango" v-if="proximaSemanaInfo" style="margin-bottom: 1rem;">
+          Próxima semana a iniciar: <strong>{{ proximaSemanaInfo.inicio }} al {{ proximaSemanaInfo.fin }}</strong>
+        </div>
+
+        <label class="form-group form-card-field form-card-field-accent">
+          <span>Saldo actual en Banco ($)</span>
+          <input v-model.number="saldoBancoCierre" type="number" @wheel.prevent placeholder="0.00" step="0.01" />
+          <small class="form-help">Ingresá el saldo de la cuenta bancaria al día de hoy.</small>
+        </label>
+
+        <label class="form-group form-card-field form-card-field-accent">
+          <span>Saldo pendiente en eCheqs ($)</span>
+          <input v-model.number="saldoPendienteEcheqCierre" type="number" @wheel.prevent placeholder="0.00" step="0.01" />
+          <small class="form-help">Ingresá el total pendiente de acreditación en eCheqs al momento del cierre.</small>
+        </label>
+
+        <div class="modal-actions">
+          <button type="button" class="btn btn-primary" :disabled="confirmandoCierre" @click="confirmarCerrarSemana">
+            {{ confirmandoCierre ? "Cerrando..." : "Confirmar y Cerrar Semana" }}
+          </button>
+          <button type="button" class="btn btn-secondary" @click="mostrarModalCerrarSemana = false">
+            Cancelar
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1606,6 +1724,73 @@ onUnmounted(() => {
     </div>
   </div>
 </template>
+<style scoped>
+.caja-toolbar-shell {
+  margin-bottom: 2.5rem;
+  padding: 1.15rem 1.2rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.72), rgba(15, 23, 42, 0.92));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.toolbar-caja {
+  display: grid;
+  grid-template-columns: minmax(320px, 1.55fr) repeat(3, minmax(120px, 0.48fr)) repeat(3, auto);
+  align-items: flex-end;
+  gap: 1rem;
+  width: 100%;
+}
+
+.toolbar-search {
+  min-width: 0;
+}
+
+.toolbar-filter-label {
+  display: grid;
+  gap: 0.42rem;
+  min-width: 0;
+  color: #d1d5db;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.input-sm,
+.select-sm,
+.input-search {
+  font-size: 0.92rem;
+  padding: 0.74rem 0.88rem;
+  min-height: 44px;
+  min-width: 0;
+  border-radius: 0.9rem;
+}
+
+.input-search {
+  width: 100%;
+}
+
+.toolbar-filter-label .input-sm,
+.toolbar-filter-label .select-sm {
+  width: 100%;
+  min-width: 0;
+}
+
+.btn-pdf-toolbar {
+  white-space: nowrap;
+}
+
+.toolbar-action-btn {
+  white-space: nowrap;
+}
+
+.btn.btn-filter-apply,
+.btn.btn-filter-clear,
+.btn.btn-pdf {
+  font-size: 0.92rem;
+  padding: 0.74rem 1.1rem;
+  min-height: 44px;
+}
+</style>
 
 <style scoped>
 .container {
@@ -1727,16 +1912,24 @@ onUnmounted(() => {
 .caja-semana-select {
   display: grid;
   gap: 0.4rem;
-  min-width: 260px;
+  min-width: 340px;
   color: #d1d5db;
   font-size: 0.82rem;
   font-weight: 600;
+}
+
+.caja-semana-select .select-sm {
+  min-width: 340px;
+  min-height: 52px;
+  font-size: 0.95rem;
+  padding-right: 2.5rem;
 }
 
 .caja-semana-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 0.9rem;
+  margin-bottom: 1rem;
 }
 
 .caja-semana-card {
@@ -1777,6 +1970,34 @@ onUnmounted(() => {
 
 .caja-semana-card-balance strong {
   color: #7dd3fc;
+}
+
+.caja-semana-desglose-final {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-bottom: 0.5rem;
+}
+
+.caja-semana-bank-box {
+  margin-top: 0.5rem;
+  padding: 0.6rem;
+  background: rgba(34, 197, 94, 0.15);
+  border: 1px solid rgba(74, 222, 128, 0.3);
+  border-radius: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.bank-label {
+  font-size: 0.65rem !important;
+  color: #86efac !important;
+}
+
+.bank-value {
+  color: #f8fafc !important;
+  font-size: 0.95rem !important;
 }
 
 .btn-week-close {
@@ -1876,6 +2097,12 @@ onUnmounted(() => {
   flex: 1 1 260px;
 }
 
+.toolbar-right {
+  display: flex;
+  justify-content: flex-end;
+  align-items: flex-end;
+}
+
 .toolbar-search-label {
   display: grid;
   gap: 0.45rem;
@@ -1951,6 +2178,10 @@ onUnmounted(() => {
   flex: 2 1 580px;
 }
 
+.filtros-caja > .btn-sm {
+  display: none;
+}
+
 .filtros label {
   display: grid;
   gap: 0.4rem;
@@ -2003,6 +2234,48 @@ onUnmounted(() => {
   margin-top: 1rem;
 }
 
+.btn-filter-apply {
+  min-height: 2.85rem;
+  padding: 0.78rem 1.15rem;
+  border-radius: 0.82rem;
+  background: linear-gradient(135deg, #2563eb, #1e40af);
+  color: white;
+  border: 1px solid rgba(96, 165, 250, 0.32);
+  box-shadow: 0 10px 22px rgba(37, 99, 235, 0.16);
+  margin-top: 1.1rem;
+  min-width: 170px;
+  font-size: 0.87rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.btn-filter-apply:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 24px rgba(59, 130, 246, 0.22);
+}
+
+.btn-filter-clear {
+  min-height: 2.85rem;
+  padding: 0.78rem 1.15rem;
+  border-radius: 0.82rem;
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.86), rgba(15, 23, 42, 0.96));
+  color: #e2e8f0;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  margin-top: 1.1rem;
+  min-width: 170px;
+  font-size: 0.87rem;
+  font-weight: 700;
+}
+
+.btn-filter-clear:hover {
+  background: linear-gradient(180deg, rgba(51, 65, 85, 0.9), rgba(15, 23, 42, 1));
+  color: #f8fafc;
+  border-color: rgba(148, 163, 184, 0.34);
+  transform: translateY(-1px);
+  box-shadow: 0 10px 20px rgba(15, 23, 42, 0.18);
+}
+
 .btn-secondary:hover {
   background: rgba(71, 85, 105, 0.9);
 }
@@ -2041,13 +2314,6 @@ onUnmounted(() => {
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-/* Resumen de totales */
-.resumen-totales {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 1rem;
 }
 
 .caja-stats-grid {
@@ -2099,46 +2365,6 @@ onUnmounted(() => {
   color: #bfdbfe;
 }
 
-.total-card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 1.35rem;
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  border-radius: 1rem;
-  background: linear-gradient(180deg, rgba(30, 41, 59, 0.7), rgba(15, 23, 42, 0.92));
-  transition: all 0.2s ease;
-}
-
-.total-card:hover {
-  border-color: rgba(148, 163, 184, 0.4);
-  background: rgba(30, 41, 59, 0.6);
-}
-
-.total-card .label {
-  color: #9ca3af;
-  font-size: 0.875rem;
-  margin-bottom: 0.5rem;
-}
-
-.total-card .value {
-  font-size: 1.75rem;
-  font-weight: bold;
-}
-
-.total-ingresos .value {
-  color: #86efac;
-}
-
-.total-egresos .value {
-  color: #f87171;
-}
-
-.total-balance .value {
-  color: #60a5fa;
-}
-
 /* Desglose por medio de pago */
 .desglose-medios {
   display: grid;
@@ -2178,11 +2404,8 @@ onUnmounted(() => {
 }
 
 .medio-card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 0.4rem;
+  display: grid;
+  gap: 0.45rem;
   padding: 1rem;
   background: rgba(30, 41, 59, 0.6);
   border: 1px solid rgba(148, 163, 184, 0.14);
@@ -2192,13 +2415,34 @@ onUnmounted(() => {
 .medio-card .label {
   color: #9ca3af;
   font-size: 0.875rem;
-  margin-bottom: 0.5rem;
 }
 
-.medio-card .value {
-  color: #3b82f6;
-  font-size: 1.25rem;
-  font-weight: bold;
+.medio-detalle-linea {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.medio-detalle-linea small {
+  color: #93a4c3;
+  font-size: 0.78rem;
+}
+
+.medio-detalle-linea strong {
+  font-size: 0.94rem;
+}
+
+.medio-ingreso {
+  color: #86efac;
+}
+
+.medio-egreso {
+  color: #fca5a5;
+}
+
+.medio-balance {
+  color: #7dd3fc;
 }
 
 /* Tabla */
@@ -2343,27 +2587,38 @@ onUnmounted(() => {
   margin: 0 0 1rem 0;
 }
 
-.info-grid {
+.info-grid,
+.detalle-info-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 1.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+  align-items: stretch;
 }
 
 .info-item {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
+  display: grid;
+  gap: 0.45rem;
+  min-height: 108px;
+  padding: 1rem 1.05rem;
+  border-radius: 0.95rem;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.62), rgba(15, 23, 42, 0.88));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
 .info-item label {
-  color: #9ca3af;
-  font-size: 0.875rem;
-  margin-bottom: 0.25rem;
+  color: #94a3b8;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin: 0;
 }
 
 .info-item p {
-  color: #e5e7eb;
-  font-size: 1rem;
+  color: #f8fafc;
+  font-size: 1.02rem;
+  line-height: 1.45;
   margin: 0;
 }
 
@@ -2923,8 +3178,8 @@ onUnmounted(() => {
 }
 
 .modal-movimiento {
-  width: min(94vw, 860px);
-  max-width: 860px;
+  width: min(96vw, 1120px);
+  max-width: 1120px;
   border-radius: 1.15rem;
   border-color: rgba(96, 165, 250, 0.22);
   background:
@@ -3014,11 +3269,12 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  color: #e2e8f0;
 }
 
 .modal-form-movimiento {
-  padding: 1.15rem 1.45rem 1.45rem;
-  gap: 1rem;
+  padding: 1.2rem 1.6rem 1.6rem;
+  gap: 1.1rem;
 }
 
 .modal-form-confirmacion {
@@ -3110,6 +3366,10 @@ onUnmounted(() => {
   background: linear-gradient(180deg, rgba(15, 23, 42, 0.78), rgba(15, 23, 42, 0.94));
 }
 
+.modal-section-main {
+  padding: 1.15rem;
+}
+
 .modal-section-highlighted {
   border-color: rgba(96, 165, 250, 0.2);
   background:
@@ -3151,6 +3411,103 @@ onUnmounted(() => {
 .form-card-field-accent {
   border-color: rgba(125, 211, 252, 0.2);
   background: linear-gradient(180deg, rgba(30, 64, 175, 0.18), rgba(15, 23, 42, 0.9));
+}
+
+.modal-main-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(260px, 0.9fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.modal-main-fields {
+  display: grid;
+  gap: 0.95rem;
+}
+
+.form-row-emphasis {
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.form-row-secondary {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.form-card-field-wide {
+  grid-column: 1 / -1;
+}
+
+.form-card-field-detail {
+  min-height: 100%;
+}
+
+.form-card-field-detail input {
+  min-height: 3.45rem;
+}
+
+.monto-panel {
+  display: grid;
+  gap: 0.9rem;
+  position: sticky;
+  top: 0;
+}
+
+.monto-panel-field {
+  padding: 1.1rem;
+}
+
+.monto-panel-field input {
+  min-height: 3.45rem;
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.monto-panel-helper {
+  display: grid;
+  gap: 0.35rem;
+  padding: 1rem 1.05rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.66), rgba(15, 23, 42, 0.9));
+}
+
+.monto-panel-helper strong {
+  color: #f8fafc;
+  font-size: 1rem;
+}
+
+.monto-panel-helper p {
+  margin: 0;
+  color: #94a3b8;
+  line-height: 1.5;
+}
+
+.monto-panel > .monto-panel-field {
+  display: none;
+}
+
+.monto-panel-summary {
+  display: grid;
+  gap: 0.35rem;
+  padding: 1rem 1.05rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  background: linear-gradient(180deg, rgba(30, 64, 175, 0.18), rgba(15, 23, 42, 0.9));
+}
+
+.monto-panel-label {
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #93c5fd;
+}
+
+.monto-panel-summary strong {
+  color: #f8fafc;
+  font-size: 1.45rem;
+  line-height: 1.1;
 }
 
 .form-row-primary {
@@ -3261,6 +3618,15 @@ onUnmounted(() => {
     min-width: 100%;
   }
 
+  .toolbar-right {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .toolbar-right .btn {
+    width: 100%;
+  }
+
   .tabla {
     display: block;
     overflow-x: auto;
@@ -3276,6 +3642,18 @@ onUnmounted(() => {
 
   .desglose-grid-compact {
     grid-template-columns: 1fr;
+  }
+
+  .modal-main-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .form-row-emphasis {
+    grid-template-columns: 1fr;
+  }
+
+  .monto-panel {
+    position: static;
   }
 
   .caja-semana-select {
@@ -3301,4 +3679,3 @@ onUnmounted(() => {
   }
 }
 </style>
-

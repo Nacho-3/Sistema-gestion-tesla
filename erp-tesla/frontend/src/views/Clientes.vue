@@ -4,6 +4,10 @@ import api, { extractApiErrorMessage } from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
 
+// Estado para movimientos de caja del cliente
+const movimientosCajaCliente = ref([])
+const loadingMovimientosCaja = ref(false)
+
 // Estado
 const clientes = ref([])
 const loading = ref(false)
@@ -77,19 +81,25 @@ const cargarPresupuestosCliente = async (clienteId) => {
 const verFicha = async (cliente) => {
   clienteSeleccionado.value = cliente
   vistaActual.value = "ficha"
-  
-  // Cargar obras del cliente
+
+  // Cargar obras y movimientos de caja del cliente
   loading.value = true
+  loadingMovimientosCaja.value = true
   try {
-    const [resObras] = await Promise.all([
+    const [resObras, resMovimientos] = await Promise.all([
       api.getObras(),
-      cargarPresupuestosCliente(cliente.id)
+      api.getMovimientosCaja(null, null, "ingreso", null, null)
     ])
     obrasCliente.value = resObras.data?.filter(o => o.cliente_id === cliente.id) || []
+
+    // Filtrar movimientos de caja por cliente_id
+    movimientosCajaCliente.value = (resMovimientos.data.movimientos || []).filter(m => Number(m.cliente_id) === Number(cliente.id))
   } catch (err) {
     console.error("Error al cargar datos del cliente:", err)
+    movimientosCajaCliente.value = []
   } finally {
     loading.value = false
+    loadingMovimientosCaja.value = false
   }
 }
 
@@ -476,10 +486,36 @@ onUnmounted(() => {
           <p class="sin-datos">Funcionalidad disponible cuando se implemente el módulo de Facturas</p>
         </div>
 
+
         <!-- Historial de movimientos -->
         <div class="ficha-seccion">
           <h3>💰 Historial de movimientos</h3>
-          <p class="sin-datos">Funcionalidad disponible cuando se implemente el módulo de Caja</p>
+          <div v-if="loadingMovimientosCaja">
+            <span class="spinner">Cargando movimientos...</span>
+          </div>
+          <div v-else-if="movimientosCajaCliente.length === 0">
+            <p class="sin-datos">No hay movimientos de caja asociados a este cliente.</p>
+          </div>
+          <div v-else class="tabla-shell">
+            <table class="tabla">
+              <thead>
+                <tr>
+                  <th>Fecha</th>
+                  <th>Detalle</th>
+                  <th>Monto</th>
+                  <th>Observaciones</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="mov in movimientosCajaCliente" :key="mov.id">
+                  <td>{{ new Date(mov.fecha).toLocaleDateString('es-AR') }}</td>
+                  <td>{{ mov.detalle }}</td>
+                  <td>{{ mov.monto_total }}</td>
+                  <td>{{ mov.observaciones || '-' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <!-- Cargando -->

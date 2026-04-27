@@ -1,3 +1,6 @@
+-- MIGRACIÓN SEGURA: saldo_banco en cajas_semanales
+ALTER TABLE IF EXISTS cajas_semanales ADD COLUMN IF NOT EXISTS saldo_banco NUMERIC(12,2);
+ALTER TABLE IF EXISTS cajas_semanales ADD COLUMN IF NOT EXISTS saldo_pendiente_echeq NUMERIC(12,2);
 -- ERP Tesla - Schema PostgreSQL local
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -387,6 +390,8 @@ CREATE TABLE IF NOT EXISTS cajas_semanales (
   total_ingresos NUMERIC(12,2) NOT NULL DEFAULT 0,
   total_egresos NUMERIC(12,2) NOT NULL DEFAULT 0,
   saldo_final NUMERIC(12,2) NOT NULL DEFAULT 0,
+  saldo_banco NUMERIC(12,2),
+  saldo_pendiente_echeq NUMERIC(12,2),
   estado VARCHAR(20) NOT NULL DEFAULT 'abierta' CONSTRAINT chk_cajas_semanales_estado CHECK (estado IN ('abierta', 'cerrada')),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -400,6 +405,7 @@ CREATE TABLE IF NOT EXISTS movimientos_caja (
   caja_codigo VARCHAR(20) NOT NULL DEFAULT 'tesla' CONSTRAINT chk_movimientos_caja_codigo CHECK (caja_codigo IN ('tesla', 'teslita', 'juani')),
   tipo VARCHAR(20) NOT NULL CHECK (tipo IN ('ingreso', 'egreso')),
   detalle TEXT NOT NULL,
+  observaciones TEXT,
   categoria VARCHAR(20) CONSTRAINT chk_movimientos_categoria CHECK (categoria IS NULL OR categoria IN ('mano_obra', 'materiales', 'varios')),
   con_iva BOOLEAN NOT NULL DEFAULT true,
   destinatario TEXT,
@@ -429,6 +435,7 @@ CREATE TABLE IF NOT EXISTS movimientos_caja (
 ALTER TABLE IF EXISTS movimientos_caja
   ADD COLUMN IF NOT EXISTS caja_codigo VARCHAR(20) NOT NULL DEFAULT 'tesla',
   ADD COLUMN IF NOT EXISTS caja_semanal_id INTEGER,
+  ADD COLUMN IF NOT EXISTS observaciones TEXT,
   ADD COLUMN IF NOT EXISTS categoria VARCHAR(20),
   ADD COLUMN IF NOT EXISTS con_iva BOOLEAN NOT NULL DEFAULT true,
   ADD COLUMN IF NOT EXISTS destinatario TEXT,

@@ -198,6 +198,56 @@ router.get("/:id/ficha-pdf", async (req, res) => {
       })
     }
 
+    // =========================
+    // Movimientos de caja asociados
+    // =========================
+    // Consultar movimientos de caja (solo ingresos) asociados a este cliente
+    const { data: movimientosCaja, error: errorMovimientosCaja } = await db
+      .from("movimientos_caja")
+      .select("fecha, detalle, monto_total, observaciones")
+      .eq("cliente_id", id)
+      .eq("tipo", "ingreso")
+      .order("fecha", { ascending: true })
+
+    let movimientosY = currentY + 40
+    doc.font("Helvetica-Bold").fontSize(12).fillColor(PDF_COLORS.navy).text("MOVIMIENTOS DE CAJA (Ingresos)", 45, movimientosY)
+    movimientosY += 22
+
+    const drawMovimientosHeader = () => {
+      doc.rect(45, movimientosY, pageWidth - 90, 24).fill(PDF_COLORS.navy)
+      doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(9)
+      doc.text("FECHA", 55, movimientosY + 8, { width: 90 })
+      doc.text("DETALLE", 150, movimientosY + 8, { width: 200 })
+      doc.text("MONTO", 355, movimientosY + 8, { width: 90 })
+      doc.text("OBSERVACIONES", 450, movimientosY + 8, { width: 120 })
+      doc.fillColor(PDF_COLORS.ink)
+      movimientosY += 24
+    }
+
+    drawMovimientosHeader()
+
+    if (!movimientosCaja || movimientosCaja.length === 0) {
+      doc.font("Helvetica").fontSize(10.5).text("No hay movimientos de caja asociados a este cliente.", 45, movimientosY + 12)
+      movimientosY += 22
+    } else {
+      movimientosCaja.forEach((mov, idx) => {
+        if (movimientosY > doc.page.height - 90) {
+          doc.addPage()
+          movimientosY = 60
+          drawMovimientosHeader()
+        }
+        const fecha = mov.fecha ? new Date(mov.fecha).toLocaleDateString("es-AR") : "-"
+        const fill = idx % 2 === 0 ? PDF_COLORS.light : PDF_COLORS.lightAlt
+        doc.rect(45, movimientosY, pageWidth - 90, 20).fill(fill)
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9)
+        doc.text(fecha, 55, movimientosY + 6, { width: 90 })
+        doc.text(mov.detalle || "-", 150, movimientosY + 6, { width: 200 })
+        doc.text(Number(mov.monto_total).toLocaleString("es-AR", { minimumFractionDigits: 2 }), 355, movimientosY + 6, { width: 90 })
+        doc.text(mov.observaciones || "-", 450, movimientosY + 6, { width: 120 })
+        movimientosY += 20
+      })
+    }
+
     doc.end()
   } catch (err) {
     return handleInternalError(res, err, "ficha_pdf_cliente")

@@ -515,7 +515,8 @@ onUnmounted(() => {
           <button class="btn-volver" @click="volverALista">
             ← Volver a la lista
           </button>
-          <div class="detalle-acciones">
+          <div class="detalle-header-side">
+            <div class="detalle-acciones">
             <button class="btn-pdf" @click="descargarPdfObra(obraSeleccionada)">
               📄 Generar Resumen
             </button>
@@ -539,7 +540,7 @@ onUnmounted(() => {
             <button class="btn-delete" @click="deleteObra(obraSeleccionada.id)">
               🗑️ Eliminar
             </button>
-          </div>
+            </div>
 
                     <!-- Colocá esto dentro del detalle de la obra -->
           <div class="filtros-reporte" style="display: flex; gap: 10px; align-items: center; margin-bottom: 15px;">
@@ -556,6 +557,7 @@ onUnmounted(() => {
               <label>Año:</label>
               <input type="number" v-model="filtroDetalleAnio" class="form-control" style="width: 80px;" />
             </div>
+          </div>
           </div>
 
         </div>
@@ -1139,7 +1141,9 @@ td {
 .detalle-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  gap: 1rem;
+  flex-wrap: wrap;
   margin-bottom: 2rem;
 }
 
@@ -1176,6 +1180,50 @@ td {
 .detalle-acciones {
   display: flex;
   gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.filtros-reporte {
+  margin-top: 15px;
+  margin-left: auto;
+  padding: 0.9rem 1rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(96, 165, 250, 0.28);
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.9));
+  box-shadow: 0 18px 38px rgba(2, 6, 23, 0.24);
+  flex-wrap: wrap;
+}
+
+.filtros-reporte .form-group {
+  margin: 0;
+  min-width: 170px;
+}
+
+.filtros-reporte .form-group label {
+  display: block;
+  margin-bottom: 0.4rem;
+  color: #e2e8f0;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.filtros-reporte .form-control {
+  min-height: 48px;
+  border-radius: 0.95rem;
+  border: 1px solid rgba(96, 165, 250, 0.28);
+  background: rgba(15, 23, 42, 0.82);
+  color: #f8fafc;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.filtros-reporte .form-control:focus {
+  border-color: rgba(96, 165, 250, 0.9);
+  box-shadow:
+    0 0 0 3px rgba(59, 130, 246, 0.16),
+    0 12px 25px rgba(15, 23, 42, 0.18);
 }
 
 .detalle-acciones .btn-edit,

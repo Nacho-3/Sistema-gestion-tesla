@@ -286,24 +286,27 @@ export default {
   },
 
   // Caja
-  getMovimientosCaja(fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id) {
+  getMovimientosCaja(fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id, busqueda) {
     const params = new URLSearchParams()
     if (fecha_inicio) params.append("fecha_inicio", fecha_inicio)
     if (fecha_fin) params.append("fecha_fin", fecha_fin)
     if (tipo) params.append("tipo", tipo)
     if (caja_codigo) params.append("caja_codigo", caja_codigo)
     if (caja_semanal_id) params.append("caja_semanal_id", caja_semanal_id)
+    if (busqueda) params.append("busqueda", busqueda)
     return api.get(`/caja?${params.toString()}`)
   },
 
-  getResumenCajaPdf(fecha_inicio, fecha_fin, tipo, caja_codigo) {
-    const params = new URLSearchParams()
-    if (fecha_inicio) params.append("fecha_inicio", fecha_inicio)
-    if (fecha_fin) params.append("fecha_fin", fecha_fin)
-    if (tipo) params.append("tipo", tipo)
-    if (caja_codigo) params.append("caja_codigo", caja_codigo)
-    return api.get(`/caja/resumen/pdf?${params.toString()}`, { responseType: "blob" })
-  },
+  getResumenCajaPdf(fecha_inicio, fecha_fin, tipo, caja_codigo, resumen_modo = "general", busqueda) {
+      const params = new URLSearchParams()
+      if (fecha_inicio) params.append("fecha_inicio", fecha_inicio)
+      if (fecha_fin) params.append("fecha_fin", fecha_fin)
+      if (tipo) params.append("tipo", tipo)
+      if (caja_codigo) params.append("caja_codigo", caja_codigo)
+      if (resumen_modo) params.append("resumen_modo", resumen_modo)
+      if (busqueda) params.append("busqueda", busqueda)
+      return api.get(`/caja/resumen/pdf?${params.toString()}` , { responseType: "blob" })
+    },
 
   getMovimientoCaja(id) {
     return api.get(`/caja/${id}`)
@@ -338,8 +341,8 @@ export default {
     return api.get(`/caja/semana-actual?${params.toString()}`)
   },
 
-  cerrarSemanaCaja(id) {
-    return api.post(`/caja/semanas/${id}/cerrar`)
+  cerrarSemanaCaja(id, payload) {
+    return api.post(`/caja/semanas/${id}/cerrar`, payload)
   },
 
   // Presupuestos

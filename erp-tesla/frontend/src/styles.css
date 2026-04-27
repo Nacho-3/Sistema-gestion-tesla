@@ -1,0 +1,154 @@
+.toolbar-caja {
+	display: flex;
+	flex-direction: row;
+	align-items: flex-end;
+	gap: 0.75rem;
+	width: 100%;
+}
+
+.toolbar-search {
+	flex: 1 1 220px;
+	min-width: 180px;
+}
+
+.filtros-caja {
+	display: flex;
+	flex-direction: row;
+	align-items: flex-end;
+	gap: 0.5rem;
+	flex: 4 1 600px;
+}
+
+.filtros-caja label {
+	display: flex;
+	flex-direction: column;
+	min-width: 90px;
+	font-size: 0.97em;
+}
+
+.input-sm, .select-sm, .input-search {
+	font-size: 0.97em;
+	padding: 0.35em 0.7em;
+	height: 2.1em;
+	min-width: 0;
+	max-width: 140px;
+}
+
+.btn.btn-filter-apply, .btn.btn-filter-clear, .btn.btn-pdf {
+	font-size: 0.97em;
+	padding: 0.45em 1.1em;
+	min-width: 0;
+}
+.toolbar-filtros-header {
+	width: 100%;
+	padding-bottom: 1rem;
+	border-bottom: 1px solid #232c3d;
+	margin-bottom: 1.2rem;
+}
+.toolbar-filtros-title {
+	font-size: 1.12rem;
+	font-weight: 700;
+	color: #b6c2e0;
+	letter-spacing: 0.01em;
+}
+.toolbar-card {
+	background: #181f2a;
+	border-radius: 16px;
+	border: 1.5px solid #232c3d;
+	box-shadow: 0 2px 12px 0 rgba(0,0,0,0.10);
+	padding: 2rem 2.5rem 1.5rem 2.5rem;
+	margin-bottom: 2.5rem;
+	display: flex;
+	flex-direction: column;
+	gap: 1.5rem;
+}
+
+.toolbar-caja {
+	display: flex;
+	flex-direction: row;
+	align-items: flex-end;
+	gap: 1.5rem;
+	width: 100%;
+}
+
+.toolbar-search {
+	flex: 2 1 350px;
+	min-width: 250px;
+}
+
+.filtros-caja {
+	display: flex;
+	flex-direction: row;
+	align-items: flex-end;
+	gap: 1rem;
+	flex: 4 1 700px;
+}
+
+.filtros-caja label {
+	display: flex;
+	flex-direction: column;
+	min-width: 120px;
+}
+
+.btn.btn-pdf {
+	margin-left: 1.5rem !important;
+}
+
+.toolbar-card {
+	background: #181f2a;
+	border-radius: 16px;
+	border: 1.5px solid #232c3d;
+	box-shadow: 0 2px 12px 0 rgba(0,0,0,0.10);
+	padding: 2rem 2.5rem 1.5rem 2.5rem;
+	margin-bottom: 2.5rem;
+	display: flex;
+	flex-direction: column;
+	gap: 1.5rem;
+}
+
+.toolbar-caja {
+	align-items: flex-end;
+}
+
+.toolbar-search-label span {
+	font-weight: 600;
+	color: #b6c2e0;
+	margin-bottom: 0.5rem;
+	display: block;
+}
+
+.filtros-caja label span {
+	font-weight: 500;
+	color: #b6c2e0;
+	margin-bottom: 0.25rem;
+	display: block;
+}
+
+.btn.btn-filter-apply {
+	background: linear-gradient(90deg, #2563eb 0%, #38bdf8 100%);
+	color: #fff;
+	font-weight: 600;
+	border: none;
+	border-radius: 8px;
+	padding: 0.5rem 1.5rem;
+	margin-right: 0.5rem;
+	box-shadow: 0 1px 4px 0 rgba(56,189,248,0.10);
+	transition: background 0.2s;
+}
+.btn.btn-filter-apply:hover {
+	background: linear-gradient(90deg, #1d4ed8 0%, #0ea5e9 100%);
+}
+
+.btn.btn-filter-clear {
+	background: #232c3d;
+	color: #fff;
+	font-weight: 500;
+	border: none;
+	border-radius: 8px;
+	padding: 0.5rem 1.5rem;
+	margin-right: 0.5rem;
+	transition: background 0.2s;
+}
+.btn.btn-filter-clear:hover {
+	background: #334155;
+}

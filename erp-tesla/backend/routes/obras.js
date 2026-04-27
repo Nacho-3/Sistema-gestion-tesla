@@ -322,12 +322,20 @@ const getClienteGrupo = async (obra) => {
 router.get("/:id/pdf", async (req, res) => {
   try {
     const { id } = req.params;
+    const { mes, anio } = req.query;
     const ahora = new Date();
     const fechaTexto = ahora.toLocaleDateString("es-AR");
 
+    let horasQuery = db.from("horas").select("cantidad_horas, horas_trabajadas").eq("obra_id", id);
+    if (mes && anio) {
+      const inicio = new Date(Number(anio), Number(mes) - 1, 1).toISOString().split("T")[0];
+      const fin = new Date(Number(anio), Number(mes), 0).toISOString().split("T")[0];
+      horasQuery = horasQuery.gte("fecha", inicio).lte("fecha", fin);
+    }
+
     const [obraRes, horasRes] = await Promise.all([
       db.from("obras").select("*").eq("id", id).single(),
-      db.from("horas").select("cantidad_horas, horas_trabajadas").eq("obra_id", id)
+      horasQuery
     ]);
 
     const { data: obra, error: obraErr } = obraRes;
@@ -351,11 +359,14 @@ router.get("/:id/pdf", async (req, res) => {
 
     const pageWidth = doc.page.width;
     setupPremiumFooter(doc, { leftText: "Tesla Montajes Electricos - Resumen Operativo de Obra" });
+    const periodoSeleccionado = mes && anio
+      ? `${String(mes).padStart(2, "0")}/${anio}`
+      : "Periodo completo";
 
     const headerBottom = drawPremiumHeader(doc, {
       title: obra.nombre,
       subtitle: "Resumen de Control de Obra",
-      accentText: cliente?.razon_social || "Cliente no especificado",
+      accentText: `${cliente?.razon_social || "Cliente no especificado"} - ${periodoSeleccionado}`,
       logoPath: LOGO_PATH,
     });
 

@@ -202,13 +202,10 @@ async function recalcularCajaSemanal(cajaSemanalId) {
 
   const movimientosNormalizados = (movimientos || []).map(normalizarMovimiento)
 
-  const totalIngresos = roundMoney((movimientosNormalizados || [])
-    .filter((mov) => String(mov.tipo) === "ingreso")
-    .reduce((sum, mov) => sum + Number(mov.monto_total || 0), 0))
-
-  const totalEgresos = roundMoney((movimientosNormalizados || [])
-    .filter((mov) => String(mov.tipo) === "egreso")
-    .reduce((sum, mov) => sum + Number(mov.monto_total || 0), 0))
+  const totalIngresos = movimientos.filter(m => m.tipo === "ingreso").reduce((sum, m) => sum + Number(m.monto_total || 0), 0)
+  const totalEgresos = movimientos.filter(m => m.tipo === "egreso").reduce((sum, m) => sum + Number(m.monto_total || 0), 0)
+  const balance = totalIngresos - totalEgresos
+  const cantidadMovimientos = movimientos.length
 
   const saldoInicialPorMedio = await obtenerSaldoAcumuladoPorMedio(semana.caja_codigo, semana.fecha_inicio)
   const saldoPorMedio = {
@@ -322,6 +319,7 @@ function normalizarMovimiento(movimiento) {
       ? String(movimiento.caja_codigo).toLowerCase()
       : "tesla",
     detalle: movimiento.detalle ?? movimiento.concepto ?? movimiento.descripcion ?? "",
+    observaciones: String(movimiento.observaciones || "").trim(),
     categoria: CATEGORIAS_CAJA.includes(String(movimiento.categoria || "")) ? movimiento.categoria : null,
     con_iva: Boolean(movimiento.con_iva),
     destinatario: movimiento.destinatario || "",
@@ -678,7 +676,7 @@ async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_
 // Listar movimientos de caja con filtros
 router.get("/", async (req, res) => {
   try {
-    const { fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id } = req.query
+    const { fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id, busqueda } = req.query
 
     if (caja_codigo && !CAJAS_DISPONIBLES.includes(String(caja_codigo).toLowerCase())) {
       return res.status(400).json({ error: "Caja inválida" })
@@ -686,13 +684,26 @@ router.get("/", async (req, res) => {
 
     const cajaSemanalIdNormalizada = normalizarCajaSemanalId(caja_semanal_id)
 
-    const { movimientos, totales } = await obtenerMovimientosYTotales({
+    let { movimientos, totales } = await obtenerMovimientosYTotales({
       fecha_inicio,
       fecha_fin,
       tipo,
       caja_codigo: caja_codigo ? String(caja_codigo).toLowerCase() : undefined,
       caja_semanal_id: cajaSemanalIdNormalizada,
     })
+
+    // Filtro por palabra clave si se envía 'busqueda'
+    if (busqueda && String(busqueda).trim() !== "") {
+      const palabra = String(busqueda).trim().toLowerCase()
+      movimientos = movimientos.filter(mov => {
+        return (
+          (mov.detalle && mov.detalle.toLowerCase().includes(palabra)) ||
+          (mov.observaciones && mov.observaciones.toLowerCase().includes(palabra)) ||
+          (mov.destinatario && mov.destinatario.toLowerCase().includes(palabra)) ||
+          (mov.nombre_cliente && mov.nombre_cliente.toLowerCase().includes(palabra))
+        )
+      })
+    }
 
     res.json({
       movimientos,
@@ -761,22 +772,69 @@ router.get("/semana-actual", async (req, res) => {
 router.post("/semanas/:id/cerrar", async (req, res) => {
   try {
     const { id } = req.params
+    const { saldo_banco, saldo_pendiente_echeq } = req.body
 
-    const semana = await recalcularCajaSemanal(id)
+    const idNumerico = Number(id)
+    if (!Number.isInteger(idNumerico) || idNumerico <= 0) {
+      return res.status(400).json({ error: "ID de semana inválido" })
+    }
+
+    let saldoBancoNormalizado = null
+    if (saldo_banco !== undefined && saldo_banco !== null && String(saldo_banco).trim() !== "") {
+      const saldoParsed = Number(saldo_banco)
+      if (!Number.isFinite(saldoParsed)) {
+        return res.status(400).json({ error: "Saldo de banco inválido" })
+      }
+      saldoBancoNormalizado = roundMoney(saldoParsed)
+    }
+
+    let saldoPendienteEcheqNormalizado = null
+    if (saldo_pendiente_echeq !== undefined && saldo_pendiente_echeq !== null && String(saldo_pendiente_echeq).trim() !== "") {
+      const saldoPendienteParsed = Number(saldo_pendiente_echeq)
+      if (!Number.isFinite(saldoPendienteParsed)) {
+        return res.status(400).json({ error: "Saldo pendiente de eCheqs inválido" })
+      }
+      saldoPendienteEcheqNormalizado = roundMoney(saldoPendienteParsed)
+    }
+
+    const semana = await recalcularCajaSemanal(idNumerico)
     if (!semana) {
       return res.status(404).json({ error: "Semana de caja no encontrada" })
     }
 
+    // Cerrar la semana y guardar los saldos informativos del cierre
     const { data, error } = await db
       .from("cajas_semanales")
-      .update({ estado: "cerrada" })
-      .eq("id", id)
+      .update({
+        estado: "cerrada",
+        saldo_banco: saldoBancoNormalizado,
+        saldo_pendiente_echeq: saldoPendienteEcheqNormalizado,
+      })
+      .eq("id", idNumerico)
       .select()
       .single()
 
     if (error) throw error
+
+    // Asegura la próxima semana en la base para que quede lista al cerrar.
+    const fechaInicioActual = normalizarFechaISO(semana.fecha_inicio)
+    const [anioInicio, mesInicio, diaInicio] = (fechaInicioActual || "").split("-").map(Number)
+    const baseInicio = new Date(anioInicio, mesInicio - 1, diaInicio)
+    baseInicio.setDate(baseInicio.getDate() + 7)
+    const siguienteSemanaRef = normalizarFechaISO(baseInicio)
+    const proximaSemanaDb = await asegurarCajaSemanal(semana.caja_codigo, siguienteSemanaRef)
+    const proximaSemana = {
+      id: proximaSemanaDb.id,
+      fecha_inicio: normalizarFechaISO(proximaSemanaDb.fecha_inicio),
+      fecha_fin: normalizarFechaISO(proximaSemanaDb.fecha_fin),
+      estado: proximaSemanaDb.estado,
+    }
+
     getIo()?.emit('caja:changed')
-    res.json(data)
+    res.json({
+      semanaCerrada: data,
+      proximaSemana
+    })
   } catch (err) {
     res.status(400).json({ error: err.message })
   }
@@ -784,29 +842,45 @@ router.post("/semanas/:id/cerrar", async (req, res) => {
 
 router.get("/resumen/pdf", async (req, res) => {
   try {
-    const { fecha_inicio, fecha_fin, tipo, caja_codigo } = req.query
+    const { fecha_inicio, fecha_fin, tipo, caja_codigo, resumen_modo, busqueda } = req.query
     const cajaCodigoNormalizada = caja_codigo ? String(caja_codigo).toLowerCase() : undefined
+    const modoResumen = String(resumen_modo || "general").toLowerCase()
 
     if (cajaCodigoNormalizada && !CAJAS_DISPONIBLES.includes(cajaCodigoNormalizada)) {
       return res.status(400).json({ error: "Caja inválida" })
     }
 
-    const { movimientos, totales } = await obtenerMovimientosYTotales({
+    let { movimientos, totales } = await obtenerMovimientosYTotales({
       fecha_inicio,
       fecha_fin,
       tipo,
       caja_codigo: cajaCodigoNormalizada,
     })
-
-    const balance = (totales.totalIngresos || 0) - (totales.totalEgresos || 0)
+    // Filtro por palabra clave si se envía 'busqueda'
+    if (busqueda && String(busqueda).trim() !== "") {
+      const palabra = String(busqueda).trim().toLowerCase()
+      movimientos = movimientos.filter(mov => {
+        return (
+          (mov.detalle && mov.detalle.toLowerCase().includes(palabra)) ||
+          (mov.observaciones && mov.observaciones.toLowerCase().includes(palabra)) ||
+          (mov.destinatario && mov.destinatario.toLowerCase().includes(palabra)) ||
+          (mov.nombre_cliente && mov.nombre_cliente.toLowerCase().includes(palabra))
+        )
+      })
+    }
+    // Recalcular totales y balance usando solo los movimientos filtrados
+    const totalIngresos = movimientos.filter(m => m.tipo === "ingreso").reduce((sum, m) => sum + Number(m.monto_total || 0), 0)
+    const totalEgresos = movimientos.filter(m => m.tipo === "egreso").reduce((sum, m) => sum + Number(m.monto_total || 0), 0)
+    const balance = totalIngresos - totalEgresos
     const cantidadMovimientos = movimientos.length
-    const esResumenSemanal = Boolean(fecha_inicio && fecha_fin)
+    const tieneRangoFechas = Boolean(fecha_inicio && fecha_fin)
+    const esResumenSemanal = modoResumen === "semanal" && tieneRangoFechas
     const etiquetaPeriodo = esResumenSemanal
       ? `${formatoFecha(fecha_inicio)} al ${formatoFecha(fecha_fin)}`
       : "Período completo"
 
     let cajaSemanalResumen = null
-    if (esResumenSemanal && cajaCodigoNormalizada) {
+    if (tieneRangoFechas && cajaCodigoNormalizada) {
       const { data: semanasCajaData, error: errorSemanaCaja } = await db
         .from("cajas_semanales")
         .select("*")
@@ -819,6 +893,17 @@ router.get("/resumen/pdf", async (req, res) => {
         return normalizarFechaISO(semana.fecha_inicio) === normalizarFechaISO(fecha_inicio)
           && normalizarFechaISO(semana.fecha_fin) === normalizarFechaISO(fecha_fin)
       })
+
+      const ultimaSemanaConSaldosRegistrados = (semanasCajaData || [])
+        .filter((semana) => {
+          return (semana?.saldo_banco !== null && semana?.saldo_banco !== undefined)
+            || (semana?.saldo_pendiente_echeq !== null && semana?.saldo_pendiente_echeq !== undefined)
+        })
+        .sort((a, b) => {
+          const fechaA = new Date(a?.updated_at || a?.fecha_fin || a?.created_at || 0).getTime()
+          const fechaB = new Date(b?.updated_at || b?.fecha_fin || b?.created_at || 0).getTime()
+          return fechaB - fechaA
+        })[0] || null
 
       const saldoPrevio = await obtenerSaldoAcumuladoPorMedio(cajaCodigoNormalizada, fecha_inicio)
       const saldoFinalDesglosado = {
@@ -846,6 +931,10 @@ router.get("/resumen/pdf", async (req, res) => {
         saldo_final: roundMoney(saldoFinalEfectivo + saldoFinalCheques),
         saldo_final_efectivo: saldoFinalEfectivo,
         saldo_final_cheques: saldoFinalCheques,
+        saldo_banco: modoResumen === "general" ? ultimaSemanaConSaldosRegistrados?.saldo_banco ?? null : semanaCaja?.saldo_banco,
+        saldo_pendiente_echeq: modoResumen === "general"
+          ? ultimaSemanaConSaldosRegistrados?.saldo_pendiente_echeq ?? null
+          : semanaCaja?.saldo_pendiente_echeq,
       }
     }
 
@@ -918,10 +1007,17 @@ router.get("/resumen/pdf", async (req, res) => {
         { titulo: "Saldo final", valor: cajaSemanalResumen?.saldo_final || 0 },
       ]
 
+
       labels.forEach((item, index) => {
         const x = 58 + index * (cardWidth + 4)
         const mostrarDetalleMedios = index === 0 || index === 3
-        const cardHeight = mostrarDetalleMedios ? 48 : 28
+        let cardHeight = mostrarDetalleMedios ? 48 : 28
+        // Si es saldo final y hay saldos informativos, agrandar la tarjeta
+        const mostrarBanco = index === 3 && cajaSemanalResumen && cajaSemanalResumen.saldo_banco !== undefined && cajaSemanalResumen.saldo_banco !== null
+        const mostrarEcheqPendiente = index === 3 && cajaSemanalResumen && cajaSemanalResumen.saldo_pendiente_echeq !== undefined && cajaSemanalResumen.saldo_pendiente_echeq !== null
+        if (mostrarBanco) cardHeight += 14
+        if (mostrarEcheqPendiente) cardHeight += 14
+
         doc.roundedRect(x, cardsY, cardWidth, cardHeight, 6).fill(index === 3 ? "#dbeafe" : PDF_COLORS.lightAlt)
         doc.fillColor("#334155").font("Helvetica-Bold").fontSize(7.4)
         doc.text(item.titulo.toUpperCase(), x + 8, cardsY + 5, { width: cardWidth - 16, lineBreak: false })
@@ -939,6 +1035,14 @@ router.get("/resumen/pdf", async (req, res) => {
           doc.fillColor(PDF_COLORS.slate).font("Helvetica").fontSize(6.6)
           doc.text(`Efectivo: ${formatoMoneda(efectivoValor)}`, x + 8, cardsY + 27, { width: cardWidth - 16, lineBreak: false })
           doc.text(`Cheques: ${formatoMoneda(chequesValor)}`, x + 8, cardsY + 36, { width: cardWidth - 16, lineBreak: false })
+          // Mostrar saldos informativos debajo del saldo final
+          if (mostrarBanco) {
+            doc.text(`Banco: ${formatoMoneda(cajaSemanalResumen.saldo_banco)}`, x + 8, cardsY + 47, { width: cardWidth - 16, lineBreak: false })
+          }
+          if (mostrarEcheqPendiente) {
+            const echeqPendienteY = mostrarBanco ? 56 : 47
+            doc.text(`eCheqs pend.: ${formatoMoneda(cajaSemanalResumen.saldo_pendiente_echeq)}`, x + 8, cardsY + echeqPendienteY, { width: cardWidth - 16, lineBreak: false })
+          }
         }
       })
 
@@ -956,8 +1060,8 @@ router.get("/resumen/pdf", async (req, res) => {
 
     doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(13)
     doc.text(String(cantidadMovimientos), 58, resumenY + 24, { width: 100 })
-    doc.text(formatoMoneda(totales.totalIngresos), 185, resumenY + 24, { width: 120 })
-    doc.text(formatoMoneda(totales.totalEgresos), 320, resumenY + 24, { width: 120 })
+    doc.text(formatoMoneda(totalIngresos), 185, resumenY + 24, { width: 120 })
+    doc.text(formatoMoneda(totalEgresos), 320, resumenY + 24, { width: 120 })
     doc.text(formatoMoneda(balance), 430, resumenY + 24, { width: 110, align: "right" })
 
     doc.strokeColor(PDF_COLORS.line).lineWidth(0.8).moveTo(58, resumenY + 48).lineTo(pageWidth - 58, resumenY + 48).stroke()
@@ -1055,16 +1159,36 @@ router.get("/resumen/pdf", async (req, res) => {
     drawVerticalSeparators(yDesglose, 22)
     doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(9.2)
     doc.text("TOTAL GENERAL", colMedioX, yDesglose + 7, { width: colMedioWidth })
-    doc.text(formatoMoneda(totales.totalIngresos || 0), colIngresosX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
-    doc.text(formatoMoneda(totales.totalEgresos || 0), colEgresosX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
-    doc.text(formatoMoneda((totales.totalIngresos || 0) - (totales.totalEgresos || 0)), colTotalX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+    doc.text(formatoMoneda(totalIngresos), colIngresosX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+    doc.text(formatoMoneda(totalEgresos), colEgresosX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+    doc.text(formatoMoneda(balance), colTotalX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
     drawHorizontalSeparator(yDesglose)
-    drawHorizontalSeparator(yDesglose + 22)
-    drawTableBorders(tableTopY, yDesglose + 22)
-    doc.fillColor(PDF_COLORS.ink)
-    doc.y = yDesglose + 28
+    yDesglose += 22
 
-    drawSectionTitle("Detalle de movimientos")
+    if (cajaSemanalResumen?.saldo_banco !== undefined && cajaSemanalResumen?.saldo_banco !== null) {
+      doc.rect(45, yDesglose, pageWidth - 90, 22).fill(PDF_COLORS.light)
+      drawVerticalSeparators(yDesglose, 22)
+      doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(9.2)
+      doc.text("SALDO EN BANCO", colMedioX, yDesglose + 7, { width: colMedioWidth })
+      doc.text(formatoMoneda(cajaSemanalResumen.saldo_banco), colTotalX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+      yDesglose += 22
+    }
+
+    if (cajaSemanalResumen?.saldo_pendiente_echeq !== undefined && cajaSemanalResumen?.saldo_pendiente_echeq !== null) {
+      doc.rect(45, yDesglose, pageWidth - 90, 22).fill(PDF_COLORS.light)
+      drawVerticalSeparators(yDesglose, 22)
+      doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(9.2)
+      doc.text("ECHEQS PENDIENTES", colMedioX, yDesglose + 7, { width: colMedioWidth })
+      doc.text(formatoMoneda(cajaSemanalResumen.saldo_pendiente_echeq), colTotalX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+      yDesglose += 22
+    }
+
+    drawHorizontalSeparator(yDesglose)
+    drawTableBorders(tableTopY, yDesglose)
+    doc.fillColor(PDF_COLORS.ink)
+    doc.y = yDesglose + 6
+
+    drawSectionTitle("Detalle de movimientos", { width: pageWidth - 90, align: "left" })
 
     const drawMovHeader = () => {
       const headerY = doc.y
@@ -1215,9 +1339,18 @@ router.get("/:id/pdf", async (req, res) => {
     doc.text(`Cliente: ${movimiento.cliente || "-"}`, 250, infoAdicionalY + 20, { width: 85 })
     doc.text(`Presupuesto: ${movimiento.presupuesto_id || "-"}`, 410, infoAdicionalY + 20, { width: 90, align: "right" })
 
-    doc.strokeColor(PDF_COLORS.line).lineWidth(0.8).moveTo(45, infoAdicionalY + 50).lineTo(pageWidth - 45, infoAdicionalY + 50).stroke()
+    const observacionesTexto = String(movimiento.observaciones || "").trim()
+    let separadorY = infoAdicionalY + 50
+    if (observacionesTexto) {
+      const observacionesY = infoAdicionalY + 36
+      doc.text(`Observaciones: ${observacionesTexto}`, 58, observacionesY, { width: pageWidth - 116 })
+      const altoObservaciones = doc.heightOfString(`Observaciones: ${observacionesTexto}`, { width: pageWidth - 116 })
+      separadorY = observacionesY + Math.max(18, altoObservaciones + 6)
+    }
 
-    let infoDesgloseY = infoAdicionalY + 60
+    doc.strokeColor(PDF_COLORS.line).lineWidth(0.8).moveTo(45, separadorY).lineTo(pageWidth - 45, separadorY).stroke()
+
+    let infoDesgloseY = separadorY + 10
     doc.moveDown(0.4)
     doc.font("Helvetica-Bold").fontSize(12).fillColor(PDF_COLORS.navy).text("Desglose por medio de pago", 45, infoDesgloseY, { width: pageWidth - 90, align: "center" })
     doc.moveDown(0.25)
@@ -1279,12 +1412,13 @@ router.get("/:id", async (req, res) => {
 // Crear movimiento de caja
 router.post("/", async (req, res) => {
   try {
-    const { fecha, caja_codigo, tipo, detalle, monto_total, desglose, detalles_medio_pago, categoria, con_iva, cliente_id, presupuesto_id, destinatario } = req.body
+    const { fecha, caja_codigo, tipo, detalle, observaciones, monto_total, desglose, detalles_medio_pago, categoria, con_iva, cliente_id, presupuesto_id, destinatario } = req.body
     const detalleColumn = await getDetalleColumn()
     const detallesSchema = await getDetallesSchema()
     const cajaCodigoNormalizada = String(caja_codigo || "").toLowerCase()
     const tipoNormalizado = String(tipo || "").toLowerCase()
     const destinatarioNormalizado = String(destinatario || "").trim()
+    const observacionesNormalizadas = String(observaciones || "").trim()
 
     // Validaciones
     if (!fecha || !cajaCodigoNormalizada || !tipoNormalizado || !detalle || !monto_total) {
@@ -1336,6 +1470,7 @@ router.post("/", async (req, res) => {
           caja_codigo: cajaCodigoNormalizada,
           tipo: tipoNormalizado,
           [detalleColumn]: detalle,
+          observaciones: observacionesNormalizadas || null,
           monto_total: parseFloat(monto_total),
           categoria: tipoNormalizado === "ingreso" ? (categoria || null) : null,
           con_iva: normalizarBoolean(con_iva, true),
@@ -1416,12 +1551,13 @@ router.post("/", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params
-    const { fecha, caja_codigo, tipo, detalle, monto_total, desglose, detalles_medio_pago, categoria, con_iva, cliente_id, presupuesto_id, destinatario } = req.body
+    const { fecha, caja_codigo, tipo, detalle, observaciones, monto_total, desglose, detalles_medio_pago, categoria, con_iva, cliente_id, presupuesto_id, destinatario } = req.body
     const detalleColumn = await getDetalleColumn()
     const detallesSchema = await getDetallesSchema()
     const cajaCodigoNormalizada = caja_codigo !== undefined ? String(caja_codigo || "").toLowerCase() : undefined
     const tipoNormalizado = tipo !== undefined ? String(tipo || "").toLowerCase() : undefined
     const destinatarioNormalizado = destinatario !== undefined ? String(destinatario || "").trim() : undefined
+    const observacionesNormalizadas = observaciones !== undefined ? String(observaciones || "").trim() : undefined
 
     const { data: movimientoActual } = await db
       .from("movimientos_caja")
@@ -1470,6 +1606,7 @@ router.put("/:id", async (req, res) => {
     if (caja_codigo !== undefined) actualizaciones.caja_codigo = cajaCodigoNormalizada || "tesla"
     if (tipo !== undefined) actualizaciones.tipo = tipoNormalizado
     if (detalle !== undefined) actualizaciones[detalleColumn] = detalle
+    if (observaciones !== undefined) actualizaciones.observaciones = observacionesNormalizadas || null
     if (monto_total !== undefined) actualizaciones.monto_total = monto_total
     if (categoria !== undefined) actualizaciones.categoria = tipoFinal === "ingreso" ? (categoria || null) : null
     if (con_iva !== undefined) actualizaciones.con_iva = normalizarBoolean(con_iva, true)
