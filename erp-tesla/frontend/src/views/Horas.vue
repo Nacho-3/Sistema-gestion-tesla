@@ -28,6 +28,13 @@ const selectEmpleadoDiariaRef = ref(null)
 const selectEmpleadoRangoRef = ref(null)
 const inputCantidadDiariaRef = ref(null)
 const inputHoraInicioDiariaRef = ref(null)
+const cargaDiariaMultiple = ref(false)
+const empleadosMultiplesDiaria = ref([])
+const cargaRangoMultiple = ref(false)
+const empleadosMultiplesRango = ref([])
+const conflictoCargaRangoVisible = ref(false)
+const conflictoCargaRangoResumen = ref([])
+const conflictoCargaRangoTotal = ref(0)
 
 const ULTIMA_CARGA_STORAGE_KEY = "tesla-horas-ultima-carga"
 let ctrlShortcutArmed = false
@@ -250,6 +257,14 @@ const getObrasDisponibles = (clienteId) => {
 const obrasDisponiblesDiaria = computed(() => getObrasDisponibles(formDiaria.value.cliente_id))
 const obrasDisponiblesRango = computed(() => getObrasDisponibles(formRango.value.cliente_id))
 const getObrasDisponiblesFilaRango = (clienteId) => getObrasDisponibles(clienteId)
+const esCargaDiariaAdminUnica = computed(() => {
+  if (cargaDiariaMultiple.value && !editingId.value) return false
+  return isEmpleadoAdministrativo(formDiaria.value.empleado_id)
+})
+const esCargaRangoAdminUnica = computed(() => {
+  if (cargaRangoMultiple.value) return false
+  return isEmpleadoAdministrativo(formRango.value.empleado_id)
+})
 
 const syncObraDiariaPorEmpleado = () => {
   if (!isEmpleadoAdministrativo(formDiaria.value.empleado_id)) return
@@ -259,6 +274,7 @@ const syncObraDiariaPorEmpleado = () => {
 }
 
 const syncObraRangoPorEmpleado = () => {
+  if (cargaRangoMultiple.value) return
   if (!isEmpleadoAdministrativo(formRango.value.empleado_id)) return
   formRango.value.cliente_id = ""
   const obraAdmin = getObraAdministrativaParaEmpleado(formRango.value.empleado_id)
@@ -267,6 +283,20 @@ const syncObraRangoPorEmpleado = () => {
 
 watch(() => formDiaria.value.empleado_id, syncObraDiariaPorEmpleado)
 watch(() => formRango.value.empleado_id, syncObraRangoPorEmpleado)
+watch(cargaDiariaMultiple, (enabled) => {
+  if (!enabled) {
+    empleadosMultiplesDiaria.value = []
+  }
+})
+watch(cargaRangoMultiple, (enabled) => {
+  if (!enabled) {
+    empleadosMultiplesRango.value = []
+  }
+  if (enabled) {
+    rangoDias.value = []
+    loadingRangoDias.value = false
+  }
+})
 watch(() => formDiaria.value.cliente_id, (clienteId) => {
   const obraActual = obras.value.find((obra) => String(obra.id) === String(formDiaria.value.obra_id))
   if (obraActual && clienteId && String(obraActual.cliente_id) !== String(clienteId)) {
@@ -288,7 +318,7 @@ watch(() => formRango.value.obra_id, (obraId) => {
   if (obra?.cliente_id) formRango.value.cliente_id = obra.cliente_id
 })
 watch(
-  () => [showFormRango.value, formRango.value.empleado_id, formRango.value.fecha_desde, formRango.value.fecha_hasta],
+  () => [showFormRango.value, cargaRangoMultiple.value, formRango.value.empleado_id, formRango.value.fecha_desde, formRango.value.fecha_hasta],
   () => {
     prepararDiasRango()
   }
@@ -351,6 +381,8 @@ const loadResumenes = async () => {
 // Abrir modal de carga diaria
 const openModalDiaria = (hora = null) => {
   if (hora) {
+    cargaDiariaMultiple.value = false
+    empleadosMultiplesDiaria.value = []
     editingId.value = hora.id
     focoModalDiaria = "cantidad"
     const tipoExtraActual = hora.es_hora_extra ? (hora.tipo_hora_extra || (hora.tipo === "extra_100" ? "100" : "50")) : ""
@@ -368,6 +400,8 @@ const openModalDiaria = (hora = null) => {
     }
     modoDiaria.value = (hora.hora_inicio && hora.hora_fin) ? "horario" : "cantidad"
   } else {
+    cargaDiariaMultiple.value = false
+    empleadosMultiplesDiaria.value = []
     editingId.value = null
     focoModalDiaria = "empleado"
     modoDiaria.value = "cantidad"
@@ -378,6 +412,8 @@ const openModalDiaria = (hora = null) => {
 
 // Cerrar modal de carga diaria
 const closeModalDiaria = () => {
+  cargaDiariaMultiple.value = false
+  empleadosMultiplesDiaria.value = []
   showFormDiaria.value = false
   editingId.value = null
   modoDiaria.value = "cantidad"
@@ -386,6 +422,11 @@ const closeModalDiaria = () => {
 
 // Cerrar modal de carga por rango
 const closeModalRango = () => {
+  cargaRangoMultiple.value = false
+  empleadosMultiplesRango.value = []
+  conflictoCargaRangoVisible.value = false
+  conflictoCargaRangoResumen.value = []
+  conflictoCargaRangoTotal.value = 0
   showFormRango.value = false
   modoRango.value = "cantidad"
   formRango.value = createEmptyFormRango()
@@ -696,6 +737,12 @@ const getResumenDiaRango = (dia) => {
 }
 
 const prepararDiasRango = async () => {
+  if (cargaRangoMultiple.value) {
+    rangoDias.value = []
+    loadingRangoDias.value = false
+    return
+  }
+
   const empleadoId = formRango.value.empleado_id
   const fechaDesde = formRango.value.fecha_desde
   const fechaHasta = formRango.value.fecha_hasta
@@ -803,6 +850,82 @@ const aplicarPrimerDiaATodos = () => {
   aplicarPlantillaATodosLosDias()
 }
 
+const resetConflictoCargaRango = () => {
+  conflictoCargaRangoVisible.value = false
+  conflictoCargaRangoResumen.value = []
+  conflictoCargaRangoTotal.value = 0
+}
+
+const getPayloadRangoKey = (payload) => `${payload?.empleado_id || ""}|${payload?.fecha || ""}`
+
+const detectarConflictosCargaRango = async ({ payloads = [], empleadosObjetivo = [], fechaDesde = "", fechaHasta = "" }) => {
+  const meses = getMesesEnRango(fechaDesde, fechaHasta)
+  const pedidos = []
+
+  for (const empleadoId of empleadosObjetivo) {
+    for (const { mes, anio } of meses) {
+      pedidos.push(
+        api.getHoras(mes, anio, empleadoId).then((res) => ({ empleadoId, data: res?.data || [] }))
+      )
+    }
+  }
+
+  const respuestas = await Promise.all(pedidos)
+  const existentesPorKey = new Map()
+
+  for (const respuesta of respuestas) {
+    for (const registro of respuesta.data || []) {
+      const fechaRegistro = String(registro?.fecha || "")
+      if (fechaRegistro < fechaDesde || fechaRegistro > fechaHasta) continue
+      const key = `${String(registro?.empleado_id || "")}|${fechaRegistro}`
+      const actuales = existentesPorKey.get(key) || []
+      actuales.push(registro)
+      existentesPorKey.set(key, actuales)
+    }
+  }
+
+  const conflictos = []
+  const resumenPorEmpleado = new Map()
+
+  for (const item of payloads) {
+    const key = getPayloadRangoKey(item.payload)
+    const existentes = existentesPorKey.get(key) || []
+    if (!existentes.length) continue
+
+    conflictos.push({ key, payload: item.payload, existentes })
+
+    const empleadoId = String(item.payload?.empleado_id || "")
+    const fecha = String(item.payload?.fecha || "")
+    if (!resumenPorEmpleado.has(empleadoId)) {
+      resumenPorEmpleado.set(empleadoId, new Set())
+    }
+    resumenPorEmpleado.get(empleadoId).add(fecha)
+  }
+
+  const resumen = Array.from(resumenPorEmpleado.entries())
+    .map(([empleadoId, fechasSet]) => ({
+      empleadoId,
+      empleado: getNombreEmpleado(empleadoId),
+      fechas: Array.from(fechasSet).sort((a, b) => a.localeCompare(b, "es")),
+    }))
+    .sort((a, b) => a.empleado.localeCompare(b.empleado, "es", { sensitivity: "base" }))
+
+  return {
+    conflictos,
+    existentesPorKey,
+    resumen,
+    total: conflictos.length,
+  }
+}
+
+const cancelarConflictoCargaRango = () => {
+  resetConflictoCargaRango()
+}
+
+const resolverConflictoCargaRango = async (accion) => {
+  await saveHoraRango(accion)
+}
+
 const parseNumeroHoras = (value) => {
   return parseHoursInput(value)
 }
@@ -880,6 +1003,8 @@ const abrirCargaRapidaConDatos = ({ empleado_id, cliente_id, obra_id, fecha }) =
   showFormRango.value = false
   error.value = ""
   editingId.value = null
+  cargaDiariaMultiple.value = false
+  empleadosMultiplesDiaria.value = []
   modoDiaria.value = "cantidad"
   focoModalDiaria = "cantidad"
 
@@ -1080,18 +1205,21 @@ const handleKeyboardShortcutUp = (event) => {
 // Guardar hora diaria
 const saveHoraDiaria = async () => {
   error.value = ""
-  const esEmpleadoAdmin = isEmpleadoAdministrativo(formDiaria.value.empleado_id)
+  const empleadosObjetivo = editingId.value
+    ? [formDiaria.value.empleado_id].filter(Boolean)
+    : (cargaDiariaMultiple.value
+      ? [...new Set((empleadosMultiplesDiaria.value || []).filter(Boolean))]
+      : [formDiaria.value.empleado_id].filter(Boolean))
 
-  // Asegurar que la obra esté sincronizada para empleados administrativos
-  if (esEmpleadoAdmin && !formDiaria.value.obra_id) {
-    const obraAdmin = getObraAdministrativaParaEmpleado(formDiaria.value.empleado_id)
-    if (obraAdmin?.id) {
-      formDiaria.value.obra_id = obraAdmin.id
-    }
+  if (!formDiaria.value.fecha) {
+    error.value = "La fecha es obligatoria"
+    return
   }
 
-  if (!formDiaria.value.empleado_id || !formDiaria.value.fecha) {
-    error.value = "Empleado y fecha son obligatorios"
+  if (!empleadosObjetivo.length) {
+    error.value = cargaDiariaMultiple.value
+      ? "Seleccioná al menos un empleado para la carga múltiple"
+      : "Empleado y fecha son obligatorios"
     return
   }
 
@@ -1145,10 +1273,7 @@ const saveHoraDiaria = async () => {
 
   saving.value = true
   try {
-    const payload = {
-      empleado_id: formDiaria.value.empleado_id,
-      cliente_id: formDiaria.value.cliente_id || null,
-      obra_id: formDiaria.value.obra_id,
+    const payloadBase = {
       fecha: formDiaria.value.fecha,
       cantidad_horas: modoDiaria.value === "cantidad" ? horasNormalesDiaria : null,
       cantidad_horas_extra: totalExtraDiaria > 0 ? totalExtraDiaria : null,
@@ -1165,23 +1290,40 @@ const saveHoraDiaria = async () => {
     }
 
     if (editingId.value) {
-      await api.updateHora(editingId.value, payload)
+      await api.updateHora(editingId.value, {
+        ...payloadBase,
+        empleado_id: formDiaria.value.empleado_id,
+        cliente_id: formDiaria.value.cliente_id || null,
+        obra_id: formDiaria.value.obra_id,
+      })
     } else {
-      await api.createHora(payload)
+      for (const empleadoId of empleadosObjetivo) {
+        const esEmpleadoAdmin = isEmpleadoAdministrativo(empleadoId)
+        const payload = {
+          ...payloadBase,
+          empleado_id: empleadoId,
+          cliente_id: esEmpleadoAdmin ? null : (formDiaria.value.cliente_id || null),
+          obra_id: esEmpleadoAdmin ? null : (formDiaria.value.obra_id || null),
+        }
+        await api.createHora(payload)
+      }
     }
 
     guardarUltimaCargaRapida({
-      empleado_id: payload.empleado_id,
-      cliente_id: payload.cliente_id,
-      obra_id: payload.obra_id,
-      fecha: payload.fecha,
+      empleado_id: empleadosObjetivo[0],
+      cliente_id: formDiaria.value.cliente_id || null,
+      obra_id: formDiaria.value.obra_id || null,
+      fecha: formDiaria.value.fecha,
     })
 
     await loadHoras()
     closeModalDiaria()
   } catch (err) {
     const detalle = err?.response?.data?.error || err?.message || "Error desconocido"
-    error.value = `${editingId.value ? "Error al actualizar hora" : "Error al crear hora"}: ${detalle}`
+    const prefijo = editingId.value
+      ? "Error al actualizar hora"
+      : (cargaDiariaMultiple.value ? "Error al crear horas múltiples" : "Error al crear hora")
+    error.value = `${prefijo}: ${detalle}`
     console.error(err)
   } finally {
     saving.value = false
@@ -1189,10 +1331,24 @@ const saveHoraDiaria = async () => {
 }
 
 // Guardar horas por rango
-const saveHoraRango = async () => {
+const saveHoraRango = async (accionConflictos = null) => {
   error.value = ""
-  if (!formRango.value.empleado_id || !formRango.value.fecha_desde || !formRango.value.fecha_hasta) {
-    error.value = "Empleado y fechas son obligatorios"
+  if (!accionConflictos) {
+    resetConflictoCargaRango()
+  }
+  if (!formRango.value.fecha_desde || !formRango.value.fecha_hasta) {
+    error.value = "Las fechas son obligatorias"
+    return
+  }
+
+  const empleadosObjetivo = cargaRangoMultiple.value
+    ? [...new Set((empleadosMultiplesRango.value || []).filter(Boolean))]
+    : [formRango.value.empleado_id].filter(Boolean)
+
+  if (!empleadosObjetivo.length) {
+    error.value = cargaRangoMultiple.value
+      ? "Seleccioná al menos un empleado para la carga múltiple"
+      : "Empleado y fechas son obligatorios"
     return
   }
 
@@ -1204,16 +1360,99 @@ const saveHoraRango = async () => {
     return
   }
 
-  const filasEditables = rangoDias.value.filter((fila) => fila.incluir && !fila.tieneMultiplesRegistros)
-  if (!filasEditables.length) {
-    error.value = "No hay días editables para guardar en el rango seleccionado"
-    return
-  }
-
-  const esEmpleadoAdmin = isEmpleadoAdministrativo(formRango.value.empleado_id)
   const payloads = []
 
-  for (const filaOriginal of filasEditables) {
+  if (cargaRangoMultiple.value) {
+    if (formRango.value.es_prestada && (!formRango.value.grupo_origen_id || !formRango.value.grupo_destino_id)) {
+      error.value = "Selecciona grupo origen y destino para horas prestadas"
+      return
+    }
+
+    if (modoRango.value === "cantidad" && !formRango.value.cantidad_horas) {
+      error.value = "Ingresá las horas de la plantilla"
+      return
+    }
+
+    if (modoRango.value === "horario" && (!formRango.value.hora_inicio || !formRango.value.hora_fin)) {
+      error.value = "Ingresá horario completo en la plantilla"
+      return
+    }
+
+    const diasRango = getDiasRango(formRango.value.fecha_desde, formRango.value.fecha_hasta)
+    if (!diasRango.length) {
+      error.value = "No hay días hábiles para guardar en el rango seleccionado"
+      return
+    }
+
+    for (const fecha of diasRango) {
+      const horasNormales = modoRango.value === "cantidad"
+        ? parseNumeroHoras(formRango.value.cantidad_horas)
+        : null
+
+      if (modoRango.value === "cantidad" && (!Number.isFinite(horasNormales) || horasNormales <= 0)) {
+        error.value = `Las horas de la plantilla no tienen un formato válido (${formatearFecha(fecha)})`
+        return
+      }
+
+      const totalHorasFila = modoRango.value === "cantidad"
+        ? (horasNormales || 0)
+        : calcularHorasDesdeHorario(formRango.value.hora_inicio, formRango.value.hora_fin)
+
+      const horasExtra50 = parseNumeroHoras(formRango.value.cantidad_horas_extra_50) || 0
+      const horasExtra100 = esSabado(fecha)
+        ? (parseNumeroHoras(formRango.value.cantidad_horas_extra_100) || 0)
+        : 0
+      const totalExtra = Math.round((horasExtra50 + horasExtra100) * 100) / 100
+
+      const errorExtras = validarDistribucionHorasExtra(
+        totalHorasFila,
+        formRango.value.cantidad_horas_extra_50,
+        esSabado(fecha) ? formRango.value.cantidad_horas_extra_100 : ""
+      )
+
+      if (errorExtras) {
+        error.value = `${formatearFecha(fecha)}: ${errorExtras}`
+        return
+      }
+
+      for (const empleadoId of empleadosObjetivo) {
+        const esEmpleadoAdmin = isEmpleadoAdministrativo(empleadoId)
+        const obraAdmin = esEmpleadoAdmin ? getObraAdministrativaParaEmpleado(empleadoId) : null
+        const obraId = esEmpleadoAdmin ? (obraAdmin?.id || null) : (formRango.value.obra_id || null)
+
+        payloads.push({
+          fila: null,
+          payload: {
+            empleado_id: empleadoId,
+            cliente_id: esEmpleadoAdmin ? null : (formRango.value.cliente_id || null),
+            obra_id: obraId,
+            fecha,
+            cantidad_horas: modoRango.value === "cantidad" ? horasNormales : null,
+            cantidad_horas_extra: totalExtra > 0 ? totalExtra : null,
+            cantidad_horas_extra_50: horasExtra50 > 0 ? horasExtra50 : null,
+            cantidad_horas_extra_100: horasExtra100 > 0 ? horasExtra100 : null,
+            hora_inicio: modoRango.value === "horario" ? formRango.value.hora_inicio || null : null,
+            hora_fin: modoRango.value === "horario" ? formRango.value.hora_fin || null : null,
+            es_hora_extra: totalExtra > 0,
+            tipo_hora_extra: horasExtra100 > 0 && horasExtra50 === 0 ? "100" : (totalExtra > 0 ? "50" : null),
+            observaciones: formRango.value.observaciones || "",
+            es_prestada: formRango.value.es_prestada,
+            grupo_origen_id: formRango.value.es_prestada ? formRango.value.grupo_origen_id : null,
+            grupo_destino_id: formRango.value.es_prestada ? formRango.value.grupo_destino_id : null,
+          }
+        })
+      }
+    }
+  } else {
+    const filasEditables = rangoDias.value.filter((fila) => fila.incluir && !fila.tieneMultiplesRegistros)
+    if (!filasEditables.length) {
+      error.value = "No hay días editables para guardar en el rango seleccionado"
+      return
+    }
+
+    const esEmpleadoAdmin = isEmpleadoAdministrativo(formRango.value.empleado_id)
+
+    for (const filaOriginal of filasEditables) {
     const fila = getRangoDiaEfectivo(filaOriginal)
     const obraAdmin = esEmpleadoAdmin ? getObraAdministrativaParaEmpleado(formRango.value.empleado_id) : null
     const obraIdFila = esEmpleadoAdmin ? (obraAdmin?.id || "") : fila.obra_id
@@ -1287,12 +1526,48 @@ const saveHoraRango = async () => {
         grupo_destino_id: fila.es_prestada ? fila.grupo_destino_id : null,
       }
     })
+    }
   }
 
   saving.value = true
   try {
+    let conflictosDetectados = null
+    if (cargaRangoMultiple.value) {
+      conflictosDetectados = await detectarConflictosCargaRango({
+        payloads,
+        empleadosObjetivo,
+        fechaDesde: formRango.value.fecha_desde,
+        fechaHasta: formRango.value.fecha_hasta,
+      })
+
+      if (conflictosDetectados.total > 0 && !accionConflictos) {
+        conflictoCargaRangoVisible.value = true
+        conflictoCargaRangoResumen.value = conflictosDetectados.resumen
+        conflictoCargaRangoTotal.value = conflictosDetectados.total
+        saving.value = false
+        return
+      }
+    }
+
+    const clavesEliminadas = new Set()
     for (const item of payloads) {
-      if (item.fila.tieneRegistrosExistentes && item.fila.existenteIds.length > 0) {
+      const key = getPayloadRangoKey(item.payload)
+
+      if (cargaRangoMultiple.value && conflictosDetectados?.existentesPorKey?.has(key)) {
+        if (accionConflictos === "omitir") {
+          continue
+        }
+
+        if (accionConflictos === "reemplazar" && !clavesEliminadas.has(key)) {
+          const existentes = conflictosDetectados.existentesPorKey.get(key) || []
+          for (const existente of existentes) {
+            await api.deleteHora(existente.id)
+          }
+          clavesEliminadas.add(key)
+        }
+      }
+
+      if (item.fila?.tieneRegistrosExistentes && item.fila.existenteIds.length > 0) {
         for (const id of item.fila.existenteIds) {
           await api.deleteHora(id)
         }
@@ -1308,11 +1583,14 @@ const saveHoraRango = async () => {
       fecha: formRango.value.fecha_hasta,
     })
 
+    resetConflictoCargaRango()
     await loadHoras()
     closeModalRango()
   } catch (err) {
     const detalle = err?.response?.data?.error || err?.message || "Error desconocido"
-    error.value = `Error al generar registros de horas: ${detalle}`
+    error.value = cargaRangoMultiple.value
+      ? `Error al generar registros múltiples de horas: ${detalle}`
+      : `Error al generar registros de horas: ${detalle}`
     console.error(err)
   } finally {
     saving.value = false
@@ -1937,8 +2215,12 @@ onUnmounted(() => {
 
           <form @submit.prevent="saveHoraDiaria" class="modal-form">
             <label class="form-group">
-              <span>Empleado *</span>
-              <select ref="selectEmpleadoDiariaRef" v-model="formDiaria.empleado_id" required>
+              <span>Empleado {{ cargaDiariaMultiple && !editingId ? "(base opcional)" : "*" }}</span>
+              <select
+                ref="selectEmpleadoDiariaRef"
+                v-model="formDiaria.empleado_id"
+                :required="!cargaDiariaMultiple || Boolean(editingId)"
+              >
                 <option value="">Seleccionar empleado...</option>
                 <option v-for="emp in empleados" :key="emp.id" :value="emp.id">
                   {{ emp.nombre }} {{ emp.apellido }}
@@ -1946,7 +2228,32 @@ onUnmounted(() => {
               </select>
             </label>
 
-            <label v-if="!isEmpleadoAdministrativo(formDiaria.empleado_id)" class="form-group">
+            <label v-if="!editingId" class="form-group checkbox">
+              <input v-model="cargaDiariaMultiple" type="checkbox" />
+              <span>Aplicar la misma carga a varios empleados</span>
+            </label>
+
+            <div v-if="cargaDiariaMultiple && !editingId" class="multi-empleados-panel">
+              <div class="multi-empleados-header">
+                <span>Seleccioná empleados</span>
+                <div class="multi-empleados-actions">
+                  <button type="button" class="btn-link" @click="empleadosMultiplesDiaria = empleados.map((emp) => emp.id)">
+                    Marcar todos
+                  </button>
+                  <button type="button" class="btn-link" @click="empleadosMultiplesDiaria = []">
+                    Limpiar
+                  </button>
+                </div>
+              </div>
+              <div class="multi-empleados-list">
+                <label v-for="emp in empleados" :key="`multi-diaria-${emp.id}`" class="multi-empleado-item">
+                  <input v-model="empleadosMultiplesDiaria" type="checkbox" :value="emp.id" />
+                  <span>{{ emp.nombre }} {{ emp.apellido }}</span>
+                </label>
+              </div>
+            </div>
+
+            <label v-if="!esCargaDiariaAdminUnica" class="form-group">
               <span>Cliente</span>
               <select v-model="formDiaria.cliente_id">
                 <option value="">Sin cliente</option>
@@ -1956,7 +2263,7 @@ onUnmounted(() => {
               </select>
             </label>
 
-            <label v-if="!isEmpleadoAdministrativo(formDiaria.empleado_id)" class="form-group">
+            <label v-if="!esCargaDiariaAdminUnica" class="form-group">
               <span>Obra</span>
               <select v-model="formDiaria.obra_id">
                 <option value="">Sin obra</option>
@@ -2102,8 +2409,12 @@ onUnmounted(() => {
 
           <form @submit.prevent="saveHoraRango" class="modal-form">
             <label class="form-group">
-              <span>Empleado *</span>
-              <select ref="selectEmpleadoRangoRef" v-model="formRango.empleado_id" required>
+              <span>Empleado {{ cargaRangoMultiple ? "(base opcional)" : "*" }}</span>
+              <select
+                ref="selectEmpleadoRangoRef"
+                v-model="formRango.empleado_id"
+                :required="!cargaRangoMultiple"
+              >
                 <option value="">Seleccionar empleado...</option>
                 <option v-for="emp in empleados" :key="emp.id" :value="emp.id">
                   {{ emp.nombre }} {{ emp.apellido }}
@@ -2111,7 +2422,32 @@ onUnmounted(() => {
               </select>
             </label>
 
-            <label v-if="!isEmpleadoAdministrativo(formRango.empleado_id)" class="form-group">
+            <label class="form-group checkbox">
+              <input v-model="cargaRangoMultiple" type="checkbox" />
+              <span>Aplicar la plantilla a varios empleados</span>
+            </label>
+
+            <div v-if="cargaRangoMultiple" class="multi-empleados-panel">
+              <div class="multi-empleados-header">
+                <span>Seleccioná empleados</span>
+                <div class="multi-empleados-actions">
+                  <button type="button" class="btn-link" @click="empleadosMultiplesRango = empleados.map((emp) => emp.id)">
+                    Marcar todos
+                  </button>
+                  <button type="button" class="btn-link" @click="empleadosMultiplesRango = []">
+                    Limpiar
+                  </button>
+                </div>
+              </div>
+              <div class="multi-empleados-list">
+                <label v-for="emp in empleados" :key="`multi-rango-${emp.id}`" class="multi-empleado-item">
+                  <input v-model="empleadosMultiplesRango" type="checkbox" :value="emp.id" />
+                  <span>{{ emp.nombre }} {{ emp.apellido }}</span>
+                </label>
+              </div>
+            </div>
+
+            <label v-if="!esCargaRangoAdminUnica" class="form-group">
               <span>Cliente</span>
               <select v-model="formRango.cliente_id">
                 <option value="">Sin cliente</option>
@@ -2121,7 +2457,7 @@ onUnmounted(() => {
               </select>
             </label>
 
-            <label v-if="!isEmpleadoAdministrativo(formRango.empleado_id)" class="form-group">
+            <label v-if="!esCargaRangoAdminUnica" class="form-group">
               <span>Obra</span>
               <select v-model="formRango.obra_id">
                 <option value="">Sin obra</option>
@@ -2153,7 +2489,39 @@ onUnmounted(() => {
               <div>Los domingos se omiten automáticamente. Si un día ya tenía varios registros, queda bloqueado para no pisar información mezclada.</div>
             </div>
 
-            <div v-if="loadingRangoDias" class="loading-rango-dias">
+            <div v-if="conflictoCargaRangoVisible" class="conflicto-rango-box">
+              <h4>Ya existen registros para parte de la carga</h4>
+              <p>
+                Se detectaron <strong>{{ conflictoCargaRangoTotal }}</strong> coincidencias de
+                empleado + fecha.
+              </p>
+              <div class="conflicto-rango-list">
+                <div v-for="item in conflictoCargaRangoResumen" :key="`conflicto-${item.empleadoId}`" class="conflicto-rango-item">
+                  <strong>{{ item.empleado }}</strong>
+                  <span>{{ item.fechas.map((f) => formatearFecha(f)).join(", ") }}</span>
+                </div>
+              </div>
+              <div class="conflicto-rango-actions">
+                <button type="button" class="btn-secondary" @click="cancelarConflictoCargaRango">
+                  Cancelar
+                </button>
+                <button type="button" class="btn-secondary" @click="resolverConflictoCargaRango('omitir')" :disabled="saving">
+                  Omitir existentes
+                </button>
+                <button type="button" class="btn-primary" @click="resolverConflictoCargaRango('reemplazar')" :disabled="saving">
+                  Reemplazar existentes
+                </button>
+              </div>
+            </div>
+
+            <div v-if="cargaRangoMultiple" class="loading-rango-dias">
+              Se aplicará esta plantilla a {{ empleadosMultiplesRango.length }} empleado(s)
+              en {{ getDiasRango(formRango.fecha_desde, formRango.fecha_hasta).length }} día(s) hábil(es).
+              <br />
+              Tip: en modo múltiple no se sobrescriben registros existentes automáticamente.
+            </div>
+
+            <div v-else-if="loadingRangoDias" class="loading-rango-dias">
               Preparando días del rango...
             </div>
 
@@ -3343,6 +3711,116 @@ td {
   display: flex;
   gap: 1rem;
   margin-top: 0.15rem;
+}
+
+.multi-empleados-panel {
+  padding: 0.85rem 1rem;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  background: rgba(15, 23, 42, 0.65);
+  display: grid;
+  gap: 0.7rem;
+}
+
+.multi-empleados-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.multi-empleados-header > span {
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #cbd5e1;
+}
+
+.multi-empleados-actions {
+  display: flex;
+  gap: 0.65rem;
+}
+
+.btn-link {
+  background: transparent;
+  border: none;
+  color: #93c5fd;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 0;
+}
+
+.btn-link:hover {
+  color: #bfdbfe;
+  text-decoration: underline;
+}
+
+.multi-empleados-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.5rem;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.multi-empleado-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #e2e8f0;
+  font-size: 0.9rem;
+}
+
+.multi-empleado-item input {
+  width: 1rem;
+  height: 1rem;
+}
+
+.conflicto-rango-box {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.95rem 1rem;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: rgba(120, 53, 15, 0.2);
+  color: #fde68a;
+}
+
+.conflicto-rango-box h4 {
+  margin: 0;
+  color: #fef3c7;
+}
+
+.conflicto-rango-box p {
+  margin: 0;
+}
+
+.conflicto-rango-list {
+  display: grid;
+  gap: 0.45rem;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.conflicto-rango-item {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 0.55rem;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.conflicto-rango-item span {
+  color: #fef9c3;
+  font-size: 0.85rem;
+}
+
+.conflicto-rango-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.6rem;
 }
 
 .btn-primary {

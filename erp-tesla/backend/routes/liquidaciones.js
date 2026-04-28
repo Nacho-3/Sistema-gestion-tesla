@@ -164,6 +164,111 @@ const getConceptosExtrasFromLiquidacion = (liq = {}) => {
   return normalizeConceptosExtras(meta?.conceptos_extra || meta?.conceptos_adicionales || [])
 }
 
+const isRedondeoPagoEfectivoConcepto = (item = {}) => {
+  const descripcion = String(item?.descripcion || "").trim().toLowerCase()
+  return descripcion.startsWith("redondeo pago efectivo")
+}
+
+const toISODateString = (valor) => {
+  if (!valor) return ""
+  const s = String(valor).trim()
+  const isoMatch = s.match(/^(\d{4}-\d{2}-\d{2})/)
+  if (isoMatch) return isoMatch[1]
+  const d = new Date(s)
+  if (!Number.isNaN(d.getTime())) {
+    return d.toISOString().split("T")[0]
+  }
+  return s
+}
+
+const appendRedondeoPagoEfectivo = (liq = {}, diferencia = 0, fechaPagoRaw = "") => {
+  const ajuste = roundMoney(diferencia)
+  if (ajuste <= 0) {
+    return {
+      monto_neto: roundMoney(liq?.monto_neto ?? 0),
+      observaciones: liq?.observaciones || "",
+    }
+  }
+
+  const { nota, meta } = parseObservacionesData(liq?.observaciones)
+  const conceptosExtra = normalizeConceptosExtras(meta?.conceptos_extra || meta?.conceptos_adicionales || [])
+  const fechaPago = toISODateString(fechaPagoRaw)
+  const etiquetaFecha = fechaPago ? ` (${fechaPago})` : ""
+
+  conceptosExtra.push({
+    descripcion: `Redondeo pago efectivo${etiquetaFecha}`,
+    monto: ajuste,
+    tipo: "suma",
+  })
+
+  return {
+    monto_neto: roundMoney(Number(liq?.monto_neto || 0) + ajuste),
+    observaciones: buildObservacionesData(nota, {
+      ...meta,
+      conceptos_extra: conceptosExtra,
+    }),
+  }
+}
+
+const removeRedondeoPagoEfectivo = (liq = {}, pago = {}) => {
+  const { nota, meta } = parseObservacionesData(liq?.observaciones)
+  const conceptosExtra = normalizeConceptosExtras(meta?.conceptos_extra || meta?.conceptos_adicionales || [])
+  const fechaPago = toISODateString(pago?.fecha_pago)
+  const redondeoGuardado = roundMoney(pago?.redondeo_efectivo || 0)
+  const etiquetaFecha = fechaPago ? `Redondeo pago efectivo (${fechaPago})` : "Redondeo pago efectivo"
+
+  let indice = -1
+
+  // 1. Búsqueda exacta por etiqueta + monto guardado
+  if (redondeoGuardado > 0) {
+    indice = conceptosExtra.findIndex((item) => {
+      return String(item?.descripcion || "").trim() === etiquetaFecha && roundMoney(item?.monto) === redondeoGuardado
+    })
+  }
+
+  // 2. Búsqueda por etiqueta exacta (cuando redondeo_efectivo era 0 por la columna nueva)
+  if (indice < 0 && fechaPago) {
+    const matchesMismaFecha = conceptosExtra
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => String(item?.descripcion || "").trim() === etiquetaFecha)
+
+    if (matchesMismaFecha.length === 1) {
+      indice = matchesMismaFecha[0].index
+    }
+  }
+
+  // 3. Fallback amplio: cualquier concepto que empiece con "Redondeo pago efectivo"
+  if (indice < 0) {
+    const matchesPrefix = conceptosExtra
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => String(item?.descripcion || "").toLowerCase().startsWith("redondeo pago efectivo"))
+
+    if (matchesPrefix.length === 1) {
+      indice = matchesPrefix[0].index
+    }
+  }
+
+  if (indice < 0) {
+    return {
+      monto_neto: roundMoney(liq?.monto_neto ?? 0),
+      observaciones: liq?.observaciones || "",
+      montoRemovido: 0,
+    }
+  }
+
+  const [removido] = conceptosExtra.splice(indice, 1)
+  const montoRemovido = roundMoney(removido?.monto || 0)
+
+  return {
+    monto_neto: roundMoney(Number(liq?.monto_neto || 0) - montoRemovido),
+    observaciones: buildObservacionesData(nota, {
+      ...meta,
+      conceptos_extra: conceptosExtra,
+    }),
+    montoRemovido,
+  }
+}
+
 const getHorasExtraRegistradasFromLiquidacion = (liq = {}) => {
   const { meta } = parseObservacionesData(liq?.observaciones)
   return {
@@ -232,10 +337,18 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
   // Treat `adicional` as a standard column (fallback to 0). Do not prefer legacy meta.
   const adicional = roundMoney(liq.adicional ?? 0)
 
-  const importeHorasExtra = roundMoney(horasExtraCantidad * valorHora * 1.5)
-  const importeHorasExtra100 = roundMoney(horasExtra100Cantidad * valorHora * 2)
-  const importeFeriados = roundMoney(feriadosCantidad * 8 * valorHora)
-  const descuentoDiasNoTrabajados = roundMoney(diasNoTrabajados * 8 * valorHora)
+  const importeHorasExtra = valorHora > 0
+    ? roundMoney(horasExtraCantidad * valorHora * 1.5)
+    : roundMoney(Number(liq.importe_horas_extra ?? 0))
+  const importeHorasExtra100 = valorHora > 0
+    ? roundMoney(horasExtra100Cantidad * valorHora * 2)
+    : roundMoney(Number(liq.importe_horas_extra_100 ?? 0))
+  const importeFeriados = valorHora > 0
+    ? roundMoney(feriadosCantidad * 8 * valorHora)
+    : roundMoney(Number(liq.importe_feriados ?? 0))
+  const descuentoDiasNoTrabajados = valorHora > 0
+    ? roundMoney(diasNoTrabajados * 8 * valorHora)
+    : roundMoney(Number(liq.descuento_dias_no_trabajados ?? 0))
   const conceptosExtra = getConceptosExtrasFromLiquidacion(liq)
   const ajusteConceptosExtra = getConceptosExtrasTotal(conceptosExtra)
 
@@ -623,6 +736,13 @@ router.get("/:id/pdf", async (req, res) => {
     const totalPagado = pagos.reduce((sum, p) => sum + Number(p.monto || 0), 0)
     const liquidacion = mapLiquidacion(liq, totalPagado)
     const faltaPagar = Math.max(0, roundMoney(liquidacion.total - liquidacion.total_pagado))
+    const estaPagada = roundMoney(liquidacion.total_pagado + 0.01) >= roundMoney(liquidacion.total)
+
+    if (!estaPagada) {
+      return res.status(400).json({
+        error: `No se puede descargar el PDF hasta que la liquidación esté pagada. Saldo pendiente: ${formatoMoneda(faltaPagar)}`,
+      })
+    }
 
     const nombreEmpleado = [empleado?.nombre, empleado?.apellido].filter(Boolean).join(" ") || `Empleado ${liq.empleado_id}`
     const periodo = `${String(liquidacion.mes || "").padStart(2, "0")}/${liquidacion.anio || ""}`
@@ -752,11 +872,13 @@ router.get("/:id/pdf", async (req, res) => {
         { label: "Aguinaldo", amount: Number(liquidacion.aguinaldo || 0), negative: false },
         { label: "Vacaciones", amount: Number(liquidacion.vacaciones || 0), negative: false },
         { label: "Adicional", amount: Number(liquidacion.adicional || 0), negative: false },
-        ...(liquidacion.conceptos_extra || []).map((item) => ({
-          label: `${item.descripcion}${item.tipo === "resta" ? " (resta)" : ""}`,
-          amount: Number(item.monto || 0),
-          negative: item.tipo === "resta",
-        })),
+        ...(liquidacion.conceptos_extra || [])
+          .filter((item) => !isRedondeoPagoEfectivoConcepto(item))
+          .map((item) => ({
+            label: `${item.descripcion}${item.tipo === "resta" ? " (resta)" : ""}`,
+            amount: Number(item.monto || 0),
+            negative: item.tipo === "resta",
+          })),
         { label: "Adelantos", amount: Number(liquidacion.adelantos || 0), negative: true },
         {
           label: `Dias no trabajados (${formatoCantidad(liquidacion.dias_no_trabajados)})`,
@@ -1179,13 +1301,13 @@ router.get("/:liquidacion_id/pagos", async (req, res) => {
 // Crear pago de liquidación
 router.post("/:liquidacion_id/pagos", async (req, res) => {
   try {
-    const { monto, medio_pago, fecha } = req.body
+    const { monto, medio_pago, fecha, permitir_redondeo, monto_redondeado } = req.body
     const liquidacion_id = req.params.liquidacion_id
 
     // Validar que el monto no exceda el adeudado
     const { data: liquidacion } = await db
       .from("liquidaciones")
-      .select("monto_neto, periodo_inicio")
+      .select("monto_neto, periodo_inicio, observaciones")
       .eq("id", liquidacion_id)
       .single()
 
@@ -1203,7 +1325,9 @@ router.post("/:liquidacion_id/pagos", async (req, res) => {
 
     // Normalizar valores numéricos
     const montoNum = Number(monto || 0)
+  const montoRedondeadoNum = Number(monto_redondeado || 0)
     const aDeudarse = Number.isFinite(aDeudarseRaw) ? Math.round(aDeudarseRaw * 100) / 100 : 0
+  const aplicaRedondeoEfectivo = permitir_redondeo === true && medio_pago === "Efectivo"
 
     // DEBUG: log valores para analizar discrepancias
     console.log(`[PAGOS] liquidacion_id=${liquidacion_id} monto_neto=${montoNetoNum} totalPagado=${totalPagado} aDeudarse=${aDeudarse} montoRecibido=${montoNum}`)
@@ -1213,6 +1337,10 @@ router.post("/:liquidacion_id/pagos", async (req, res) => {
 
     if (aDeudarse <= TOLERANCIA) {
       return res.status(400).json({ error: "La liquidación ya no tiene saldo pendiente." })
+    }
+
+    if (montoNum <= 0) {
+      return res.status(400).json({ error: "El monto debe ser mayor a 0." })
     }
 
     // Si el monto es mayor al adeudado (por error de usuario o intención), lo ajustamos al restante
@@ -1231,6 +1359,21 @@ router.post("/:liquidacion_id/pagos", async (req, res) => {
       montoFinal = aDeudarse
     }
 
+    let diferenciaRedondeo = 0
+    let ajusteLiquidacion = null
+
+    if (aplicaRedondeoEfectivo) {
+      if (!Number.isFinite(montoRedondeadoNum) || montoRedondeadoNum < montoFinal) {
+        return res.status(400).json({ error: "El monto redondeado debe ser un número válido y no puede ser menor al importe a cancelar." })
+      }
+
+      diferenciaRedondeo = roundMoney(montoRedondeadoNum - montoFinal)
+      if (diferenciaRedondeo > 0) {
+        ajusteLiquidacion = appendRedondeoPagoEfectivo(liquidacion, diferenciaRedondeo, fecha)
+        montoFinal = roundMoney(montoRedondeadoNum)
+      }
+    }
+
     // Crear pago
     const { data, error } = await db
       .from("pagos_sueldo")
@@ -1238,6 +1381,7 @@ router.post("/:liquidacion_id/pagos", async (req, res) => {
         {
           liquidacion_id,
           monto: montoFinal,
+          redondeo_efectivo: diferenciaRedondeo > 0 ? diferenciaRedondeo : 0,
           medio_pago,
           fecha_pago: fecha || new Date().toISOString().split("T")[0]
         }
@@ -1246,8 +1390,30 @@ router.post("/:liquidacion_id/pagos", async (req, res) => {
 
     if (error) return res.status(400).json({ error: error.message })
 
+    if (ajusteLiquidacion) {
+      const { error: updateLiquidacionError } = await db
+        .from("liquidaciones")
+        .update({
+          monto_neto: ajusteLiquidacion.monto_neto,
+          observaciones: ajusteLiquidacion.observaciones,
+        })
+        .eq("id", liquidacion_id)
+
+      if (updateLiquidacionError) {
+        await db.from("pagos_sueldo").delete().eq("id", data?.[0]?.id)
+        return res.status(400).json({ error: `No se pudo registrar el redondeo de efectivo: ${updateLiquidacionError.message}` })
+      }
+    }
+
     getIo()?.emit('liquidaciones:changed')
     triggerSueldoTxtExportFromPeriodo(liquidacion?.periodo_inicio)
+
+    if (diferenciaRedondeo > 0) {
+      return res.status(201).json({
+        message: `Pago registrado con redondeo en efectivo de ${diferenciaRedondeo}`,
+        data: data[0],
+      })
+    }
 
     // Informar si el pago fue ajustado
     if (montoFinal !== montoNum) {
@@ -1265,13 +1431,42 @@ router.delete("/pagos/:id", async (req, res) => {
   try {
     const { data: pago } = await db
       .from("pagos_sueldo")
-      .select("liquidacion_id")
+      .select("id, liquidacion_id, medio_pago, fecha_pago, redondeo_efectivo, monto")
       .eq("id", req.params.id)
       .single()
+
+    if (!pago) return res.status(404).json({ error: "Pago no encontrado" })
+
+    let ajusteLiquidacion = null
+    if (pago?.liquidacion_id && String(pago?.medio_pago || "") === "Efectivo") {
+      const { data: liquidacion } = await db
+        .from("liquidaciones")
+        .select("id, monto_neto, observaciones")
+        .eq("id", pago.liquidacion_id)
+        .single()
+
+      if (liquidacion) {
+        ajusteLiquidacion = removeRedondeoPagoEfectivo(liquidacion, pago)
+      }
+    }
 
     const { error } = await db.from("pagos_sueldo").delete().eq("id", req.params.id)
 
     if (error) return res.status(400).json({ error: error.message })
+
+    if (ajusteLiquidacion?.montoRemovido > 0 && pago?.liquidacion_id) {
+      const { error: updateLiquidacionError } = await db
+        .from("liquidaciones")
+        .update({
+          monto_neto: ajusteLiquidacion.monto_neto,
+          observaciones: ajusteLiquidacion.observaciones,
+        })
+        .eq("id", pago.liquidacion_id)
+
+      if (updateLiquidacionError) {
+        return res.status(400).json({ error: `El pago se eliminó, pero no se pudo quitar el redondeo asociado: ${updateLiquidacionError.message}` })
+      }
+    }
 
     getIo()?.emit('liquidaciones:changed')
 

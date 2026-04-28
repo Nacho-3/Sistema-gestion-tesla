@@ -84,9 +84,8 @@ const handleCajaChanged = () => {
 }
 
 
-// Siempre crear cheques nuevos como 'cheque' por defecto
-const crearChequeVacio = () => ({
-  medio_pago: "cheque",
+const crearChequeVacio = (medio = "cheque") => ({
+  medio_pago: medio,
   monto: 0,
   identificador: "",
 })
@@ -801,6 +800,10 @@ const abrirFormulario = () => {
 
 const agregarCheque = () => {
   form.value.cheques.push(crearChequeVacio())
+}
+
+const agregarEcheq = () => {
+  form.value.cheques.push(crearChequeVacio("echeq"))
 }
 
 const eliminarCheque = (index) => {
@@ -1567,7 +1570,7 @@ onUnmounted(() => {
                 <div class="cheques-actions cheques-actions-prominent">
 
                   <button type="button" class="btn btn-cheque-add" @click="agregarCheque">Agregar cheque</button>
-                  <button type="button" class="btn btn-cheque-add btn-cheque-add-alt" @click="form.value.cheques.push({ medio_pago: 'echeq', monto: 0, identificador: '' })">Agregar eCheq</button>
+                  <button type="button" class="btn btn-cheque-add btn-cheque-add-alt" @click="agregarEcheq">Agregar eCheq</button>
                  
                 </div>
               </div>

@@ -25,10 +25,15 @@ const filtroBusqueda = ref("")
 
 // Modal - Nuevo Pago
 const showFormPago = ref(false)
-const formPago = ref({
+const createInitialFormPago = () => ({
   monto: "",
   medio_pago: "Depósito",
-  fecha: new Date().toISOString().split("T")[0]
+  fecha: new Date().toISOString().split("T")[0],
+  aplicar_redondeo: false,
+  monto_redondeado: "",
+})
+const formPago = ref({
+  ...createInitialFormPago()
 })
 
 // Modal - Editar Conceptos
@@ -62,11 +67,15 @@ const formConceptos = ref({
   conceptos_extra: []
 })
 const formConceptosHorasInput = ref("0")
+const formConceptosHorasExtra50Input = ref("0")
+const formConceptosHorasExtra100Input = ref("0")
 
 const toNumber = (valor) => {
   const numero = Number(valor)
   return Number.isFinite(numero) ? numero : 0
 }
+
+const roundMoney = (valor) => Math.round(toNumber(valor) * 100) / 100
 
 const normalizarLiquidacion = (liq = {}) => ({
   ...liq,
@@ -129,11 +138,35 @@ const syncHorasInputConceptos = (valor) => {
   formConceptosHorasInput.value = formatHoursAsClock(valor)
 }
 
+const syncHorasExtra50Input = (valor) => {
+  formConceptosHorasExtra50Input.value = formatHoursAsClock(valor)
+}
+
+const syncHorasExtra100Input = (valor) => {
+  formConceptosHorasExtra100Input.value = formatHoursAsClock(valor)
+}
+
 const actualizarHorasConceptosDesdeInput = (valorRaw) => {
   formConceptosHorasInput.value = valorRaw
   const parsed = parseHoursInput(valorRaw)
   if (Number.isFinite(parsed)) {
     formConceptos.value.total_horas = parsed
+  }
+}
+
+const actualizarHorasExtra50DesdeInput = (valorRaw) => {
+  formConceptosHorasExtra50Input.value = valorRaw
+  const parsed = parseHoursInput(valorRaw)
+  if (Number.isFinite(parsed)) {
+    formConceptos.value.horas_extra_cantidad = parsed
+  }
+}
+
+const actualizarHorasExtra100DesdeInput = (valorRaw) => {
+  formConceptosHorasExtra100Input.value = valorRaw
+  const parsed = parseHoursInput(valorRaw)
+  if (Number.isFinite(parsed)) {
+    formConceptos.value.horas_extra_100_cantidad = parsed
   }
 }
 
@@ -214,6 +247,8 @@ const abrirEdicionLiquidacion = async (liquidacion) => {
     liquidacionSeleccionada.value = liquidacionActualizada
     formConceptos.value = crearFormularioConceptos(liquidacionActualizada)
     syncHorasInputConceptos(formConceptos.value.total_horas)
+    syncHorasExtra50Input(formConceptos.value.horas_extra_cantidad)
+    syncHorasExtra100Input(formConceptos.value.horas_extra_100_cantidad)
     showFormConceptos.value = true
   } catch (err) {
     console.error("Error al cargar liquidación para edición:", err)
@@ -282,20 +317,27 @@ const crearPago = async () => {
     return
   }
 
+  if (!redondeoPagoHabilitado.value && toNumber(formPago.value.monto) > faltaPagar.value) {
+    error.value = `Debe ingresar un monto igual o inferior a ${formatearMoneda(faltaPagar.value)}`
+    return
+  }
+
+  if (redondeoPagoHabilitado.value && montoPagoFinal.value < toNumber(formPago.value.monto)) {
+    error.value = "El monto redondeado no puede ser menor al importe a cancelar"
+    return
+  }
+
   loading.value = true
   try {
     await api.createPago(liquidacionSeleccionada.value.id, {
       monto: parseFloat(formPago.value.monto),
       medio_pago: formPago.value.medio_pago,
-      fecha: formPago.value.fecha
+      fecha: formPago.value.fecha,
+      permitir_redondeo: redondeoPagoHabilitado.value,
+      monto_redondeado: redondeoPagoHabilitado.value ? montoPagoFinal.value : undefined,
     })
     await verDetalle(liquidacionSeleccionada.value)
-    showFormPago.value = false
-    formPago.value = {
-      monto: "",
-      medio_pago: "Depósito",
-      fecha: new Date().toISOString().split("T")[0]
-    }
+    cerrarFormPago()
   } catch (err) {
     error.value = err.response?.data?.error || "Error al crear pago"
     console.error(err)
@@ -383,9 +425,40 @@ const faltaPagar = computed(() => {
   return Math.max(0, Math.round(restante * 100) / 100)
 })
 
+const redondeoPagoHabilitado = computed(() => {
+  return formPago.value.medio_pago === "Efectivo" && formPago.value.aplicar_redondeo
+})
+
+const montoPagoFinal = computed(() => {
+  return redondeoPagoHabilitado.value
+    ? roundMoney(formPago.value.monto_redondeado)
+    : roundMoney(formPago.value.monto)
+})
+
+const diferenciaRedondeoPago = computed(() => {
+  if (!redondeoPagoHabilitado.value) return 0
+  return Math.max(0, roundMoney(montoPagoFinal.value - toNumber(formPago.value.monto)))
+})
+
 const estaPagadaDetalle = computed(() => {
   return faltaPagar.value <= 0.01
 })
+
+const resetFormPago = () => {
+  formPago.value = createInitialFormPago()
+}
+
+const abrirFormPago = () => {
+  resetFormPago()
+  formPago.value.monto = faltaPagar.value > 0 ? faltaPagar.value : ""
+  formPago.value.monto_redondeado = formPago.value.monto
+  showFormPago.value = true
+}
+
+const cerrarFormPago = () => {
+  showFormPago.value = false
+  resetFormPago()
+}
 
 const valorHoraDetalle = computed(() => {
   const valorHoraEmpleado = getValorHoraEmpleado(liquidacionSeleccionada.value?.empleado_id)
@@ -430,6 +503,14 @@ const descuentoDiasNoTrabajadosPreview = computed(() => {
 const totalConceptosExtrasPreview = computed(() => {
   return normalizarConceptosExtra(formConceptos.value.conceptos_extra).reduce((sum, item) => {
     return sum + (item.tipo === "resta" ? -toNumber(item.monto) : toNumber(item.monto))
+  }, 0)
+})
+
+const totalRedondeoPagosDetalle = computed(() => {
+  return normalizarConceptosExtra(liquidacionSeleccionada.value?.conceptos_extra || []).reduce((sum, item) => {
+    const descripcion = String(item?.descripcion || "").toLowerCase()
+    if (!descripcion.startsWith("redondeo pago efectivo")) return sum
+    return sum + toNumber(item.monto)
   }, 0)
 })
 
@@ -699,7 +780,12 @@ onUnmounted(() => {
             ← Volver a la lista
           </button>
           <div class="detalle-acciones">
-            <button class="btn-pdf" @click="descargarPdfLiquidacion" :disabled="loading">
+            <button
+              class="btn-pdf"
+              @click="descargarPdfLiquidacion"
+              :disabled="loading || liquidacionSeleccionada.estado !== 'pagada'"
+              :title="liquidacionSeleccionada.estado !== 'pagada' ? 'El PDF solo está disponible cuando la liquidación está pagada' : 'Descargar PDF de liquidación'"
+            >
               📄 Descargar PDF
             </button>
             <button class="btn-edit" @click="abrirEdicionLiquidacion(liquidacionSeleccionada)">
@@ -825,6 +911,9 @@ onUnmounted(() => {
             <div class="resumen-item">
               <span class="resumen-label">Total pagado:</span>
               <span class="resumen-valor pagado">{{ formatearMoneda(totalPagado) }}</span>
+              <small v-if="totalRedondeoPagosDetalle > 0" class="resumen-detalle-extra">
+                Incluye {{ formatearMoneda(totalRedondeoPagosDetalle) }} de diferencia por redondeo en efectivo.
+              </small>
             </div>
             <div class="resumen-item">
               <span class="resumen-label">Falta pagar:</span>
@@ -842,7 +931,7 @@ onUnmounted(() => {
             <button
               v-if="faltaPagar > 0"
               class="btn-pago"
-              @click="showFormPago = true"
+              @click="abrirFormPago"
             >
               + Registrar pago
             </button>
@@ -1055,7 +1144,7 @@ onUnmounted(() => {
               <div class="overtime-edit-grid">
                 <label class="form-group overtime-edit-card">
                   <span>Horas extra a liquidar al 50%</span>
-                  <input v-model.number="formConceptos.horas_extra_cantidad" type="number" min="0" step="0.01" @wheel.prevent />
+                  <input :value="formConceptosHorasExtra50Input" @input="actualizarHorasExtra50DesdeInput($event.target.value)" type="text" placeholder="ej: 16.15" />
                   <small class="form-help">Importe calculado: {{ formatearMoneda(importeHorasExtra50Preview) }}</small>
                   <div class="overtime-source-note">
                     <span>Registradas en horas:</span>
@@ -1065,7 +1154,7 @@ onUnmounted(() => {
 
                 <label class="form-group overtime-edit-card">
                   <span>Horas extra a liquidar al 100%</span>
-                  <input v-model.number="formConceptos.horas_extra_100_cantidad" type="number" min="0" step="0.01" @wheel.prevent />
+                  <input :value="formConceptosHorasExtra100Input" @input="actualizarHorasExtra100DesdeInput($event.target.value)" type="text" placeholder="ej: 4.30" />
                   <small class="form-help">Importe calculado: {{ formatearMoneda(importeHorasExtra100Preview) }}</small>
                   <div class="overtime-source-note">
                     <span>Registradas en horas:</span>
@@ -1198,11 +1287,11 @@ onUnmounted(() => {
       </div>
 
       <!-- Modal - Nuevo Pago -->
-      <div v-if="showFormPago" class="modal-overlay" @click.self="showFormPago = false">
+      <div v-if="showFormPago" class="modal-overlay" @click.self="cerrarFormPago">
         <div class="modal">
           <div class="modal-header">
             <h3>Registrar pago</h3>
-            <button class="btn-close" @click="showFormPago = false">×</button>
+            <button class="btn-close" @click="cerrarFormPago">×</button>
           </div>
 
           <form @submit.prevent="crearPago" class="modal-form">
@@ -1218,7 +1307,6 @@ onUnmounted(() => {
                 @wheel.prevent
                 min="0"
                 step="0.01"
-                :max="faltaPagar"
                 required
               />
             </label>
@@ -1231,6 +1319,27 @@ onUnmounted(() => {
               </select>
             </label>
 
+            <label v-if="formPago.medio_pago === 'Efectivo'" class="form-group checkbox">
+              <input v-model="formPago.aplicar_redondeo" type="checkbox" />
+              <span>Permitir redondeo de pago en efectivo</span>
+            </label>
+
+            <label v-if="redondeoPagoHabilitado" class="form-group">
+              <span>Monto final pagado ($)</span>
+              <input
+                v-model.number="formPago.monto_redondeado"
+                type="number"
+                @wheel.prevent
+                min="0"
+                step="0.01"
+                required
+              />
+              <small class="form-help">
+                Diferencia por redondeo: {{ formatearMoneda(diferenciaRedondeoPago) }}.
+                Se registrará como ajuste dentro de la liquidación.
+              </small>
+            </label>
+
             <label class="form-group">
               <span>Fecha</span>
               <input v-model="formPago.fecha" type="date" />
@@ -1240,7 +1349,7 @@ onUnmounted(() => {
               <button type="submit" class="btn-primary" :disabled="loading">
                 {{ loading ? "Registrando..." : "Registrar pago" }}
               </button>
-              <button type="button" class="btn-secondary" @click="showFormPago = false">
+              <button type="button" class="btn-secondary" @click="cerrarFormPago">
                 Cancelar
               </button>
             </div>
@@ -1667,8 +1776,13 @@ td {
   color: #a5b4fc;
 }
 
-.detalle-acciones .btn-pdf:hover {
+.detalle-acciones .btn-pdf:hover:not(:disabled) {
   background-color: rgba(99, 102, 241, 0.32);
+}
+
+.detalle-acciones .btn-pdf:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 .detalle-acciones .btn-edit {

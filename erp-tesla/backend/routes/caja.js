@@ -1070,6 +1070,27 @@ router.get("/resumen/pdf", async (req, res) => {
     doc.fillColor(PDF_COLORS.ink)
     doc.y = resumenY + 92
 
+    const saldoBancoInformativo = cajaSemanalResumen?.saldo_banco
+    const saldoEcheqInformativo = cajaSemanalResumen?.saldo_pendiente_echeq
+    const formatoMonedaOpcional = (valor) => {
+      return valor === null || valor === undefined ? "No informado" : formatoMoneda(valor)
+    }
+
+    const saldosInfoY = doc.y + 6
+    doc.roundedRect(45, saldosInfoY, pageWidth - 90, 58, 6).fill("#e0f2fe")
+    doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(9)
+    doc.text("SALDOS INFORMATIVOS", 58, saldosInfoY + 8, { width: 180 })
+
+    doc.fillColor("#1e3a8a").font("Helvetica-Bold").fontSize(8.8)
+    doc.text("Saldo en banco", 58, saldosInfoY + 26, { width: 180 })
+    doc.text("Saldo pendiente en eCheqs", 300, saldosInfoY + 26, { width: 180 })
+
+    doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(11)
+    doc.text(formatoMonedaOpcional(saldoBancoInformativo), 58, saldosInfoY + 39, { width: 180 })
+    doc.text(formatoMonedaOpcional(saldoEcheqInformativo), 300, saldosInfoY + 39, { width: 180 })
+    doc.fillColor(PDF_COLORS.ink)
+    doc.y = saldosInfoY + 70
+
     drawSectionTitle("Desglose por medio de pago")
 
     const desglosePorTipo = MEDIOS_PAGO.reduce((acc, medio) => {
@@ -1165,30 +1186,22 @@ router.get("/resumen/pdf", async (req, res) => {
     drawHorizontalSeparator(yDesglose)
     yDesglose += 22
 
-    if (cajaSemanalResumen?.saldo_banco !== undefined && cajaSemanalResumen?.saldo_banco !== null) {
-      doc.rect(45, yDesglose, pageWidth - 90, 22).fill(PDF_COLORS.light)
-      drawVerticalSeparators(yDesglose, 22)
-      doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(9.2)
-      doc.text("SALDO EN BANCO", colMedioX, yDesglose + 7, { width: colMedioWidth })
-      doc.text(formatoMoneda(cajaSemanalResumen.saldo_banco), colTotalX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
-      yDesglose += 22
-    }
-
-    if (cajaSemanalResumen?.saldo_pendiente_echeq !== undefined && cajaSemanalResumen?.saldo_pendiente_echeq !== null) {
-      doc.rect(45, yDesglose, pageWidth - 90, 22).fill(PDF_COLORS.light)
-      drawVerticalSeparators(yDesglose, 22)
-      doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(9.2)
-      doc.text("ECHEQS PENDIENTES", colMedioX, yDesglose + 7, { width: colMedioWidth })
-      doc.text(formatoMoneda(cajaSemanalResumen.saldo_pendiente_echeq), colTotalX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
-      yDesglose += 22
-    }
-
     drawHorizontalSeparator(yDesglose)
     drawTableBorders(tableTopY, yDesglose)
     doc.fillColor(PDF_COLORS.ink)
     doc.y = yDesglose + 6
 
-    drawSectionTitle("Detalle de movimientos", { width: pageWidth - 90, align: "left" })
+    const drawDetallePageHeader = () => {
+      const detalleHeaderBottom = drawPremiumHeader(doc, {
+        title: "TESLA MONTAJES ELECTRICOS",
+        subtitle: "Detalle de movimientos de caja",
+        accentText: filtroPeriodo || "Sin filtros",
+        logoPath: LOGO_PATH,
+      })
+      doc.fillColor(PDF_COLORS.ink)
+      doc.y = detalleHeaderBottom + 14
+      drawSectionTitle("Detalle de movimientos")
+    }
 
     const drawMovHeader = () => {
       const headerY = doc.y
@@ -1203,6 +1216,9 @@ router.get("/resumen/pdf", async (req, res) => {
       doc.y = headerY + 24
     }
 
+    // El detalle siempre empieza en la segunda página.
+    doc.addPage()
+    drawDetallePageHeader()
     drawMovHeader()
     let yMov = doc.y
 
@@ -1238,7 +1254,7 @@ router.get("/resumen/pdf", async (req, res) => {
 
         if (yMov + rowHeight > doc.page.height - 74) {
           doc.addPage()
-          doc.y = 60
+          drawDetallePageHeader()
           drawMovHeader()
           yMov = doc.y
         }

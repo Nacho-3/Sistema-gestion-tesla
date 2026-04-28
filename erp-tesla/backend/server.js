@@ -252,3 +252,11 @@ httpServer.on("error", (error) => {
 })
 
 startServer()
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[process] Unhandled Rejection:", reason instanceof Error ? reason.stack : reason, "| Promise:", promise)
+})
+
+process.on("uncaughtException", (err) => {
+  console.error("[process] Uncaught Exception:", err.stack || err)
+})

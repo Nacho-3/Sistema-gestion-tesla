@@ -1,0 +1,4 @@
+[2026-04-28 12:04:17] Inicio de script. CaddyExe=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe BackendPort=3000 CaddyPort=443 WhatIf=True ForceRestart=False
+[2026-04-28 12:04:17] Backend ya activo en puerto 3000
+[2026-04-28 12:04:17] Caddy ya activo en puerto 443
+[2026-04-28 12:04:18] Estado final: backend=True caddy=True
