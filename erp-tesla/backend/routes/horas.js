@@ -436,29 +436,27 @@ router.get("/resumen/pdf", async (req, res) => {
 
     const drawSectionTitle = (title, minHeight = 90) => {
       ensureSpace(minHeight)
-      doc.moveDown(0.5)
+      doc.moveDown(1.2)
       const titleY = doc.y
-      doc.font("Helvetica-Bold").fontSize(11.5).fillColor(PDF_COLORS.ink)
+      doc.font("Helvetica-Bold").fontSize(12).fillColor(PDF_COLORS.ink)
       doc.text(title, 45, titleY, {
         width: pageWidth - 90,
         align: "left",
       })
-      const lineY = doc.y + 2
-      doc.strokeColor(PDF_COLORS.line).lineWidth(0.8).moveTo(45, lineY).lineTo(pageWidth - 45, lineY).stroke()
-      doc.y = lineY + 8
+      const lineY = doc.y + 3
+      doc.strokeColor(PDF_COLORS.line).lineWidth(1).moveTo(45, lineY).lineTo(pageWidth - 45, lineY).stroke()
+      doc.y = lineY + 12
     }
 
     const drawList = (items, leftLabel, rightLabel) => {
-      ensureSpace(110)
-
       const drawTableHeader = () => {
         const headerY = doc.y
-        doc.rect(45, headerY, pageWidth - 90, 22).fill(PDF_COLORS.navy)
+        doc.rect(45, headerY, pageWidth - 90, 26).fill(PDF_COLORS.navy)
         doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(9)
-        doc.text(leftLabel, 55, headerY + 7, { width: 350, align: "left" })
-        doc.text(rightLabel, 410, headerY + 7, { width: 120, align: "right" })
+        doc.text(leftLabel, 55, headerY + 9, { width: 350, align: "left" })
+        doc.text(rightLabel, 410, headerY + 9, { width: 120, align: "right" })
         doc.fillColor(PDF_COLORS.ink)
-        doc.y = headerY + 22
+        doc.y = headerY + 26
       }
 
       drawTableHeader()
@@ -466,25 +464,76 @@ router.get("/resumen/pdf", async (req, res) => {
 
       if (!items.length) {
         doc.font("Helvetica").fontSize(10).text("Sin datos para este período", 55, y)
-        doc.y = y + 18
+        doc.y = y + 22
         return
       }
 
       items.forEach((it, idx) => {
-        if (y > getBottomLimit(20)) {
+        if (y > getBottomLimit(26)) {
           doc.addPage()
           doc.y = 60
           drawTableHeader()
           y = doc.y
         }
-        const bg = idx % 2 === 0 ? PDF_COLORS.light : PDF_COLORS.lightAlt
-        doc.rect(45, y, pageWidth - 90, 20).fill(bg)
-        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9.5)
-        doc.text(it.label, 55, y + 6, { width: 350, ellipsis: true, align: "left" })
-        doc.text(`${formatHoursAsClock(it.value)} hs`, 410, y + 6, { width: 120, align: "right" })
-        y += 20
+        const bg = idx % 2 === 0 ? "#f4f6f8" : "#ffffff"
+        doc.rect(45, y, pageWidth - 90, 26).fill(bg)
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(10)
+        doc.text(it.label, 55, y + 8, { width: 350, ellipsis: true, align: "left" })
+        doc.text(`${formatHoursAsClock(it.value)} hs`, 410, y + 8, { width: 120, align: "right" })
+        y += 26
       })
-      doc.y = y + 4
+      doc.y = y + 8
+    }
+
+    const drawObrasList = (items) => {
+      const drawTableHeader = () => {
+        const headerY = doc.y
+        doc.rect(45, headerY, pageWidth - 90, 26).fill(PDF_COLORS.navy)
+        doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(9)
+        doc.text("OBRA / CLIENTE", 55, headerY + 9, { width: 350, align: "left" })
+        doc.text("TOTAL", 410, headerY + 9, { width: 120, align: "right" })
+        doc.fillColor(PDF_COLORS.ink)
+        doc.y = headerY + 26
+      }
+
+      drawTableHeader()
+      let y = doc.y
+
+      if (!items.length) {
+        doc.font("Helvetica").fontSize(10).text("Sin datos para este período", 55, y)
+        doc.y = y + 22
+        return
+      }
+
+      items.forEach((it, idx) => {
+        const ROW_H = 38
+        if (y > getBottomLimit(ROW_H + 4)) {
+          doc.addPage()
+          doc.y = 60
+          drawTableHeader()
+          y = doc.y
+        }
+        const dashIdx = it.label.lastIndexOf(" - ")
+        const obraNombre = dashIdx >= 0 ? it.label.slice(0, dashIdx) : it.label
+        const clienteNombre = dashIdx >= 0 ? it.label.slice(dashIdx + 3) : null
+
+        const bg = idx % 2 === 0 ? "#f4f6f8" : "#ffffff"
+        doc.rect(45, y, pageWidth - 90, ROW_H).fill(bg)
+
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica-Bold").fontSize(10)
+        doc.text(obraNombre, 55, y + 7, { width: 340, ellipsis: true, align: "left" })
+
+        if (clienteNombre) {
+          doc.fillColor("#333333").font("Helvetica-Bold").fontSize(8.8)
+          doc.text(clienteNombre, 55, y + 22, { width: 340, ellipsis: true, align: "left" })
+        }
+
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica-Bold").fontSize(10)
+        doc.text(`${formatHoursAsClock(it.value)} hs`, 410, y + (clienteNombre ? 14 : 12), { width: 120, align: "right" })
+
+        y += ROW_H
+      })
+      doc.y = y + 8
     }
 
     const drawTransferSummary = (items) => {
@@ -510,30 +559,30 @@ router.get("/resumen/pdf", async (req, res) => {
       let y = doc.y
 
       if (!items.length) {
-        doc.rect(tableX, y, tableWidth, 20).fill(PDF_COLORS.light)
+        doc.rect(tableX, y, tableWidth, 26).fill("#f4f6f8")
         doc.font("Helvetica").fontSize(10).fillColor(PDF_COLORS.ink)
-        doc.text("Sin horas prestadas entre grupos en este período", tableX + 10, y + 6, { width: tableWidth - 20, align: "left" })
-        doc.y = y + 24
+        doc.text("Sin horas prestadas entre grupos en este período", tableX + 10, y + 8, { width: tableWidth - 20, align: "left" })
+        doc.y = y + 30
         return
       }
 
       items.forEach((item, idx) => {
-        if (y > getBottomLimit(22)) {
+        if (y > getBottomLimit(26)) {
           doc.addPage()
           doc.y = 60
           drawSectionTitle("Horas prestadas entre grupos", 140)
           drawTransferHeader()
           y = doc.y
         }
-        const bg = idx % 2 === 0 ? "#f8fafc" : "#eef2f7"
-        doc.rect(tableX, y, tableWidth, 22).fill(bg)
-        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9.4)
-        doc.text(`${item.origen} prestó a ${item.destino}`, tableX + 10, y + 7, { width: detalleWidth - 20, align: "left", ellipsis: true })
+        const bg = idx % 2 === 0 ? "#f4f6f8" : "#ffffff"
+        doc.rect(tableX, y, tableWidth, 26).fill(bg)
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(10)
+        doc.text(`${item.origen} prestó a ${item.destino}`, tableX + 10, y + 8, { width: detalleWidth - 20, align: "left", ellipsis: true })
         doc.font("Helvetica-Bold")
-        doc.text(`${formatHoursAsClock(item.horas)} hs`, tableX + detalleWidth, y + 7, { width: horasWidth - 10, align: "right" })
-        y += 22
+        doc.text(`${formatHoursAsClock(item.horas)} hs`, tableX + detalleWidth, y + 8, { width: horasWidth - 10, align: "right" })
+        y += 26
       })
-      doc.y = y + 4
+      doc.y = y + 8
     }
 
     const headerBottom = drawPremiumHeader(doc, {
@@ -569,25 +618,14 @@ router.get("/resumen/pdf", async (req, res) => {
     doc.fillColor(PDF_COLORS.ink)
     doc.y = resumenY + 76
 
-    drawSectionTitle("Horas por empleado")
-    drawList(
-      Object.entries(resumenEmpleado)
-        .map(([label, value]) => ({ label, value }))
-        .sort((a, b) => b.value - a.value),
-      "EMPLEADO",
-      "TOTAL"
-    )
-
-    drawSectionTitle("Horas por obra")
-    drawList(
+    drawSectionTitle("Horas por obra", 200)
+    drawObrasList(
       Object.values(resumenObra)
         .map((item) => ({ label: item.label, value: item.value }))
-        .sort((a, b) => b.value - a.value),
-      "OBRA",
-      "TOTAL"
+        .sort((a, b) => b.value - a.value)
     )
 
-    drawSectionTitle("Horas por grupo")
+    drawSectionTitle("Horas por grupo", 200)
     drawList(
       Object.entries(resumenGrupo)
         .map(([label, value]) => ({ label, value }))

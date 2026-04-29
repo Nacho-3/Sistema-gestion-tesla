@@ -444,6 +444,8 @@ const estaPagadaDetalle = computed(() => {
   return faltaPagar.value <= 0.01
 })
 
+
+
 const resetFormPago = () => {
   formPago.value = createInitialFormPago()
 }
@@ -539,6 +541,13 @@ const liquidacionesFiltradas = computed(() => {
 const liquidacionesPagadasCount = computed(() => liquidaciones.value.filter((liq) => String(liq.estado) === "pagada").length)
 const liquidacionesPendientesCount = computed(() => liquidaciones.value.filter((liq) => String(liq.estado) !== "pagada").length)
 
+const totalPagadoMes = computed(() => {
+  return liquidaciones.value.reduce((sum, liq) => {
+    return sum + toNumber(liq.total_pagado)
+  }, 0)
+})
+
+
 // Obtener nombre empleado
 const getNombreEmpleado = (empleadoId) => {
   const empleado = empleados.value.find((e) => e.id === empleadoId)
@@ -613,6 +622,12 @@ onUnmounted(() => {
   socket.off('horas:changed', cargarLiquidaciones)
 })
 
+const puedeDescargarPdfLiquidacion = computed(() => {
+  if (!liquidacionSeleccionada.value) return false
+  if (estaAGenerar(liquidacionSeleccionada.value)) return false
+  return liquidacionSeleccionada.value.estado === "pagada"
+})
+
 
 </script>
 
@@ -654,6 +669,11 @@ onUnmounted(() => {
             <span>Pendientes</span>
             <strong>{{ liquidacionesPendientesCount }}</strong>
             <small>Liquidaciones con saldo aún pendiente.</small>
+          </article>
+          <article class="sueldo-stat-card sueldo-stat-card-total-paid">
+            <span>Total pagado</span>
+            <strong>{{ formatearMoneda(totalPagadoMes) }}</strong>
+            <small>Suma de todos los pagos registrados en las liquidaciones del período.</small>
           </article>
         </section>
 
@@ -783,8 +803,12 @@ onUnmounted(() => {
             <button
               class="btn-pdf"
               @click="descargarPdfLiquidacion"
-              :disabled="loading || liquidacionSeleccionada.estado !== 'pagada'"
-              :title="liquidacionSeleccionada.estado !== 'pagada' ? 'El PDF solo está disponible cuando la liquidación está pagada' : 'Descargar PDF de liquidación'"
+              :disabled="loading || !puedeDescargarPdfLiquidacion"
+              :title="estaAGenerar(liquidacionSeleccionada)
+                ? 'No se puede descargar el PDF cuando la liquidación está en A GENERAR'
+                : (!puedeDescargarPdfLiquidacion
+                    ? 'El PDF solo está disponible cuando la liquidación está pagada'
+                    : 'Descargar PDF de liquidación')"
             >
               📄 Descargar PDF
             </button>

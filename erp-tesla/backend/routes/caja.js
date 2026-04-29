@@ -871,6 +871,8 @@ router.get("/resumen/pdf", async (req, res) => {
     // Recalcular totales y balance usando solo los movimientos filtrados
     const totalIngresos = movimientos.filter(m => m.tipo === "ingreso").reduce((sum, m) => sum + Number(m.monto_total || 0), 0)
     const totalEgresos = movimientos.filter(m => m.tipo === "egreso").reduce((sum, m) => sum + Number(m.monto_total || 0), 0)
+    const cantidadIngresos = movimientos.filter(m => m.tipo === "ingreso").length
+    const cantidadEgresos = movimientos.filter(m => m.tipo === "egreso").length
     const balance = totalIngresos - totalEgresos
     const cantidadMovimientos = movimientos.length
     const tieneRangoFechas = Boolean(fecha_inicio && fecha_fin)
@@ -989,7 +991,7 @@ router.get("/resumen/pdf", async (req, res) => {
       doc.y = periodoY + 54
 
       const semanalY = doc.y
-      const semanalHeight = 122
+      const semanalHeight = 138
       const cardWidth = (pageWidth - 110) / 4
       doc.roundedRect(45, semanalY, pageWidth - 90, semanalHeight, 8).fill(PDF_COLORS.card)
       doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(12)
@@ -999,7 +1001,7 @@ router.get("/resumen/pdf", async (req, res) => {
       doc.fillColor(PDF_COLORS.slate).font("Helvetica").fontSize(8.8)
       doc.text("La semana nueva arranca con el saldo final de la anterior y los movimientos quedan encapsulados en su propio período.", 58, semanalY + 46, { width: pageWidth - 116 })
 
-      const cardsY = semanalY + 82
+      const cardsY = semanalY + 88
       const labels = [
         { titulo: "Saldo inicial", valor: cajaSemanalResumen?.saldo_inicial || 0 },
         { titulo: "Ingresos semana", valor: cajaSemanalResumen?.total_ingresos || 0 },
@@ -1011,18 +1013,13 @@ router.get("/resumen/pdf", async (req, res) => {
       labels.forEach((item, index) => {
         const x = 58 + index * (cardWidth + 4)
         const mostrarDetalleMedios = index === 0 || index === 3
-        let cardHeight = mostrarDetalleMedios ? 48 : 28
-        // Si es saldo final y hay saldos informativos, agrandar la tarjeta
-        const mostrarBanco = index === 3 && cajaSemanalResumen && cajaSemanalResumen.saldo_banco !== undefined && cajaSemanalResumen.saldo_banco !== null
-        const mostrarEcheqPendiente = index === 3 && cajaSemanalResumen && cajaSemanalResumen.saldo_pendiente_echeq !== undefined && cajaSemanalResumen.saldo_pendiente_echeq !== null
-        if (mostrarBanco) cardHeight += 14
-        if (mostrarEcheqPendiente) cardHeight += 14
+        const cardHeight = mostrarDetalleMedios ? 64 : 36
 
         doc.roundedRect(x, cardsY, cardWidth, cardHeight, 6).fill(index === 3 ? "#dbeafe" : PDF_COLORS.lightAlt)
-        doc.fillColor("#334155").font("Helvetica-Bold").fontSize(7.4)
-        doc.text(item.titulo.toUpperCase(), x + 8, cardsY + 5, { width: cardWidth - 16, lineBreak: false })
-        doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(9.2)
-        doc.text(formatoMoneda(item.valor), x + 8, cardsY + 15, { width: cardWidth - 16, align: "left", lineBreak: false })
+        doc.fillColor("#334155").font("Helvetica-Bold").fontSize(8)
+        doc.text(item.titulo.toUpperCase(), x + 8, cardsY + 6, { width: cardWidth - 16, lineBreak: false })
+        doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(10.2)
+        doc.text(formatoMoneda(item.valor), x + 8, cardsY + 18, { width: cardWidth - 16, align: "left", lineBreak: false })
 
         if (mostrarDetalleMedios) {
           const efectivoValor = index === 0
@@ -1032,17 +1029,9 @@ router.get("/resumen/pdf", async (req, res) => {
             ? cajaSemanalResumen?.saldo_inicial_cheques || 0
             : cajaSemanalResumen?.saldo_final_cheques || 0
 
-          doc.fillColor(PDF_COLORS.slate).font("Helvetica").fontSize(6.6)
-          doc.text(`Efectivo: ${formatoMoneda(efectivoValor)}`, x + 8, cardsY + 27, { width: cardWidth - 16, lineBreak: false })
-          doc.text(`Cheques: ${formatoMoneda(chequesValor)}`, x + 8, cardsY + 36, { width: cardWidth - 16, lineBreak: false })
-          // Mostrar saldos informativos debajo del saldo final
-          if (mostrarBanco) {
-            doc.text(`Banco: ${formatoMoneda(cajaSemanalResumen.saldo_banco)}`, x + 8, cardsY + 47, { width: cardWidth - 16, lineBreak: false })
-          }
-          if (mostrarEcheqPendiente) {
-            const echeqPendienteY = mostrarBanco ? 56 : 47
-            doc.text(`eCheqs pend.: ${formatoMoneda(cajaSemanalResumen.saldo_pendiente_echeq)}`, x + 8, cardsY + echeqPendienteY, { width: cardWidth - 16, lineBreak: false })
-          }
+          doc.fillColor("#334155").font("Helvetica-Bold").fontSize(8.2)
+          doc.text(`EFECTIVO: ${formatoMoneda(efectivoValor)}`, x + 8, cardsY + 34, { width: cardWidth - 16, lineBreak: false })
+          doc.text(`CHEQUES: ${formatoMoneda(chequesValor)}`, x + 8, cardsY + 48, { width: cardWidth - 16, lineBreak: false })
         }
       })
 
@@ -1052,17 +1041,20 @@ router.get("/resumen/pdf", async (req, res) => {
 
     const resumenY = doc.y
     doc.roundedRect(65, resumenY, pageWidth - 90, 82, 6).fill(PDF_COLORS.card)
+    const balanceTexto = formatoMoneda(balance)
+    const balanceInicioX = 430 + 110 - doc.font("Helvetica-Bold").fontSize(13).widthOfString(balanceTexto)
+
     doc.fillColor("#334155").font("Helvetica-Bold").fontSize(8.5)
     doc.text("MOVIMIENTOS", 58, resumenY + 10, { width: 100 })
     doc.text("INGRESOS", 185, resumenY + 10, { width: 120 })
     doc.text("EGRESOS", 320, resumenY + 10, { width: 120 })
-    doc.text("BALANCE", 430, resumenY + 10, { width: 110, align: "right" })
+    doc.text("BALANCE", balanceInicioX, resumenY + 10, { width: 110, align: "left" })
 
     doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(13)
     doc.text(String(cantidadMovimientos), 58, resumenY + 24, { width: 100 })
-    doc.text(formatoMoneda(totalIngresos), 185, resumenY + 24, { width: 120 })
-    doc.text(formatoMoneda(totalEgresos), 320, resumenY + 24, { width: 120 })
-    doc.text(formatoMoneda(balance), 430, resumenY + 24, { width: 110, align: "right" })
+    doc.text(String(cantidadIngresos), 185, resumenY + 24, { width: 120 })
+    doc.text(String(cantidadEgresos), 320, resumenY + 24, { width: 120 })
+    doc.text(balanceTexto, 430, resumenY + 24, { width: 110, align: "right" })
 
     doc.strokeColor(PDF_COLORS.line).lineWidth(0.8).moveTo(58, resumenY + 48).lineTo(pageWidth - 58, resumenY + 48).stroke()
     doc.fillColor(PDF_COLORS.slate).font("Helvetica").fontSize(9)

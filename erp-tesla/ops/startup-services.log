@@ -2,3 +2,8 @@
 [2026-04-28 12:04:17] Backend ya activo en puerto 3000
 [2026-04-28 12:04:17] Caddy ya activo en puerto 443
 [2026-04-28 12:04:18] Estado final: backend=True caddy=True
+[2026-04-29 07:41:14] Inicio de script. CaddyExe=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe BackendPort=3000 CaddyPort=443 WhatIf=False ForceRestart=False
+[2026-04-29 07:41:15] Atención: el puerto 443 está en escucha pero no hay proceso caddy.exe.
+[2026-04-29 07:41:15] Iniciando backend (npm start) en C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla\backend
+[2026-04-29 07:41:15] Iniciando Caddy usando C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-04-29 07:41:18] Estado final: backend=False caddy=True

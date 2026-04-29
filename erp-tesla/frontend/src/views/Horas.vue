@@ -46,6 +46,9 @@ const filtroMes = ref(new Date().getMonth() + 1)
 const filtroAnio = ref(new Date().getFullYear())
 const filtroEmpleado = ref("")
 const filtroObra = ref("")
+const filtroCliente = ref("")
+
+
 const nombresMes = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 const ADMIN_GROUP_REGEX = /admin/i
 
@@ -256,6 +259,8 @@ const getObrasDisponibles = (clienteId) => {
 
 const obrasDisponiblesDiaria = computed(() => getObrasDisponibles(formDiaria.value.cliente_id))
 const obrasDisponiblesRango = computed(() => getObrasDisponibles(formRango.value.cliente_id))
+const obrasDisponiblesFiltro = computed(() => getObrasDisponibles(filtroCliente.value))
+
 const getObrasDisponiblesFilaRango = (clienteId) => getObrasDisponibles(clienteId)
 const esCargaDiariaAdminUnica = computed(() => {
   if (cargaDiariaMultiple.value && !editingId.value) return false
@@ -353,6 +358,13 @@ watch(() => [formDiaria.value.cantidad_horas_extra_50, formDiaria.value.cantidad
 })
 watch(() => [formRango.value.cantidad_horas_extra_50, formRango.value.cantidad_horas_extra_100], () => {
   syncExtraState(formRango.value)
+})
+
+watch(filtroCliente, (clienteId) => {
+  const obraActual = obras.value.find((obra) => String(obra.id) === String(filtroObra.value))
+  if (obraActual && clienteId && String(obraActual.cliente_id) !== String(clienteId)) {
+    filtroObra.value = ""
+  }
 })
 
 // Cargar resúmenes
@@ -1683,10 +1695,17 @@ const getCantidadHoras = (hora) => {
   return Number.isFinite(numero) ? numero : 0
 }
 
+const horasFiltradas = computed(() => {
+  return (horas.value || []).filter((hora) => {
+    if (!filtroCliente.value) return true
+    return String(hora.cliente_id || "") === String(filtroCliente.value)
+  })
+})
+
 const horasAgrupadasPorEmpleado = computed(() => {
   const grupos = new Map()
 
-  for (const hora of horas.value) {
+  for (const hora of horasFiltradas.value) {
     const empId = hora.empleado_id || "sin_empleado"
     if (!grupos.has(empId)) {
       grupos.set(empId, {
@@ -1910,10 +1929,20 @@ onUnmounted(() => {
             </div>
 
             <div class="filtro-grupo">
+              <label>Cliente:</label>
+              <select v-model="filtroCliente" @change="aplicarFiltros">
+                <option value="">Todos</option>
+                <option v-for="cliente in clientesOrdenados" :key="cliente.id" :value="cliente.id">
+                  {{ cliente.empresa || cliente.razon_social || "Sin cliente" }}
+                </option>
+              </select>
+            </div>
+
+            <div class="filtro-grupo">
               <label>Obra:</label>
               <select v-model="filtroObra" @change="aplicarFiltros">
                 <option value="">Todas</option>
-                <option v-for="obra in obrasNoAdministrativas" :key="obra.id" :value="obra.id">
+                <option v-for="obra in obrasDisponiblesFiltro" :key="obra.id" :value="obra.id">
                   {{ obra.nombre }}
                 </option>
               </select>
@@ -1926,7 +1955,7 @@ onUnmounted(() => {
           </div>
 
           <!-- Lista desplegable por empleado -->
-          <div v-if="!loadingHoras && horas.length > 0" class="acordeon-empleados">
+          <div v-if="!loadingHoras && horasFiltradas.length > 0" class="acordeon-empleados">
             <div
               v-for="grupo in horasAgrupadasPorEmpleado"
               :key="grupo.empleado_id"
@@ -2006,7 +2035,7 @@ onUnmounted(() => {
           </div>
 
           <!-- Estado vacío -->
-          <div v-if="!loadingHoras && horas.length === 0" class="empty-state">
+          <div v-if="!loadingHoras && horasFiltradas.length === 0" class="empty-state">
             <p>No hay registros de horas en este período</p>
             <button class="btn-primary" @click="openModalDiaria()">
               Registrar primera hora
