@@ -320,6 +320,14 @@ export default {
     return api.post("/caja", payload)
   },
 
+  importarSueldosACaja(mes, anio) {
+    return api.post("/caja/importar-sueldos", { mes, anio })
+  },
+
+  getEstadoImportacionSueldos(mes, anio) {
+    return api.get("/caja/importar-sueldos/estado", { params: { mes, anio } })
+  },
+
   updateMovimientoCaja(id, payload) {
     return api.put(`/caja/${id}`, payload)
   },

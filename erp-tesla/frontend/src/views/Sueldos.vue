@@ -189,6 +189,7 @@ const cargarLiquidaciones = async () => {
     )
 
     liquidaciones.value = (res?.data || []).map(normalizarLiquidacion)
+    await consultarEstadoCaja()
   } catch (err) {
     console.error("❌ Error al cargar liquidaciones:", err)
     error.value = "Error al cargar liquidaciones: " + (err.response?.data?.error || err.message)
@@ -548,6 +549,58 @@ const totalPagadoMes = computed(() => {
 })
 
 
+// Importar sueldos a Caja Tesla
+const mostrarImportarModal = ref(false)
+const importandoCaja = ref(false)
+const importCajaResult = ref(null)
+const importCajaEstado = ref(null) // null | { estado: "no_importado"|"importado"|"desactualizado"|"sin_pagos", buckets: [] }
+const cargandoEstadoCaja = ref(false)
+
+const consultarEstadoCaja = async () => {
+  if (totalPagadoMes.value <= 0) { importCajaEstado.value = null; return }
+  cargandoEstadoCaja.value = true
+  try {
+    const { data } = await api.getEstadoImportacionSueldos(mesSeleccionado.value, anioSeleccionado.value)
+    importCajaEstado.value = data
+  } catch (_) {
+    importCajaEstado.value = null
+  } finally {
+    cargandoEstadoCaja.value = false
+  }
+}
+
+const labelBotonImportar = computed(() => {
+  if (!importCajaEstado.value || importCajaEstado.value.estado === "no_importado") return "Importar a Caja Tesla"
+  if (importCajaEstado.value.estado === "desactualizado") return "Reimportar a Caja Tesla"
+  return "Importar a Caja Tesla"
+})
+
+const abrirImportarModal = () => {
+  if (totalPagadoMes.value <= 0) return
+  importCajaResult.value = null
+  mostrarImportarModal.value = true
+}
+
+const cerrarImportarModal = () => {
+  mostrarImportarModal.value = false
+  importCajaResult.value = null
+}
+
+const confirmarImportarACaja = async () => {
+  if (importandoCaja.value) return
+  importandoCaja.value = true
+  importCajaResult.value = null
+  try {
+    const { data } = await api.importarSueldosACaja(mesSeleccionado.value, anioSeleccionado.value)
+    importCajaResult.value = data
+    await consultarEstadoCaja()
+  } catch (err) {
+    importCajaResult.value = { status: "error", mensaje: err.response?.data?.error || err.message }
+  } finally {
+    importandoCaja.value = false
+  }
+}
+
 // Obtener nombre empleado
 const getNombreEmpleado = (empleadoId) => {
   const empleado = empleados.value.find((e) => e.id === empleadoId)
@@ -674,6 +727,13 @@ const puedeDescargarPdfLiquidacion = computed(() => {
             <span>Total pagado</span>
             <strong>{{ formatearMoneda(totalPagadoMes) }}</strong>
             <small>Suma de todos los pagos registrados en las liquidaciones del período.</small>
+            <button
+              class="btn-importar-caja"
+              :disabled="totalPagadoMes <= 0"
+              @click="abrirImportarModal"
+            >
+              {{ labelBotonImportar }}
+            </button>
           </article>
         </section>
 
@@ -1380,6 +1440,121 @@ const puedeDescargarPdfLiquidacion = computed(() => {
           </form>
         </div>
       </div>
+
+      <!-- Modal - Importar sueldos a Caja Tesla -->
+      <div v-if="mostrarImportarModal" class="modal-overlay" @click.self="cerrarImportarModal">
+        <div class="modal modal-importar-caja">
+          <div class="modal-header">
+            <div class="modal-header-copy">
+              <span class="modal-kicker">Caja Tesla</span>
+              <h2>Importar sueldos del período</h2>
+            </div>
+            <button type="button" class="btn-close" @click="cerrarImportarModal">×</button>
+          </div>
+
+          <div class="modal-body importar-caja-body">
+            <!-- Lista de empleados con sus pagos -->
+            <table class="importar-caja-tabla">
+              <thead>
+                <tr>
+                  <th>Empleado</th>
+                  <th class="col-monto">Total pagado</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="liq in liquidaciones.filter(l => toNumber(l.total_pagado) > 0)" :key="liq.id">
+                  <td>{{ getNombreEmpleado(liq.empleado_id) }}</td>
+                  <td class="col-monto">{{ formatearMoneda(liq.total_pagado) }}</td>
+                </tr>
+                <tr v-if="liquidaciones.filter(l => toNumber(l.total_pagado) > 0).length === 0">
+                  <td colspan="2" class="importar-caja-empty">Sin pagos registrados en este período</td>
+                </tr>
+              </tbody>
+              <tfoot>
+                <tr class="importar-caja-total">
+                  <td>Total</td>
+                  <td class="col-monto">{{ formatearMoneda(totalPagadoMes) }}</td>
+                </tr>
+              </tfoot>
+            </table>
+
+            <!-- Estado previo (antes de confirmar) -->
+            <template v-if="!importCajaResult && importCajaEstado">
+              <template v-if="importCajaEstado.estado === 'desactualizado'">
+                <div
+                  v-for="b in importCajaEstado.buckets.filter(b => b.cambio || !b.importado)"
+                  :key="b.medio"
+                  class="importar-caja-resultado resultado-actualizado"
+                >
+                  <strong>{{ b.medio === 'efectivo' ? 'Efectivo' : 'Depósito' }}:</strong>
+                  <template v-if="!b.importado">
+                    Sin importar — se creará por {{ formatearMoneda(b.montoActual) }}
+                  </template>
+                  <template v-else>
+                    Monto cambió: {{ formatearMoneda(b.montoEnCaja) }} → {{ formatearMoneda(b.montoActual) }}
+                  </template>
+                </div>
+              </template>
+              <template v-else-if="importCajaEstado.estado === 'importado'">
+                <div class="importar-caja-resultado resultado-sin_cambios">
+                  Ya importado. Podés reimportar si hubo cambios en los pagos.
+                </div>
+              </template>
+            </template>
+
+            <!-- Resultado después de importar -->
+            <template v-if="importCajaResult">
+              <div v-if="importCajaResult.status === 'error'" class="importar-caja-resultado resultado-error">
+                Error: {{ importCajaResult.mensaje }}
+              </div>
+              <div v-else-if="importCajaResult.status === 'sin_pagos'" class="importar-caja-resultado resultado-sin_pagos">
+                {{ importCajaResult.mensaje }}
+              </div>
+              <template v-else>
+                <div
+                  v-for="r in importCajaResult.resultados"
+                  :key="r.medio"
+                  class="importar-caja-resultado"
+                  :class="`resultado-${r.status}`"
+                >
+                  <strong>{{ r.medio === 'efectivo' ? 'Efectivo' : 'Depósito' }}:</strong>
+                  <template v-if="r.status === 'creado'">
+                    ✓ Movimiento creado por {{ formatearMoneda(r.monto) }}
+                  </template>
+                  <template v-else-if="r.status === 'actualizado'">
+                    ↑ Actualizado: {{ formatearMoneda(r.montoAnterior) }} → {{ formatearMoneda(r.montoNuevo) }}
+                  </template>
+                  <template v-else-if="r.status === 'sin_cambios'">
+                    Sin cambios ({{ formatearMoneda(r.monto) }})
+                  </template>
+                </div>
+              </template>
+            </template>
+          </div>
+
+          <div class="modal-actions importar-caja-actions">
+            <template v-if="!importCajaResult || importCajaResult.status === 'error'">
+              <button
+                class="btn-primary"
+                :disabled="importandoCaja || totalPagadoMes <= 0"
+                @click="confirmarImportarACaja"
+              >
+                <template v-if="importandoCaja">Importando...</template>
+                <template v-else-if="importCajaEstado?.estado === 'desactualizado'">Reimportar a Caja Tesla</template>
+                <template v-else-if="importCajaEstado?.estado === 'importado'">Reimportar a Caja Tesla</template>
+                <template v-else>Importar a Caja Tesla</template>
+              </button>
+              <button class="btn-secondary" @click="cerrarImportarModal">Cancelar</button>
+            </template>
+            <template v-else>
+              <button class="btn-primary" :disabled="importandoCaja" @click="confirmarImportarACaja">
+                {{ importandoCaja ? 'Importando...' : 'Reimportar a Caja Tesla' }}
+              </button>
+              <button class="btn-secondary" @click="cerrarImportarModal">Cerrar</button>
+            </template>
+          </div>
+        </div>
+      </div>
     </div>
   </LayoutShell>
 </template>
@@ -1501,6 +1676,132 @@ const puedeDescargarPdfLiquidacion = computed(() => {
 
 .sueldo-stat-card-pending {
   border-color: rgba(248, 113, 113, 0.22);
+}
+
+.btn-importar-caja {
+  margin-top: 0.3rem;
+  padding: 0.35rem 0.85rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  background: rgba(96, 165, 250, 0.12);
+  color: #93c5fd;
+  cursor: pointer;
+  transition: background 0.15s;
+  width: fit-content;
+}
+
+.btn-importar-caja:hover:not(:disabled) {
+  background: rgba(96, 165, 250, 0.22);
+}
+
+.btn-importar-caja:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.importar-caja-msg {
+  font-size: 0.7rem;
+  color: #86efac;
+}
+
+/* Modal importar sueldos */
+.modal-importar-caja {
+  max-width: 540px;
+  width: 90%;
+}
+
+.importar-caja-body {
+  padding: 1.25rem 1.5rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.importar-caja-tabla {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.importar-caja-tabla th {
+  text-align: left;
+  color: #94a3b8;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  padding: 0 0 0.5rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.importar-caja-tabla td {
+  padding: 0.45rem 0;
+  color: #cbd5e1;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.07);
+}
+
+.importar-caja-tabla .col-monto {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.importar-caja-tabla tfoot td {
+  padding-top: 0.65rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.2);
+  border-bottom: none;
+  font-weight: 700;
+  color: #f1f5f9;
+}
+
+.importar-caja-empty {
+  color: #64748b;
+  font-style: italic;
+}
+
+.importar-caja-resultado {
+  padding: 0.65rem 0.9rem;
+  border-radius: 0.5rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.resultado-creado {
+  background: rgba(74, 222, 128, 0.1);
+  color: #86efac;
+  border: 1px solid rgba(74, 222, 128, 0.2);
+}
+
+.resultado-actualizado {
+  background: rgba(251, 191, 36, 0.1);
+  color: #fcd34d;
+  border: 1px solid rgba(251, 191, 36, 0.2);
+}
+
+.resultado-sin_cambios {
+  background: rgba(148, 163, 184, 0.08);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.resultado-sin_pagos {
+  background: rgba(148, 163, 184, 0.08);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.resultado-error {
+  background: rgba(248, 113, 113, 0.1);
+  color: #fca5a5;
+  border: 1px solid rgba(248, 113, 113, 0.2);
+}
+
+.importar-caja-actions {
+  padding: 1rem 1.5rem 1.25rem;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: flex-end;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
 }
 
 .sueldos-toolbar {

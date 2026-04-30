@@ -19,6 +19,7 @@ const vistaActual = ref("lista") // "lista" o "detalle"
 const obraSeleccionada = ref(null)
 const filtroCliente = ref("")
 const filtroBusqueda = ref("")
+const filtroGrupo = ref("")
 
 const filtroDetalleMes = ref(new Date().getMonth() + 1);
 const filtroDetalleAnio = ref(new Date().getFullYear());
@@ -273,6 +274,34 @@ const obrasFiltradas = computed(() => {
     ? obras.value.filter((o) => String(o.cliente_id) === String(filtroCliente.value))
     : obras.value
 
+  const listaGrupo = filtroGrupo.value
+  ? lista.filter((o) => String(o.grupo_id) === String(filtroGrupo.value))
+  : lista
+
+  return listaGrupo.filter((o) => {
+    if (ADMIN_REGEX.test(String(o.nombre || ""))) return false
+    const grupo = grupos.value.find((g) => g.id === o.grupo_id)
+
+    if (ADMIN_REGEX.test(String(grupo?.nombre || ""))) return false
+
+    if (!termino) return true
+
+    const cliente = clientes.value.find((c) => c.id === o.cliente_id)
+    const searchable = [
+      o.nombre,
+      o.estado,
+      cliente?.empresa,
+      cliente?.razon_social,
+      grupo?.nombre,
+      o.fecha_inicio,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+
+    return searchable.includes(termino)
+  })
+  
   return lista.filter((o) => {
     if (ADMIN_REGEX.test(String(o.nombre || ""))) return false
     const grupo = grupos.value.find((g) => g.id === o.grupo_id)
@@ -326,6 +355,12 @@ const getNombreGrupo = (grupoId) => {
   const grupo = grupos.value.find((g) => g.id === grupoId)
   return grupo ? grupo.nombre : "-"
 }
+
+//filtrar por grupo
+const obrasFiltradasPorGrupo = computed(() => {
+  if (!filtroGrupo.value) return obrasFiltradas.value
+  return obrasFiltradas.value.filter((o) => String(o.grupo_id) === String(filtroGrupo.value))
+})
 
 // Formatear fecha
 const formatearFecha = (fecha) => {
@@ -410,6 +445,16 @@ onUnmounted(() => {
               <option value="">Todos los clientes</option>
               <option v-for="c in clientesOrdenados" :key="c.id" :value="c.id">
                 {{ getEtiquetaCliente(c) }}
+              </option>
+            </select>
+          </label>
+
+          <label class="obras-filter-field">
+            <span>Filtrar por grupo</span>
+            <select v-model="filtroGrupo" class="filtro-grupo">
+              <option value="">Todos los grupos</option>
+              <option v-for="g in grupos" :key="g.id" :value="g.id">
+                {{ g.nombre }}
               </option>
             </select>
           </label>
@@ -916,6 +961,17 @@ onUnmounted(() => {
   box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
 }
 
+.filtro-grupo {
+  width: 100%;
+  min-height: 3rem;
+  padding: 0.78rem 0.9rem;
+  background-color: rgba(15, 23, 42, 0.86);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 0.85rem;
+  color: #e2e8f0;
+  font-size: 0.95rem;
+}
+
 .obras-toolbar-count {
   color: #94a3b8;
   font-size: 0.88rem;
@@ -1109,6 +1165,7 @@ td {
   padding: 3rem 2rem;
   border-radius: 1rem;
   color: #94a3b8;
+  font-size: 1.125rem;
 }
 
 .empty-state p {

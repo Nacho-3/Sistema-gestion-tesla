@@ -96,7 +96,6 @@ const recompute = async (id) => {
   const { data: pagos } = await db.from("pagos_sueldo").select("monto").eq("liquidacion_id", id)
   const totalPagado = (pagos || []).reduce((s, p) => s + Number(p.monto || 0), 0)
 
-  const periodo = liq?.periodo_inicio ? new Date(liq.periodo_inicio) : null
   const totalHoras = Number(liq?.total_horas || 0)
   const importeHoras = Number(liq?.monto_bruto || 0)
   const valorHora = totalHoras > 0 ? importeHoras / totalHoras : 0
@@ -118,10 +117,7 @@ const recompute = async (id) => {
       conceptos.descuento_dias_no_trabajados
   )
 
-  const montoNeto = Number(liq?.monto_neto ?? totalCalculado)
-  // If monto_neto differs from computed, update it to computed total (preserve if user used base_manual?)
   const nuevoMonto = roundMoney(totalCalculado)
-
   const estado = totalPagado >= nuevoMonto ? "pagada" : "pendiente"
 
   // sanitize observaciones: remove adicional from meta if exists
@@ -159,7 +155,7 @@ const recompute = async (id) => {
 
 const idArg = process.argv[2]
 if (!idArg) {
-  console.error("Uso: node recompute_liquidacion.js <id>")
+  console.error("Uso: node ops/recompute-liquidacion.mjs <id>")
   process.exit(1)
 }
 

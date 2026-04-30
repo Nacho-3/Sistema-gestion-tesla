@@ -153,7 +153,7 @@ try {
     semanasPorCaja.get(semana.caja_codigo).push(semana)
   }
 
-  for (const [cajaCodigo, semanas] of semanasPorCaja.entries()) {
+  for (const semanas of semanasPorCaja.values()) {
     const saldo = { efectivo: 0, cheques: 0 }
     const ordenadas = [...semanas].sort((a, b) => {
       const inicioA = normalizarFechaISO(a.fecha_inicio) || ""

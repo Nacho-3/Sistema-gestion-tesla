@@ -1754,4 +1754,257 @@ router.delete("/:id", async (req, res) => {
   }
 })
 
+// Consultar estado de importación de sueldos del período
+router.get("/importar-sueldos/estado", async (req, res) => {
+  try {
+    const { mes, anio } = req.query
+    const mesInt = parseInt(mes)
+    const anioInt = parseInt(anio)
+
+    if (!mesInt || !anioInt || mesInt < 1 || mesInt > 12) {
+      return res.status(400).json({ error: "Faltan mes y anio válidos" })
+    }
+
+    const inicioISO = new Date(anioInt, mesInt - 1, 1).toISOString().slice(0, 10)
+    const finISO = new Date(anioInt, mesInt, 0).toISOString().slice(0, 10)
+    const periodo = `${anioInt}-${String(mesInt).padStart(2, "0")}`
+
+    // Obtener liquidaciones del período
+    const { data: liquidaciones } = await db
+      .from("liquidaciones")
+      .select("id")
+      .gte("periodo_inicio", inicioISO)
+      .lte("periodo_fin", finISO)
+
+    if (!liquidaciones || liquidaciones.length === 0) {
+      return res.json({ estado: "sin_pagos" })
+    }
+
+    const liquidacionIds = liquidaciones.map((l) => l.id)
+    const placeholders = liquidacionIds.map((_, i) => `$${i + 1}`).join(", ")
+    const pagosRes = await pool.query(
+      `SELECT monto, medio_pago FROM pagos_sueldo WHERE liquidacion_id IN (${placeholders})`,
+      liquidacionIds
+    )
+    const pagos = pagosRes.rows
+
+    let montoEfectivo = 0
+    let montoTransferencia = 0
+    for (const p of pagos) {
+      const medio = String(p.medio_pago || "").toLowerCase().trim()
+      const monto = parseFloat(p.monto || 0)
+      if (medio === "efectivo") montoEfectivo += monto
+      else montoTransferencia += monto
+    }
+    montoEfectivo = parseFloat(montoEfectivo.toFixed(2))
+    montoTransferencia = parseFloat(montoTransferencia.toFixed(2))
+
+    const detalleColumn = await getDetalleColumn()
+
+    const buckets = [
+      { medio: "efectivo", label: "Efectivo", monto: montoEfectivo },
+      { medio: "transferencia", label: "Depósito", monto: montoTransferencia },
+    ].filter((b) => b.monto > 0.009)
+
+    const bucketInfo = []
+    for (const bucket of buckets) {
+      const detalleValor = `Sueldos ${periodo} — ${bucket.label}`
+      const existenteRes = await pool.query(
+        `SELECT id, monto_total FROM movimientos_caja WHERE ${detalleColumn} = $1 AND caja_codigo = 'tesla' AND tipo = 'egreso' LIMIT 1`,
+        [detalleValor]
+      )
+      const existente = existenteRes.rows[0] || null
+      bucketInfo.push({
+        medio: bucket.medio,
+        montoActual: bucket.monto,
+        montoEnCaja: existente ? parseFloat(existente.monto_total) : null,
+        importado: !!existente,
+        cambio: existente ? Math.abs(parseFloat(existente.monto_total) - bucket.monto) >= 0.01 : false,
+      })
+    }
+
+    const alguno_importado = bucketInfo.some((b) => b.importado)
+    const alguno_sin_importar = bucketInfo.some((b) => !b.importado)
+    const hay_cambio = bucketInfo.some((b) => b.cambio)
+
+    let estado
+    if (!alguno_importado) estado = "no_importado"
+    else if (hay_cambio || alguno_sin_importar) estado = "desactualizado"
+    else estado = "importado"
+
+    res.json({ estado, buckets: bucketInfo })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Importar pagos de sueldos del período como egresos en Caja Tesla
+// Crea/actualiza DOS movimientos independientes: uno por efectivo, uno por transferencia
+router.post("/importar-sueldos", async (req, res) => {
+  try {
+    const { mes, anio } = req.body
+    const mesInt = parseInt(mes)
+    const anioInt = parseInt(anio)
+
+    if (!mesInt || !anioInt || mesInt < 1 || mesInt > 12) {
+      return res.status(400).json({ error: "Faltan mes y anio válidos" })
+    }
+
+    const inicioISO = new Date(anioInt, mesInt - 1, 1).toISOString().slice(0, 10)
+    const finISO = new Date(anioInt, mesInt, 0).toISOString().slice(0, 10)
+    const periodo = `${anioInt}-${String(mesInt).padStart(2, "0")}`
+
+    // Obtener liquidaciones del período
+    const { data: liquidaciones, error: errLiq } = await db
+      .from("liquidaciones")
+      .select("id")
+      .gte("periodo_inicio", inicioISO)
+      .lte("periodo_fin", finISO)
+
+    if (errLiq) return res.status(500).json({ error: errLiq.message })
+
+    if (!liquidaciones || liquidaciones.length === 0) {
+      return res.json({ status: "sin_pagos", mensaje: "No hay liquidaciones en el período" })
+    }
+
+    const liquidacionIds = liquidaciones.map((l) => l.id)
+
+    // Obtener pagos de esas liquidaciones (sin depender de fecha_pago)
+    const placeholders = liquidacionIds.map((_, i) => `$${i + 1}`).join(", ")
+    const pagosRes = await pool.query(
+      `SELECT monto, medio_pago FROM pagos_sueldo WHERE liquidacion_id IN (${placeholders})`,
+      liquidacionIds
+    )
+    const pagos = pagosRes.rows
+
+    // Calcular totales por medio
+    let montoEfectivo = 0
+    let montoTransferencia = 0
+    for (const p of pagos) {
+      const medio = String(p.medio_pago || "").toLowerCase().trim()
+      const monto = parseFloat(p.monto || 0)
+      if (medio === "efectivo") montoEfectivo += monto
+      else montoTransferencia += monto
+    }
+    montoEfectivo = parseFloat(montoEfectivo.toFixed(2))
+    montoTransferencia = parseFloat(montoTransferencia.toFixed(2))
+
+    if (montoEfectivo <= 0 && montoTransferencia <= 0) {
+      return res.json({ status: "sin_pagos", mensaje: "El total de pagos es cero" })
+    }
+
+    const [detallesSchema, detalleColumn] = await Promise.all([getDetallesSchema(), getDetalleColumn()])
+
+    // Procesar cada bucket (efectivo / transferencia) de forma independiente
+    const buckets = [
+      { medio: "efectivo",      monto: montoEfectivo,      label: "Efectivo" },
+      { medio: "transferencia", monto: montoTransferencia, label: "Depósito" },
+    ].filter((b) => b.monto > 0.009)
+
+    const resultados = []
+
+    for (const bucket of buckets) {
+      // El detalle único identifica el movimiento para deduplicación
+      const detalleValor = `Sueldos ${periodo} — ${bucket.label}`
+
+      // Buscar movimiento existente por detalle + caja + tipo (raw SQL)
+      const existenteRes = await pool.query(
+        `SELECT id, monto_total, caja_semanal_id, observaciones FROM movimientos_caja WHERE ${detalleColumn} = $1 AND caja_codigo = 'tesla' AND tipo = 'egreso' LIMIT 1`,
+        [detalleValor]
+      )
+      const existente = existenteRes.rows[0] || null
+
+      const insertarDetalle = async (movimientoId) => {
+        if (detallesSchema.mode === "filas") {
+          const { error } = await db.from("detalles_medio_pago").insert([{
+            movimiento_id: movimientoId,
+            medio_pago: bucket.medio,
+            monto: bucket.monto,
+          }])
+          if (error) throw error
+        } else {
+          const fila = { movimiento_id: movimientoId, efectivo: 0, transferencia: 0, cheque: 0, echeq: 0, retencion: 0 }
+          fila[bucket.medio] = bucket.monto
+          const { error } = await db.from("detalles_medio_pago").insert([fila])
+          if (error) throw error
+        }
+      }
+
+      if (existente) {
+        const montoExistente = parseFloat(existente.monto_total || 0)
+        const mismoMonto = Math.abs(montoExistente - bucket.monto) < 0.01
+        const tieneObsVieja = existente.observaciones && existente.observaciones.trim() !== ""
+
+        if (mismoMonto && !tieneObsVieja) {
+          resultados.push({ medio: bucket.medio, status: "sin_cambios", monto: bucket.monto })
+          continue
+        }
+
+        // Actualizar monto y/o limpiar observación vieja
+        const { error: errUpdate } = await db
+          .from("movimientos_caja")
+          .update({ monto_total: bucket.monto, observaciones: null })
+          .eq("id", existente.id)
+
+        if (errUpdate) return res.status(500).json({ error: errUpdate.message })
+
+        await db.from("detalles_medio_pago").delete().eq("movimiento_id", existente.id)
+        await insertarDetalle(existente.id)
+
+        if (existente.caja_semanal_id) {
+          try { await recalcularCajaSemanal(existente.caja_semanal_id) } catch (_) { /* no fatal */ }
+        }
+
+        resultados.push({ medio: bucket.medio, status: mismoMonto ? "sin_cambios" : "actualizado", montoAnterior: montoExistente, montoNuevo: bucket.monto })
+        continue
+      }
+
+      // Crear nuevo
+      const { data: movimiento, error: errMov } = await db
+        .from("movimientos_caja")
+        .insert([{
+          fecha: finISO,
+          caja_codigo: "tesla",
+          tipo: "egreso",
+          [detalleColumn]: detalleValor,
+          observaciones: null,
+          monto_total: bucket.monto,
+          destinatario: "Pago de sueldos",
+          con_iva: false,
+        }])
+        .select()
+
+      if (errMov) return res.status(500).json({ error: errMov.message })
+
+      const movimientoId = movimiento[0].id
+
+      try {
+        await insertarDetalle(movimientoId)
+      } catch (errDet) {
+        await db.from("movimientos_caja").delete().eq("id", movimientoId)
+        return res.status(500).json({ error: "Error detalles: " + errDet.message })
+      }
+
+      try {
+        await asignarCajaSemanalAMovimiento({ movimientoId, fecha: finISO, caja_codigo: "tesla" })
+      } catch (errSemana) {
+        console.warn(`[importar-sueldos] No se pudo asignar semana (${bucket.medio}): ${errSemana.message}`)
+      }
+
+      resultados.push({ medio: bucket.medio, status: "creado", monto: bucket.monto })
+    }
+
+    getIo()?.emit("caja:changed")
+
+    // Status general: si alguno fue creado/actualizado → activo, si todos sin_cambios → sin_cambios
+    const hayAccion = resultados.some((r) => r.status === "creado" || r.status === "actualizado")
+    res.json({
+      status: hayAccion ? "ok" : "sin_cambios",
+      resultados,
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 export default router

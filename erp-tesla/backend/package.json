@@ -11,7 +11,10 @@
     "repair:hours-clock": "node ops/repair-hours-clock-period.mjs",
     "sync:liquidaciones": "node ops/sync-liquidaciones-period.mjs",
     "inspect:hours-period": "node ops/inspect-hours-period.mjs",
-    "revert:hours-clock-batch": "node ops/revert-hours-clock-batch.mjs"
+    "revert:hours-clock-batch": "node ops/revert-hours-clock-batch.mjs",
+    "admin:create-obra": "node ops/create-admin-obra.mjs",
+    "repair:caja-semanal-saldos": "node ops/repair-caja-semanal-saldos.mjs",
+    "recompute:liquidacion": "node ops/recompute-liquidacion.mjs"
   },
   "keywords": [],
   "author": "",

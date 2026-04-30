@@ -21,6 +21,7 @@ const presupuestosCliente = ref([])
 const presupuestosAceptados = ref([])
 const downloadingPdf = ref(false)
 const filtroBusqueda = ref("")
+const filtroIva = ref("")
 
 // Formulario
 const form = ref({
@@ -49,6 +50,37 @@ const clientesFiltrados = computed(() => {
 
     return campos.some((campo) => String(campo || "").toLowerCase().includes(termino))
   })
+})
+
+const getclientesFiltradosPorIva = computed(() => {
+  if (!filtroIva.value) return clientes.value
+  return clientes.value.filter(c => String(c.iva || "").toLowerCase() === String(filtroIva.value).toLowerCase())
+})
+
+const clientesDisponibles = computed(() => {
+  let resultado = clientes.value
+
+  if (filtroBusqueda.value) {
+    const termino = String(filtroBusqueda.value || "").trim().toLowerCase()
+    resultado = resultado.filter((cliente) => {
+      const campos = [
+        cliente.empresa,
+        cliente.razon_social,
+        cliente.cuit,
+        cliente.telefono,
+        cliente.email,
+        cliente.iva,
+      ]
+
+      return campos.some((campo) => String(campo || "").toLowerCase().includes(termino))
+    })
+  }
+
+  if (filtroIva.value) {
+    resultado = resultado.filter(c => String(c.iva || "").toLowerCase() === String(filtroIva.value).toLowerCase())
+  }
+
+  return resultado
 })
 
 const clientesConEmpresa = computed(() => clientes.value.filter((cliente) => String(cliente.empresa || "").trim()).length)
@@ -291,8 +323,21 @@ onUnmounted(() => {
               placeholder="Empresa, razón social, CUIT, teléfono, email o IVA"
             />
           </label>
+
+          <label class="filtro-iva-field">
+            <span>Filtrar por IVA</span>
+            <select v-model="filtroIva">
+              <option value="">Todos</option>
+              <option value="Responsable Inscripto">Responsable Inscripto</option>
+              <option value="Monotributista">Monotributista</option>
+              <option value="Exento">Exento</option>
+              <option value="Consumidor Final">Consumidor Final</option>
+              <option value="No corresponde">No corresponde</option>
+            </select>
+          </label>
+
           <div class="clientes-toolbar-count">
-            Mostrando {{ clientesFiltrados.length }} de {{ clientes.length }} clientes
+            Mostrando {{ clientesDisponibles.length }} de {{ clientes.length }} clientes
           </div>
         </section>
 
@@ -300,7 +345,7 @@ onUnmounted(() => {
           {{ error }}
         </div>
 
-        <div v-if="!loading && clientesFiltrados.length > 0" class="clientes-table-shell">
+        <div v-if="!loading && clientesDisponibles.length > 0" class="clientes-table-shell">
           <div class="clientes-table-header-row">
             <div>
               <span class="section-kicker">Listado</span>
@@ -321,7 +366,7 @@ onUnmounted(() => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="cliente in clientesFiltrados" :key="cliente.id">
+                <tr v-for="cliente in clientesDisponibles" :key="cliente.id">
                   <td>
                     <div class="cliente-main-cell">
                       <strong>{{ cliente.empresa || cliente.razon_social || "-" }}</strong>
@@ -354,7 +399,7 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <div v-if="!loading && clientes.length > 0 && clientesFiltrados.length === 0" class="empty-state empty-state-search">
+        <div v-if="!loading && clientes.length > 0 && clientesDisponibles.length === 0" class="empty-state empty-state-search">
           <p>No hay coincidencias para la búsqueda actual</p>
           <button class="btn-secondary" @click="filtroBusqueda = ''">
             Limpiar búsqueda
@@ -1427,6 +1472,34 @@ td {
   border-radius: 0.5rem;
   color: #cbd5e1;
   font-weight: 500;
+}
+
+.filtro-iva-field {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.filtro-iva-field span {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #cbd5e1;
+}
+
+.filtro-iva-field select {
+  padding: 0.85rem 0.95rem;
+  background: rgba(15, 23, 42, 0.86);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 0.85rem;
+  color: #e2e8f0;
+  font-size: 0.95rem;
+}
+
+.filtro-iva-field select:focus {
+  outline: none;
+  border-color: rgba(56, 189, 248, 0.6);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
 }
 </style>
 
