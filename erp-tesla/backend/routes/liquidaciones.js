@@ -334,6 +334,7 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
   const horasExtra100Cantidad = preferColumn(liq.horas_extra_100_cantidad, meta.horas_extra_100_cantidad, 0, { allowLegacyMetaWhenColumnZero: false })
   const feriadosCantidad = preferColumn(liq.feriados_cantidad, meta.feriados_cantidad)
   const diasNoTrabajados = preferColumn(liq.dias_no_trabajados, meta.dias_no_trabajados)
+  const diasEnfermedad = preferColumn(liq.dias_enfermedad, meta.dias_enfermedad)
   // Treat `adicional` as a standard column (fallback to 0). Do not prefer legacy meta.
   const adicional = roundMoney(liq.adicional ?? 0)
 
@@ -346,6 +347,9 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
   const importeFeriados = valorHora > 0
     ? roundMoney(feriadosCantidad * 8 * valorHora)
     : roundMoney(Number(liq.importe_feriados ?? 0))
+  const importeEnfermedad = valorHora > 0
+    ? roundMoney(diasEnfermedad * 8 * valorHora)
+    : roundMoney(Number(liq.importe_enfermedad ?? 0))
   const descuentoDiasNoTrabajados = valorHora > 0
     ? roundMoney(diasNoTrabajados * 8 * valorHora)
     : roundMoney(Number(liq.descuento_dias_no_trabajados ?? 0))
@@ -362,9 +366,11 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
     horas_extra_100_cantidad: horasExtra100Cantidad,
     feriados_cantidad: feriadosCantidad,
     dias_no_trabajados: diasNoTrabajados,
+    dias_enfermedad: diasEnfermedad,
     importe_horas_extra: importeHorasExtra,
     importe_horas_extra_100: importeHorasExtra100,
     importe_feriados: importeFeriados,
+    importe_enfermedad: importeEnfermedad,
     descuento_dias_no_trabajados: descuentoDiasNoTrabajados,
     adicional,
     conceptos_extra: conceptosExtra,
@@ -392,12 +398,13 @@ const mapLiquidacion = (liq, totalPagado = 0) => {
     conceptos.importe_horas_extra +
     conceptos.importe_horas_extra_100 +
     conceptos.importe_feriados +
+    conceptos.importe_enfermedad +
     conceptos.ajuste_conceptos_extra +
     conceptos.adicional -
     conceptos.adelantos -
     conceptos.descuento_dias_no_trabajados
   const total = Number(liq?.monto_neto ?? totalCalculado)
-  const estado = totalPagado >= total ? "pagada" : "pendiente"
+  const estado = totalPagado >= total - 0.01 ? "pagada" : "pendiente"
 
   return {
     ...liq,
@@ -421,7 +428,9 @@ const mapLiquidacion = (liq, totalPagado = 0) => {
     horas_extra_registradas_100: horasRegistradas.horas_extra_registradas_100,
     feriados_cantidad: conceptos.feriados_cantidad,
     dias_no_trabajados: conceptos.dias_no_trabajados,
+    dias_enfermedad: conceptos.dias_enfermedad,
     importe_feriados: conceptos.importe_feriados,
+    importe_enfermedad: conceptos.importe_enfermedad,
     descuento_dias_no_trabajados: conceptos.descuento_dias_no_trabajados,
     total,
     total_pagado: totalPagado,
@@ -512,6 +521,8 @@ export const syncLiquidacionesPeriodo = async (mes, anio) => {
               vacaciones: 0,
               feriados_cantidad: 0,
               importe_feriados: 0,
+              dias_enfermedad: 0,
+              importe_enfermedad: 0,
               dias_no_trabajados: 0,
               descuento_dias_no_trabajados: 0,
               adelantos: 0,
@@ -553,9 +564,13 @@ export const syncLiquidacionesPeriodo = async (mes, anio) => {
       const horasTrabajadas = roundMoney(horasTrabajadasPorEmpleado[emp.id] || 0)
       const horasExtra50Automaticas = roundMoney(horasExtra50PorEmpleado[emp.id] || 0)
       const horasExtra100Automaticas = roundMoney(horasExtra100PorEmpleado[emp.id] || 0)
-      const valorHora = Number(emp.valor_hora || 0)
       const totalHoras = roundMoney(liq.total_horas || 0)
       const montoBruto = roundMoney(liq.monto_bruto || 0)
+      // Usar el valor hora embebido en la liquidación (igual que mapLiquidacion) para no
+      // alterar el monto_neto histórico cuando el valor hora del empleado cambió.
+      const valorHora = totalHoras > 0
+        ? Number(montoBruto) / Number(totalHoras)
+        : Number(emp.valor_hora || 0)
       const conceptos = getConceptosFromLiquidacion(liq, valorHora)
       const horasExtraLiquidacionManual = metaActual?.horas_extra_liquidacion_manual === true
       
@@ -576,12 +591,13 @@ export const syncLiquidacionesPeriodo = async (mes, anio) => {
           conceptosActualizados.importe_horas_extra_100 +
           conceptosActualizados.ajuste_conceptos_extra +
           conceptosActualizados.adicional +
-          conceptosActualizados.importe_feriados -
+          conceptosActualizados.importe_feriados +
+          conceptosActualizados.importe_enfermedad -
           conceptosActualizados.adelantos -
           conceptosActualizados.descuento_dias_no_trabajados
       ))
       const totalPagado = Number(pagosPorLiquidacion[liq.id] || 0)
-      const estado = totalPagado >= montoNeto ? "pagada" : "pendiente"
+      const estado = totalPagado >= montoNeto - 0.01 ? "pagada" : "pendiente"
 
       const { nota } = parseObservacionesData(liq.observaciones)
       const metaSinHorasExtraLegacy = { ...metaActual }
@@ -612,6 +628,8 @@ export const syncLiquidacionesPeriodo = async (mes, anio) => {
           vacaciones: conceptosActualizados.vacaciones,
           feriados_cantidad: conceptosActualizados.feriados_cantidad,
           importe_feriados: conceptosActualizados.importe_feriados,
+          dias_enfermedad: conceptosActualizados.dias_enfermedad,
+          importe_enfermedad: conceptosActualizados.importe_enfermedad,
           dias_no_trabajados: conceptosActualizados.dias_no_trabajados,
           descuento_dias_no_trabajados: conceptosActualizados.descuento_dias_no_trabajados,
           adelantos: conceptosActualizados.adelantos,
@@ -728,7 +746,7 @@ router.get("/:id/pdf", async (req, res) => {
     }
 
     const [{ data: pagosRaw }, { data: empleado }] = await Promise.all([
-      db.from("pagos_sueldo").select("monto, medio_pago, fecha_pago").eq("liquidacion_id", id).order("fecha_pago", { ascending: true }),
+      db.from("pagos_sueldo").select("monto, medio_pago, fecha_pago, detalle").eq("liquidacion_id", id).order("fecha_pago", { ascending: true }),
       db.from("empleados").select("nombre, apellido, dni, cuit, alias").eq("id", liq.empleado_id).single(),
     ])
 
@@ -736,13 +754,6 @@ router.get("/:id/pdf", async (req, res) => {
     const totalPagado = pagos.reduce((sum, p) => sum + Number(p.monto || 0), 0)
     const liquidacion = mapLiquidacion(liq, totalPagado)
     const faltaPagar = Math.max(0, roundMoney(liquidacion.total - liquidacion.total_pagado))
-    const estaPagada = roundMoney(liquidacion.total_pagado + 0.01) >= roundMoney(liquidacion.total)
-
-    if (!estaPagada) {
-      return res.status(400).json({
-        error: `No se puede descargar el PDF hasta que la liquidación esté pagada. Saldo pendiente: ${formatoMoneda(faltaPagar)}`,
-      })
-    }
 
     const nombreEmpleado = [empleado?.nombre, empleado?.apellido].filter(Boolean).join(" ") || `Empleado ${liq.empleado_id}`
     const periodo = `${String(liquidacion.mes || "").padStart(2, "0")}/${liquidacion.anio || ""}`
@@ -835,65 +846,82 @@ router.get("/:id/pdf", async (req, res) => {
       })
 
       y = resumenTop + resumenH + 12
-      y = drawSectionHeader("DETALLE BASE", y)
-      doc.rect(45, y, pageWidth - 90, 26).lineWidth(0.7).strokeColor(PDF_COLORS.line).stroke()
-      doc.font("Helvetica").fontSize(9.6).fillColor(PDF_COLORS.ink)
-      doc.text(`Horas trabajadas: ${formatoHoras(liquidacion.total_horas)} hs`, 52, y + 8)
-      doc.text(`Valor hora: ${formatoMoneda(liquidacion.valor_hora)}`, 220, y + 8)
-      doc.text(`Importe horas: ${formatoMoneda(liquidacion.importe_horas)}`, 360, y + 8, { width: 140, align: "right" })
+      y = drawSectionHeader("DETALLE RECIBO DE SUELDO", y)
 
-      y += 38
-      y = drawSectionHeader("CONCEPTOS ADICIONALES", y)
+      // Filas que SUMAN
+      const reajustePct = Number(liquidacion.reajuste_porcentaje || 0)
+      const valorHoraEfectivo = Number(liquidacion.valor_hora || 0)
+      const valorHoraInicial = reajustePct > 0 ? valorHoraEfectivo / (1 + reajustePct / 100) : valorHoraEfectivo
+      const rowsSuman = [
+        { label: `Valor hora inicial = ${formatoMoneda(valorHoraInicial)} - Reajuste valor hora (+${reajustePct}%) - Valor hora actual = ${formatoMoneda(valorHoraEfectivo)}`, amount: 0, rowH: 22, labelWidth: 460, noAmount: true },
+        { label: `Horas trabajadas (${formatoHoras(liquidacion.total_horas)} hs × ${formatoMoneda(valorHoraEfectivo)})`, amount: Number(liquidacion.importe_horas || 0) },
+        { label: "Presentismo", amount: Number(liquidacion.presentismo || 0) },
+        { label: "No remunerativo", amount: Number(liquidacion.no_remunerativo || 0) },
+        { label: `Feriados (${formatoCantidad(liquidacion.feriados_cantidad)} dias)`, amount: Number(liquidacion.importe_feriados || 0) },
+        { label: `Dias por enfermedad (${formatoCantidad(liquidacion.dias_enfermedad)} dias)`, amount: Number(liquidacion.importe_enfermedad || 0) },
+        { label: `Horas extra 50% (${formatoCantidad(liquidacion.horas_extra_cantidad)} hs)`, amount: Number(liquidacion.importe_horas_extra || 0) },
+        { label: `Horas extra 100% (${formatoCantidad(liquidacion.horas_extra_100_cantidad)} hs)`, amount: Number(liquidacion.importe_horas_extra_100 || 0) },
+        { label: "Adicional", amount: Number(liquidacion.adicional || 0) },
+        { label: "Aguinaldo", amount: Number(liquidacion.aguinaldo || 0) },
+        { label: "Vacaciones", amount: Number(liquidacion.vacaciones || 0) },
+        ...(liquidacion.conceptos_extra || [])
+          .filter((item) => !isRedondeoPagoEfectivoConcepto(item) && item.tipo !== "resta")
+          .map((item) => ({ label: item.descripcion, amount: Number(item.monto || 0) }))
+          .filter((row) => Math.abs(row.amount) > 0.009),
+      ]
 
+      // Filas que RESTAN
+      const rowsRestan = [
+        { label: `Dias no trabajados (${formatoCantidad(liquidacion.dias_no_trabajados)})`, amount: Number(liquidacion.descuento_dias_no_trabajados || 0) },
+        { label: "Adelantos", amount: Number(liquidacion.adelantos || 0) },
+        ...(liquidacion.conceptos_extra || [])
+          .filter((item) => !isRedondeoPagoEfectivoConcepto(item) && item.tipo === "resta")
+          .map((item) => ({ label: item.descripcion, amount: Number(item.monto || 0) }))
+          .filter((row) => Math.abs(row.amount) > 0.009),
+      ]
+
+      const subtotalSuma = rowsSuman.reduce((acc, r) => acc + r.amount, 0)
+      const totalACobrar = Number(liquidacion.total || 0)
+
+      const drawConceptoRow = (label, amountStr, bold = false, bgColor = null, rowH = 17, labelWidth = 340) => {
+        if (bgColor) doc.rect(45, y, pageWidth - 90, rowH).fillColor(bgColor).fill()
+        doc.rect(45, y, pageWidth - 90, rowH).lineWidth(0.5).strokeColor(PDF_COLORS.line).stroke()
+        doc.fillColor(PDF_COLORS.ink).font(bold ? "Helvetica-Bold" : "Helvetica").fontSize(9.4)
+        doc.text(label, 52, y + 4, { width: labelWidth })
+        doc.text(amountStr, pageWidth - 160, y + 4, { width: 108, align: "right" })
+        y += rowH
+      }
+
+      // Cabecera tabla
+      doc.rect(45, y, pageWidth - 90, 18).fillColor("#e8edf2").fill()
       doc.rect(45, y, pageWidth - 90, 18).lineWidth(0.8).strokeColor(PDF_COLORS.line).stroke()
       doc.font("Helvetica-Bold").fontSize(9).fillColor(PDF_COLORS.ink)
       doc.text("Concepto", 52, y + 5)
       doc.text("Importe", pageWidth - 160, y + 5, { width: 108, align: "right" })
       y += 18
 
-      const rows = [
-        { label: "Presentismo", amount: Number(liquidacion.presentismo || 0), negative: false },
-        {
-          label: `Horas extra 50% (${formatoCantidad(liquidacion.horas_extra_cantidad)} hs)`,
-          amount: Number(liquidacion.importe_horas_extra || 0),
-          negative: false,
-        },
-        {
-          label: `Horas extra 100% (${formatoCantidad(liquidacion.horas_extra_100_cantidad)} hs)`,
-          amount: Number(liquidacion.importe_horas_extra_100 || 0),
-          negative: false,
-        },
-        {
-          label: `Feriados (${formatoCantidad(liquidacion.feriados_cantidad)} dias)`,
-          amount: Number(liquidacion.importe_feriados || 0),
-          negative: false,
-        },
-        { label: "No remunerativo", amount: Number(liquidacion.no_remunerativo || 0), negative: false },
-        { label: "Aguinaldo", amount: Number(liquidacion.aguinaldo || 0), negative: false },
-        { label: "Vacaciones", amount: Number(liquidacion.vacaciones || 0), negative: false },
-        { label: "Adicional", amount: Number(liquidacion.adicional || 0), negative: false },
-        ...(liquidacion.conceptos_extra || [])
-          .filter((item) => !isRedondeoPagoEfectivoConcepto(item))
-          .map((item) => ({
-            label: `${item.descripcion}${item.tipo === "resta" ? " (resta)" : ""}`,
-            amount: Number(item.monto || 0),
-            negative: item.tipo === "resta",
-          })),
-        { label: "Adelantos", amount: Number(liquidacion.adelantos || 0), negative: true },
-        {
-          label: `Dias no trabajados (${formatoCantidad(liquidacion.dias_no_trabajados)})`,
-          amount: Number(liquidacion.descuento_dias_no_trabajados || 0),
-          negative: true,
-        },
-      ].filter((row) => Math.abs(Number(row.amount || 0)) > 0.009)
+      rowsSuman.forEach(({ label, amount, rowH, labelWidth, noAmount }) => drawConceptoRow(label, noAmount ? "" : formatoMoneda(amount), false, null, rowH, labelWidth))
 
-      rows.forEach(({ label, amount, negative }) => {
-        doc.rect(45, y, pageWidth - 90, 16).lineWidth(0.5).strokeColor(PDF_COLORS.line).stroke()
-        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9.4)
-        doc.text(label, 52, y + 4, { width: 340 })
-        doc.text(`${negative ? "-" : ""}${formatoMoneda(amount)}`, pageWidth - 160, y + 4, { width: 108, align: "right" })
-        y += 16
-      })
+      // Subtotal
+      doc.rect(45, y, pageWidth - 90, 17).fillColor("#f0f9ff").fill()
+      doc.rect(45, y, pageWidth - 90, 17).lineWidth(0.7).strokeColor(PDF_COLORS.line).stroke()
+      doc.font("Helvetica-Bold").fontSize(9.4).fillColor(PDF_COLORS.ink)
+      doc.text("Subtotal", 52, y + 4)
+      doc.text(formatoMoneda(subtotalSuma), pageWidth - 160, y + 4, { width: 108, align: "right" })
+      y += 17
+
+      // — RESTAN — (solo si hay)
+      if (rowsRestan.length > 0) {
+        rowsRestan.forEach(({ label, amount }) => drawConceptoRow(label, `-${formatoMoneda(amount)}`))
+      }
+
+      // Total a cobrar
+      doc.rect(45, y, pageWidth - 90, 19).fillColor("#dbeafe").fill()
+      doc.rect(45, y, pageWidth - 90, 19).lineWidth(0.9).strokeColor(PDF_COLORS.line).stroke()
+      doc.font("Helvetica-Bold").fontSize(10).fillColor(PDF_COLORS.ink)
+      doc.text("TOTAL A COBRAR", 52, y + 5)
+      doc.text(formatoMoneda(totalACobrar), pageWidth - 160, y + 5, { width: 108, align: "right" })
+      y += 19
 
       y += 10
       y = drawSectionHeader("PAGOS REGISTRADOS", y)
@@ -901,7 +929,8 @@ router.get("/:id/pdf", async (req, res) => {
       doc.rect(45, y, pageWidth - 90, 18).lineWidth(0.8).strokeColor(PDF_COLORS.line).stroke()
       doc.font("Helvetica-Bold").fontSize(9).fillColor(PDF_COLORS.ink)
       doc.text("Fecha", 52, y + 5)
-      doc.text("Medio", 240, y + 5)
+      doc.text("Medio", 175, y + 5)
+      doc.text("Detalle", 280, y + 5)
       doc.text("Monto", pageWidth - 160, y + 5, { width: 108, align: "right" })
       y += 18
 
@@ -914,26 +943,40 @@ router.get("/:id/pdf", async (req, res) => {
         pagos.forEach((p, idx) => {
           const fecha = p.fecha_pago ? new Date(p.fecha_pago).toLocaleDateString("es-AR") : "-"
           const medio = p.medio_pago || "-"
-          doc.rect(45, y, pageWidth - 90, 16).lineWidth(0.5).strokeColor(PDF_COLORS.line).stroke()
+          const rowH = 16
+          doc.rect(45, y, pageWidth - 90, rowH).lineWidth(0.5).strokeColor(PDF_COLORS.line).stroke()
+          doc.font("Helvetica").fontSize(9).fillColor(PDF_COLORS.ink)
           doc.text(`${idx + 1}. ${fecha}`, 52, y + 4)
-          doc.text(medio, 240, y + 4)
+          doc.text(medio, 175, y + 4)
+          if (p.detalle) {
+            doc.font("Helvetica").fontSize(8).fillColor(PDF_COLORS.slate)
+            doc.text(p.detalle, 280, y + 4, { width: 180 })
+            doc.font("Helvetica").fontSize(9).fillColor(PDF_COLORS.ink)
+          }
           doc.text(formatoMoneda(p.monto), pageWidth - 160, y + 4, { width: 108, align: "right" })
-          y += 16
+          y += rowH
         })
       }
 
       if (liquidacion.observaciones) {
         y += 10
         y = drawSectionHeader("OBSERVACIONES", y)
-        doc.rect(45, y, pageWidth - 90, 58).strokeColor(PDF_COLORS.line).lineWidth(0.8).stroke()
-        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9.8).text(liquidacion.observaciones, 52, y + 8, {
+        const obsBoxH = 22
+        doc.rect(45, y, pageWidth - 90, obsBoxH).strokeColor(PDF_COLORS.line).lineWidth(0.8).stroke()
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9.8).text(liquidacion.observaciones, 52, y + 6, {
           width: pageWidth - 104,
-          height: 42,
+          height: obsBoxH - 8,
+          ellipsis: true,
         })
+        y += obsBoxH + 10
       }
 
-      const firmaY = doc.page.height - doc.page.margins.bottom - 62
-      const firmaLineY = firmaY - 10
+      // Firma: debajo del contenido, nunca superposición con el footer (footer line = pageBottom - 22)
+      const firmaAreaH = 50
+      const pageBottom = doc.page.height - doc.page.margins.bottom
+      const firmaMaxY = pageBottom - 55   // deja espacio por encima del footer
+      const firmaY = Math.min(Math.max(y + 14, pageBottom - firmaAreaH), firmaMaxY)
+      const firmaLineY = firmaY - 8
       const firmaWidth = 220
       const firmaX = (pageWidth - firmaWidth) / 2
 
@@ -1055,6 +1098,8 @@ router.post("/", async (req, res) => {
         vacaciones: 0,
         feriados_cantidad: 0,
         importe_feriados: 0,
+        dias_enfermedad: 0,
+        importe_enfermedad: 0,
         dias_no_trabajados: 0,
         descuento_dias_no_trabajados: 0,
         adelantos: 0,
@@ -1100,16 +1145,18 @@ router.put("/:id", async (req, res) => {
       vacaciones,
       feriados_cantidad,
       dias_no_trabajados,
+      dias_enfermedad,
       adelantos,
       adicional,
       conceptos_extra,
       observaciones,
+      reajuste_porcentaje,
     } = req.body
 
     // Obtener liquidación actual para recalcular total
     const { data: liquidacion } = await db
       .from("liquidaciones")
-      .select("empleado_id, total_horas, monto_bruto, observaciones, presentismo, horas_extra_cantidad, horas_extra_100_cantidad, no_remunerativo, aguinaldo, vacaciones, feriados_cantidad, dias_no_trabajados, adelantos, adicional")
+      .select("empleado_id, total_horas, monto_bruto, observaciones, presentismo, horas_extra_cantidad, horas_extra_100_cantidad, no_remunerativo, aguinaldo, vacaciones, feriados_cantidad, dias_no_trabajados, dias_enfermedad, importe_enfermedad, adelantos, adicional, reajuste_porcentaje")
       .eq("id", req.params.id)
       .single()
 
@@ -1128,9 +1175,23 @@ router.put("/:id", async (req, res) => {
       ? roundMoney(monto_bruto)
       : roundMoney(liquidacion.monto_bruto || 0)
 
-    const valorHoraCalculado = Number(totalHorasFinal || 0) > 0
-      ? Number(montoBrutoFinal || 0) / Number(totalHorasFinal || 1)
-      : Number(empleado?.valor_hora || 0)
+    const storedReajuste = Number(liquidacion.reajuste_porcentaje || 0)
+    const newReajuste = Number(reajuste_porcentaje ?? 0)
+
+    // El valor hora actual del empleado ya tiene el reajuste previo aplicado.
+    // Lo removemos para obtener el valor base, luego aplicamos el nuevo %.
+    // Esto garantiza idempotencia al re-guardar sin cambiar el %.
+    const valorHoraActual = Number(empleado?.valor_hora || 0)
+    const valorHoraBase = storedReajuste > 0
+      ? valorHoraActual / (1 + storedReajuste / 100)
+      : valorHoraActual
+
+    const valorHoraCalculado = roundMoney(valorHoraBase * (1 + newReajuste / 100))
+
+    // monto_bruto = horas × valor hora ajustado (siempre que haya horas)
+    const montoBrutoCalculado = Number(totalHorasFinal) > 0
+      ? roundMoney(Number(totalHorasFinal) * valorHoraCalculado)
+      : montoBrutoFinal
 
     const conceptosActuales = getConceptosFromLiquidacion(liquidacion, valorHoraCalculado)
 
@@ -1143,6 +1204,7 @@ router.put("/:id", async (req, res) => {
       vacaciones: roundMoney(vacaciones ?? conceptosActuales.vacaciones),
       feriados_cantidad: roundMoney(feriados_cantidad ?? conceptosActuales.feriados_cantidad),
       dias_no_trabajados: roundMoney(dias_no_trabajados ?? conceptosActuales.dias_no_trabajados),
+      dias_enfermedad: roundMoney(dias_enfermedad ?? conceptosActuales.dias_enfermedad ?? 0),
       adelantos: roundMoney(adelantos ?? conceptosActuales.adelantos),
       adicional: roundMoney(adicional ?? conceptosActuales.adicional ?? 0),
       conceptos_extra: normalizeConceptosExtras(conceptos_extra ?? conceptosActuales.conceptos_extra),
@@ -1153,11 +1215,12 @@ router.put("/:id", async (req, res) => {
     const importeHorasExtra = roundMoney(conceptos.horas_extra_cantidad * valorHoraCalculado * 1.5)
     const importeHorasExtra100 = roundMoney(conceptos.horas_extra_100_cantidad * valorHoraCalculado * 2)
     const importeFeriados = roundMoney(conceptos.feriados_cantidad * 8 * valorHoraCalculado)
+    const importeEnfermedad = roundMoney(conceptos.dias_enfermedad * 8 * valorHoraCalculado)
     const descuentoDiasNoTrabajados = roundMoney(conceptos.dias_no_trabajados * 8 * valorHoraCalculado)
 
     // Calcular total
     const total = roundMoney(
-      montoBrutoFinal +
+      montoBrutoCalculado +
       conceptos.presentismo +
       conceptos.no_remunerativo +
       conceptos.aguinaldo +
@@ -1165,6 +1228,7 @@ router.put("/:id", async (req, res) => {
       importeHorasExtra +
       importeHorasExtra100 +
       importeFeriados +
+      importeEnfermedad +
       conceptos.ajuste_conceptos_extra +
       conceptos.adicional -
       conceptos.adelantos -
@@ -1201,7 +1265,7 @@ router.put("/:id", async (req, res) => {
       .from("liquidaciones")
       .update({
         total_horas: totalHorasFinal,
-        monto_bruto: montoBrutoFinal,
+        monto_bruto: montoBrutoCalculado,
         presentismo: conceptos.presentismo,
         horas_extra_cantidad: conceptos.horas_extra_cantidad,
         importe_horas_extra: importeHorasExtra,
@@ -1212,6 +1276,8 @@ router.put("/:id", async (req, res) => {
         vacaciones: conceptos.vacaciones,
         feriados_cantidad: conceptos.feriados_cantidad,
         importe_feriados: importeFeriados,
+        dias_enfermedad: conceptos.dias_enfermedad,
+        importe_enfermedad: importeEnfermedad,
         dias_no_trabajados: conceptos.dias_no_trabajados,
         descuento_dias_no_trabajados: descuentoDiasNoTrabajados,
         adicional: conceptos.adicional,
@@ -1219,12 +1285,22 @@ router.put("/:id", async (req, res) => {
         descuentos: conceptos.adelantos,
         monto_neto: Math.max(0, total),
         estado: estadoActualizado,
-        observaciones: observacionesPayload
+        observaciones: observacionesPayload,
+        reajuste_porcentaje: Number(reajuste_porcentaje ?? 0),
       })
       .eq("id", req.params.id)
       .select()
 
     if (error) return res.status(400).json({ error: error.message })
+
+    // Actualizar valor_hora del empleado cuando el reajuste cambia
+    if (valorHoraCalculado > 0 && Math.abs(valorHoraCalculado - Number(empleado?.valor_hora || 0)) > 0.001) {
+      await db
+        .from("empleados")
+        .update({ valor_hora: roundMoney(valorHoraCalculado) })
+        .eq("id", liquidacion.empleado_id)
+    }
+
     getIo()?.emit('liquidaciones:changed')
     triggerSueldoTxtExportFromPeriodo(updatedRows[0]?.periodo_inicio)
     res.json(mapLiquidacion(updatedRows[0], 0))
@@ -1301,7 +1377,7 @@ router.get("/:liquidacion_id/pagos", async (req, res) => {
 // Crear pago de liquidación
 router.post("/:liquidacion_id/pagos", async (req, res) => {
   try {
-    const { monto, medio_pago, fecha, permitir_redondeo, monto_redondeado } = req.body
+    const { monto, medio_pago, fecha, permitir_redondeo, monto_redondeado, detalle } = req.body
     const liquidacion_id = req.params.liquidacion_id
 
     // Validar que el monto no exceda el adeudado
@@ -1383,7 +1459,8 @@ router.post("/:liquidacion_id/pagos", async (req, res) => {
           monto: montoFinal,
           redondeo_efectivo: diferenciaRedondeo > 0 ? diferenciaRedondeo : 0,
           medio_pago,
-          fecha_pago: fecha || new Date().toISOString().split("T")[0]
+          fecha_pago: fecha || new Date().toISOString().split("T")[0],
+          detalle: detalle || ""
         }
       ])
       .select()
@@ -1404,6 +1481,11 @@ router.post("/:liquidacion_id/pagos", async (req, res) => {
         return res.status(400).json({ error: `No se pudo registrar el redondeo de efectivo: ${updateLiquidacionError.message}` })
       }
     }
+
+    // Actualizar estado de la liquidación según total pagado
+    const nuevoTotalPagado = totalPagado + montoFinal
+    const nuevoEstado = nuevoTotalPagado >= montoNetoNum - 0.01 ? "pagada" : "pendiente"
+    await db.from("liquidaciones").update({ estado: nuevoEstado }).eq("id", liquidacion_id)
 
     getIo()?.emit('liquidaciones:changed')
     triggerSueldoTxtExportFromPeriodo(liquidacion?.periodo_inicio)

@@ -375,7 +375,13 @@ router.get("/resumen/pdf", async (req, res) => {
         : (obra?.id ? `obra_${obra.id}` : (clienteId ? `cliente_${clienteId}` : "sin_obra"))
 
       if (!resumenEmpleado[empLabel]) resumenEmpleado[empLabel] = 0
-      if (!resumenObra[obraKey]) resumenObra[obraKey] = { label: obraLabel, value: 0 }
+      if (!resumenObra[obraKey]) {
+        resumenObra[obraKey] = {
+          label: obraLabel,
+          value: 0,
+          grupo: grupoLabel,
+        }
+      }
       if (!resumenGrupo[grupoLabel]) resumenGrupo[grupoLabel] = 0
 
       resumenEmpleado[empLabel] += hs
@@ -585,6 +591,60 @@ router.get("/resumen/pdf", async (req, res) => {
       doc.y = y + 8
     }
 
+    const drawTransferDifferences = (items) => {
+      drawSectionTitle("Diferencia entre horas prestadas", 140)
+      ensureSpace(120)
+
+      const diferencias = {}
+
+      items.forEach((item) => {
+        const origen = item.origen
+        const destino = item.destino
+        const horas = Number(item.horas || 0)
+
+        const [grupoA, grupoB] = [origen, destino].sort((a, b) => a.localeCompare(b))
+        const key = `${grupoA.toLowerCase()}|||${grupoB.toLowerCase()}`
+
+        if (!diferencias[key]) {
+          diferencias[key] = {
+            grupoA,
+            grupoB,
+            horasAaB: 0,
+            horasBaA: 0,
+          }
+        }
+
+        if (origen === grupoA && destino === grupoB) {
+          diferencias[key].horasAaB += horas
+        } else {
+          diferencias[key].horasBaA += horas
+        }
+      })
+
+      const rows = Object.values(diferencias)
+        .map((item) => ({
+          ...item,
+          diferencia: item.horasAaB - item.horasBaA,
+        }))
+        .filter((item) => item.diferencia !== 0)
+
+      drawList(
+        rows.map((item) => {
+          const abs = Math.abs(item.diferencia)
+          const texto = item.diferencia > 0
+            ? `${item.grupoB} le debe ${formatHoursAsClock(abs)} hs a ${item.grupoA}`
+            : `${item.grupoA} le debe ${formatHoursAsClock(abs)} hs a ${item.grupoB}`
+
+          return {
+            label: texto,
+            value: abs,
+          }
+        }),
+        "DIFERENCIA",
+        "HORAS"
+      )
+    }
+
     const headerBottom = drawPremiumHeader(doc, {
       title: "TESLA MONTAJES ELECTRICOS",
       subtitle: "Resumen mensual de horas",
@@ -619,11 +679,32 @@ router.get("/resumen/pdf", async (req, res) => {
     doc.y = resumenY + 76
 
     drawSectionTitle("Horas por obra", 200)
-    drawObrasList(
-      Object.values(resumenObra)
-        .map((item) => ({ label: item.label, value: item.value }))
-        .sort((a, b) => b.value - a.value)
-    )
+
+    const obrasPorGrupo = Object.values(resumenObra)
+      .reduce((acc, item) => {
+        const grupo = item.grupo || "Sin grupo"
+        if (!acc[grupo]) acc[grupo] = []
+        acc[grupo].push({
+          label: item.label,
+          value: item.value,
+        })
+        return acc
+      }, {})
+
+    Object.entries(obrasPorGrupo)
+      .sort(([grupoA], [grupoB]) => grupoA.localeCompare(grupoB))
+      .forEach(([grupo, obras]) => {
+        ensureSpace(70)
+
+        doc.font("Helvetica-Bold").fontSize(10).fillColor(PDF_COLORS.navy)
+        doc.text(grupo, 45, doc.y, { width: pageWidth - 90 })
+        doc.y += 8
+
+        drawObrasList(
+          obras.sort((a, b) => b.value - a.value)
+        )
+      })
+
 
     drawSectionTitle("Horas por grupo", 200)
     drawList(
@@ -634,18 +715,24 @@ router.get("/resumen/pdf", async (req, res) => {
       "TOTAL"
     )
 
-    drawTransferSummary(
-      Object.values(prestamosEntreGrupos)
-        .map((item) => ({
-          origen: item.origen,
-          destino: item.destino,
-          horas: Number(item.horas || 0),
-        }))
-        .sort((a, b) => b.horas - a.horas)
-    )
+    const prestamosItems = Object.values(prestamosEntreGrupos)
+      .map((item) => ({
+        origen: item.origen,
+        destino: item.destino,
+        horas: Number(item.horas || 0),
+      }))
+      .sort((a, b) => b.horas - a.horas)
+
+    drawTransferSummary(prestamosItems)
+    drawTransferDifferences(prestamosItems)
+
+
+  
+
 
     doc.end()
   } catch (err) {
+    console.error("Error generando PDF resumen de horas:", err)
     res.status(500).json({ error: err.message })
   }
 })
@@ -1232,6 +1319,241 @@ router.get("/resumen/grupo", async (req, res) => {
 })
 
 // Resumen de horas prestadas
+router.get("/resumen/prestadas/pdf", async (req, res) => {
+  try {
+    const { mes, anio } = req.query
+    const rango = getRangoMes(mes, anio)
+    if (!rango) return res.status(400).json({ error: "Mes y año válidos son obligatorios" })
+
+    const { data: horasData, error: horasError } = await db
+      .from("horas")
+      .select("*")
+      .gte("fecha", rango.inicio)
+      .lte("fecha", rango.fin)
+      .eq("es_prestada", true)
+      .order("fecha", { ascending: true })
+
+    if (horasError) return res.status(400).json({ error: horasError.message })
+
+    const [empleadosRes, obrasRes, gruposRes] = await Promise.all([
+      db.from("empleados").select("id, nombre, apellido"),
+      db.from("obras").select("id, nombre"),
+      db.from("grupos").select("id, nombre"),
+    ])
+
+    const empleadosData = empleadosRes.data || []
+    const obrasData = obrasRes.data || []
+    const gruposData = gruposRes.data || []
+    const horas = horasData || []
+
+    const mesesNombre = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
+    const mesNombre = mesesNombre[Math.max(0, Number(mes) - 1)] || `Mes ${mes}`
+    const periodo = `${mesNombre} ${anio}`
+
+    // Agrupar por grupo origen y luego por empleado
+    const byGrupo = new Map()
+    for (const h of horas) {
+      const emp = empleadosData.find((e) => e.id === h.empleado_id)
+      const empLabel = emp ? `${emp.nombre} ${emp.apellido}` : `Empleado ${h.empleado_id}`
+      const grupoOrigen = gruposData.find((g) => g.id === h.grupo_origen_id)?.nombre || "Sin grupo origen"
+      const grupoDestino = gruposData.find((g) => g.id === h.grupo_destino_id)?.nombre || "Sin grupo destino"
+      const obra = obrasData.find((o) => o.id === h.obra_id)?.nombre || "-"
+      const hs = getCantidadHoras(h)
+      let fecha = "-"
+      if (h.fecha) {
+        const d = new Date(h.fecha)
+        if (!isNaN(d.getTime())) {
+          fecha = `${String(d.getUTCDate()).padStart(2,"0")}/${String(d.getUTCMonth()+1).padStart(2,"0")}/${d.getUTCFullYear()}`
+        }
+      }
+
+      if (!byGrupo.has(grupoOrigen)) {
+        byGrupo.set(grupoOrigen, { grupo: grupoOrigen, total: 0, empleados: new Map() })
+      }
+
+      const grupo = byGrupo.get(grupoOrigen)
+      if (!grupo.empleados.has(empLabel)) {
+        grupo.empleados.set(empLabel, { empleado: empLabel, total: 0, destinos: new Map(), registros: [] })
+      }
+
+      const empleadoGrupo = grupo.empleados.get(empLabel)
+      grupo.total += hs
+      empleadoGrupo.total += hs
+      if (!empleadoGrupo.destinos.has(grupoDestino)) {
+        empleadoGrupo.destinos.set(grupoDestino, { grupoDestino, total: 0, registros: [] })
+      }
+      const destinoEmpleado = empleadoGrupo.destinos.get(grupoDestino)
+      destinoEmpleado.total += hs
+      destinoEmpleado.registros.push({ fecha, obra, hs })
+      empleadoGrupo.registros.push({ fecha, grupoDestino, obra, hs })
+    }
+
+    const grupos = Array.from(byGrupo.values())
+      .map((grupo) => ({
+        ...grupo,
+        empleados: Array.from(grupo.empleados.values())
+          .map((empleado) => ({
+            ...empleado,
+            destinos: Array.from(empleado.destinos.values())
+              .sort((a, b) => b.total - a.total),
+          }))
+          .sort((a, b) => b.total - a.total),
+      }))
+      .sort((a, b) => b.total - a.total)
+
+    const doc = new PDFDocument({ size: "A4", margin: 45 })
+    const chunks = []
+    doc.on("data", (c) => chunks.push(c))
+    doc.on("end", () => {
+      const pdfBuffer = Buffer.concat(chunks)
+      const nombreArchivo = `Horas Prestadas ${sanitizeFileText(mesNombre)} ${sanitizeFileText(String(anio))}.pdf`
+      res.setHeader("Content-Type", "application/pdf")
+      res.setHeader("Content-Disposition", `attachment; filename="${nombreArchivo}"`)
+      res.send(pdfBuffer)
+    })
+
+    setupPremiumFooter(doc, { leftText: "Tesla Montajes Electricos - Horas prestadas" })
+    const pageWidth = doc.page.width
+
+    const headerBottom = drawPremiumHeader(doc, {
+      title: "TESLA MONTAJES ELECTRICOS",
+      subtitle: "Detalle de horas prestadas",
+      accentText: `Período ${periodo}`,
+      logoPath: LOGO_PATH,
+    })
+
+    let y = headerBottom + 10
+
+    const checkPage = (needed = 30) => {
+      if (y + needed > doc.page.height - doc.page.margins.bottom - 50) {
+        doc.addPage()
+        setupPremiumFooter(doc, { leftText: "Tesla Montajes Electricos - Horas prestadas" })
+        y = 45
+      }
+    }
+
+    const formatHs = (hs) => {
+      const total = Math.round(Number(hs || 0) * 60)
+      const h = Math.floor(total / 60)
+      const m = total % 60
+      return m > 0 ? `${h}h ${m}m` : `${h}h`
+    }
+
+    if (grupos.length === 0) {
+      doc.font("Helvetica").fontSize(10).fillColor("#64748b").text("Sin horas prestadas en este período.", 45, y)
+      doc.end()
+      return
+    }
+
+    for (const grupo of grupos) {
+      checkPage(58)
+
+      doc.rect(45, y, pageWidth - 90, 24).fillColor("#111111").fill()
+      doc.font("Helvetica-Bold").fontSize(10).fillColor("#ffffff")
+      doc.text(`Grupo origen: ${grupo.grupo}`, 52, y + 7, { width: 330 })
+      doc.text(`Total: ${formatHs(grupo.total)}`, pageWidth - 165, y + 7, { width: 115, align: "right" })
+      y += 30
+
+      for (const empleado of grupo.empleados) {
+        checkPage(40)
+
+        doc.rect(45, y, pageWidth - 90, 22).fillColor("#ffffff").fill()
+        doc.rect(45, y, pageWidth - 90, 22).lineWidth(1).strokeColor("#000000").stroke()
+        doc.font("Helvetica-Bold").fontSize(10).fillColor("#000000")
+        doc.text(empleado.empleado, 52, y + 6)
+        doc.text(`Total: ${formatHs(empleado.total)}`, pageWidth - 160, y + 6, { width: 108, align: "right" })
+        y += 22
+
+        for (const destino of empleado.destinos) {
+          checkPage(38)
+
+          doc.rect(45, y, pageWidth - 90, 18).fillColor("#e5e7eb").fill()
+          doc.rect(45, y, pageWidth - 90, 18).lineWidth(0.6).strokeColor("#999999").stroke()
+          doc.font("Helvetica-Bold")
+            .fontSize(8.8)
+            .fillColor("#000000")
+          doc.text(`Prestadas a: ${destino.grupoDestino}`, 52, y + 5, { width: 300 })
+          doc.text(`Total: ${formatHs(destino.total)}`, pageWidth - 160, y + 5, { width: 108, align: "right" })
+          y += 18
+
+          const col = { fecha: 45, obra: 190 }
+          doc.rect(45, y, pageWidth - 90, 17).fillColor("#f0f0f0").fill()
+          doc.rect(45, y, pageWidth - 90, 17).lineWidth(0.8).strokeColor("#000000").stroke()
+          doc.font("Helvetica-Bold").fontSize(8.5).fillColor("#000000")
+          doc.text("Fecha", col.fecha + 4, y + 4)
+          doc.text("Obra", col.obra + 4, y + 4)
+          doc.text("Horas", pageWidth - 90, y + 4, { width: 40, align: "right" })
+          y += 17
+
+          for (const r of destino.registros) {
+            checkPage(16)
+            doc.rect(45, y, pageWidth - 90, 16).fillColor("#ffffff").fill()
+            doc.rect(45, y, pageWidth - 90, 16).lineWidth(0.4).strokeColor("#888888").stroke()
+            doc.font("Helvetica").fontSize(8.5).fillColor("#000000")
+            doc.text(r.fecha, col.fecha + 4, y + 4, { width: 80 })
+            doc.text(r.obra, col.obra + 4, y + 4, { width: 265 })
+            doc.text(formatHs(r.hs), pageWidth - 90, y + 4, { width: 40, align: "right" })
+            y += 16
+          }
+
+          y += 8
+        }
+
+        y += 10
+      }
+
+      y += 4
+    }
+
+    /*
+    for (const grupo of []) {
+      checkPage(40)
+
+      // Cabecera empleado — fondo blanco, borde negro
+      doc.rect(45, y, pageWidth - 90, 22).fillColor("#ffffff").fill()
+      doc.rect(45, y, pageWidth - 90, 22).lineWidth(1).strokeColor("#000000").stroke()
+      doc.font("Helvetica-Bold").fontSize(10).fillColor("#000000")
+      doc.text(grupo.empleado, 52, y + 6)
+      doc.text(`Total: ${formatHs(grupo.total)}`, pageWidth - 160, y + 6, { width: 108, align: "right" })
+      y += 22
+
+      // Cabecera tabla
+      // col layout: fecha(60) | origen(115) | destino(115) | obra(135) | horas(right)
+      const col = { fecha: 45, origen: 110, destino: 230, obra: 350 }
+      doc.rect(45, y, pageWidth - 90, 17).fillColor("#f0f0f0").fill()
+      doc.rect(45, y, pageWidth - 90, 17).lineWidth(0.8).strokeColor("#000000").stroke()
+      doc.font("Helvetica-Bold").fontSize(8.5).fillColor("#000000")
+      doc.text("Fecha",         col.fecha + 4,   y + 4)
+      doc.text("Grupo origen",  col.origen + 4,  y + 4)
+      doc.text("Grupo destino", col.destino + 4, y + 4)
+      doc.text("Obra",          col.obra + 4,    y + 4)
+      doc.text("Horas",         pageWidth - 90,  y + 4, { width: 40, align: "right" })
+      y += 17
+
+      for (const r of grupo.registros) {
+        checkPage(16)
+        doc.rect(45, y, pageWidth - 90, 16).fillColor("#ffffff").fill()
+        doc.rect(45, y, pageWidth - 90, 16).lineWidth(0.4).strokeColor("#888888").stroke()
+        doc.font("Helvetica").fontSize(8.5).fillColor("#000000")
+        doc.text(r.fecha,        col.fecha + 4,   y + 4, { width: 60 })
+        doc.text(r.grupoOrigen,  col.origen + 4,  y + 4, { width: 115 })
+        doc.text(r.grupoDestino, col.destino + 4, y + 4, { width: 115 })
+        doc.text(r.obra,         col.obra + 4,    y + 4, { width: 130 })
+        doc.text(formatHs(r.hs), pageWidth - 90,  y + 4, { width: 40, align: "right" })
+        y += 16
+      }
+
+      y += 12
+    }
+    */
+
+    doc.end()
+  } catch (err) {
+    console.error("Error generando PDF prestadas:", err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
 router.get("/resumen/prestadas", async (req, res) => {
   try {
     const { mes, anio } = req.query

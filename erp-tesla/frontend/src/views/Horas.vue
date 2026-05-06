@@ -297,10 +297,7 @@ watch(cargaRangoMultiple, (enabled) => {
   if (!enabled) {
     empleadosMultiplesRango.value = []
   }
-  if (enabled) {
-    rangoDias.value = []
-    loadingRangoDias.value = false
-  }
+  prepararDiasRango()
 })
 watch(() => formDiaria.value.cliente_id, (clienteId) => {
   const obraActual = obras.value.find((obra) => String(obra.id) === String(formDiaria.value.obra_id))
@@ -750,7 +747,25 @@ const getResumenDiaRango = (dia) => {
 
 const prepararDiasRango = async () => {
   if (cargaRangoMultiple.value) {
-    rangoDias.value = []
+    const fechaDesde = formRango.value.fecha_desde
+    const fechaHasta = formRango.value.fecha_hasta
+    if (!showFormRango.value || !fechaDesde || !fechaHasta) {
+      rangoDias.value = []
+      loadingRangoDias.value = false
+      return
+    }
+
+    const inicio = parseLocalDate(fechaDesde)
+    const fin = parseLocalDate(fechaHasta)
+    if (!inicio || !fin || inicio > fin) {
+      rangoDias.value = []
+      loadingRangoDias.value = false
+      return
+    }
+
+    rangoDias.value = getDiasRango(fechaDesde, fechaHasta).map((fecha) =>
+      buildRangoDiaBase({ fecha, empleadoId: "", base: null, existentes: [] })
+    )
     loadingRangoDias.value = false
     return
   }
@@ -1804,6 +1819,23 @@ const generarResumenPdf = async () => {
   }
 }
 
+const generarPrestadasPdf = async () => {
+  const mesNombre = nombresMes[Math.max(0, Number(filtroMes.value) - 1)] || `Mes ${filtroMes.value}`
+  try {
+    const res = await api.getResumenPrestadasPdf(filtroMes.value, filtroAnio.value)
+    const blob = new Blob([res.data], { type: "application/pdf" })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement("a")
+    link.href = url
+    link.download = `Horas Prestadas ${mesNombre} ${filtroAnio.value}.pdf`
+    link.click()
+    window.URL.revokeObjectURL(url)
+  } catch (err) {
+    const detalle = err?.response?.data?.error || err?.message || "Error desconocido"
+    error.value = `No se pudo generar el PDF: ${detalle}`
+  }
+}
+
 // Aplicar filtros
 const aplicarFiltros = async () => {
   if (activeTab.value === "carga") {
@@ -2182,7 +2214,12 @@ onUnmounted(() => {
 
         <!-- Resumen de horas prestadas por empleado -->
         <div class="resumen-seccion">
-          <h3>Horas prestadas por empleado</h3>
+          <div class="resumen-seccion-header">
+            <h3>Horas prestadas por empleado</h3>
+            <button class="btn-pdf-prestadas" @click="generarPrestadasPdf" title="Descargar PDF de horas prestadas">
+              ⬇ PDF Prestadas
+            </button>
+          </div>
           <div v-if="prestadasAgrupadasEmpleado.length > 0" class="prestadas-acordeon">
             <div
               v-for="grupo in prestadasAgrupadasEmpleado"
@@ -2543,18 +2580,18 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <div v-if="cargaRangoMultiple" class="loading-rango-dias">
+            <div v-if="cargaRangoMultiple && rangoDias.length > 0" class="loading-rango-dias">
               Se aplicará esta plantilla a {{ empleadosMultiplesRango.length }} empleado(s)
               en {{ getDiasRango(formRango.fecha_desde, formRango.fecha_hasta).length }} día(s) hábil(es).
               <br />
               Tip: en modo múltiple no se sobrescriben registros existentes automáticamente.
             </div>
 
-            <div v-else-if="loadingRangoDias" class="loading-rango-dias">
+            <div v-if="loadingRangoDias" class="loading-rango-dias">
               Preparando días del rango...
             </div>
 
-            <div v-else-if="rangoDias.length > 0" class="rango-grid-wrapper">
+            <div v-else-if="rangoDias.length > 0 || cargaRangoMultiple" class="rango-grid-wrapper">
               <div class="rango-template-card">
                 <div class="rango-grid-header">
                   <strong>Plantilla general</strong>
@@ -3505,6 +3542,35 @@ td {
   margin-bottom: 2rem;
   padding: 1.5rem;
   border-radius: 1rem;
+}
+
+.resumen-seccion-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.5rem;
+}
+
+.resumen-seccion-header h3 {
+  margin: 0;
+  color: #e2e8f0;
+  font-size: 1.125rem;
+}
+
+.btn-pdf-prestadas {
+  padding: 0.35rem 0.9rem;
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-pdf-prestadas:hover {
+  background: rgba(99, 102, 241, 0.25);
 }
 
 .resumen-seccion h3 {

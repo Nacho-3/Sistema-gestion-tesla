@@ -7,3 +7,4 @@
 [2026-04-29 07:41:15] Iniciando backend (npm start) en C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla\backend
 [2026-04-29 07:41:15] Iniciando Caddy usando C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
 [2026-04-29 07:41:18] Estado final: backend=False caddy=True
+[2026-05-04 08:25:29] Inicio de script. CaddyExe=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe BackendPort=3000 CaddyPort=443 WhatIf=False ForceRestart=False

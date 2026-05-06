@@ -31,6 +31,7 @@ const createInitialFormPago = () => ({
   fecha: new Date().toISOString().split("T")[0],
   aplicar_redondeo: false,
   monto_redondeado: "",
+  detalle: "",
 })
 const formPago = ref({
   ...createInitialFormPago()
@@ -60,6 +61,7 @@ const formConceptos = ref({
   aguinaldo: 0,
   vacaciones: 0,
   feriados_cantidad: 0,
+  dias_enfermedad: 0,
   dias_no_trabajados: 0,
   adelantos: 0,
   observaciones: "",
@@ -95,7 +97,9 @@ const normalizarLiquidacion = (liq = {}) => ({
   horas_extra_100_cantidad: toNumber(liq.horas_extra_100_cantidad),
   feriados_cantidad: toNumber(liq.feriados_cantidad),
   dias_no_trabajados: toNumber(liq.dias_no_trabajados),
+  dias_enfermedad: toNumber(liq.dias_enfermedad),
   importe_feriados: toNumber(liq.importe_feriados),
+  importe_enfermedad: toNumber(liq.importe_enfermedad),
   descuento_dias_no_trabajados: toNumber(liq.descuento_dias_no_trabajados),
   adelantos: toNumber(liq.adelantos),
   total: toNumber(liq.total),
@@ -103,6 +107,7 @@ const normalizarLiquidacion = (liq = {}) => ({
   adicional: toNumber(liq.adicional),
   ajuste_conceptos_extra: toNumber(liq.ajuste_conceptos_extra),
   conceptos_extra: normalizarConceptosExtra(liq.conceptos_extra),
+  reajuste_porcentaje: toNumber(liq.reajuste_porcentaje),
 })
 
 const normalizarPago = (pago = {}) => ({
@@ -124,10 +129,12 @@ const crearFormularioConceptos = (liquidacion = {}, opciones = {}) => {
     vacaciones: liquidacion.vacaciones || 0,
     feriados_cantidad: liquidacion.feriados_cantidad || 0,
     dias_no_trabajados: liquidacion.dias_no_trabajados || 0,
+    dias_enfermedad: toNumber(liquidacion.dias_enfermedad),
     adelantos: liquidacion.adelantos || 0,
     observaciones: liquidacion.observaciones || "",
     adicional: liquidacion.adicional || 0,
     conceptos_extra: normalizarConceptosExtra(liquidacion.conceptos_extra),
+    reajuste_porcentaje: toNumber(liquidacion.reajuste_porcentaje),
   }
 }
 
@@ -172,7 +179,11 @@ const actualizarHorasExtra100DesdeInput = (valorRaw) => {
 
 const normalizarHorasConceptosInput = () => {
   const parsed = parseHoursInput(formConceptosHorasInput.value)
-  formConceptos.value.total_horas = Number.isFinite(parsed) ? parsed : 0
+  // Si el formato no es valido al perder foco, conservamos el ultimo valor numerico correcto.
+  // Esto evita que el sueldo base se recalcule a cero por un typo temporal en el input.
+  formConceptos.value.total_horas = Number.isFinite(parsed)
+    ? parsed
+    : toNumber(formConceptos.value.total_horas)
   syncHorasInputConceptos(formConceptos.value.total_horas)
 }
 
@@ -336,6 +347,7 @@ const crearPago = async () => {
       fecha: formPago.value.fecha,
       permitir_redondeo: redondeoPagoHabilitado.value,
       monto_redondeado: redondeoPagoHabilitado.value ? montoPagoFinal.value : undefined,
+      detalle: formPago.value.detalle || undefined,
     })
     await verDetalle(liquidacionSeleccionada.value)
     cerrarFormPago()
@@ -499,6 +511,10 @@ const importeFeriadosPreview = computed(() => {
   return toNumber(formConceptos.value.feriados_cantidad) * 8 * valorHoraDetalle.value
 })
 
+const importeEnfermedadPreview = computed(() => {
+  return toNumber(formConceptos.value.dias_enfermedad) * 8 * valorHoraDetalle.value
+})
+
 const descuentoDiasNoTrabajadosPreview = computed(() => {
   return toNumber(formConceptos.value.dias_no_trabajados) * 8 * valorHoraDetalle.value
 })
@@ -555,6 +571,8 @@ const importandoCaja = ref(false)
 const importCajaResult = ref(null)
 const importCajaEstado = ref(null) // null | { estado: "no_importado"|"importado"|"desactualizado"|"sin_pagos", buckets: [] }
 const cargandoEstadoCaja = ref(false)
+const cargandoResumenCaja = ref(false)
+const resumenImportCaja = ref(null)
 
 const consultarEstadoCaja = async () => {
   if (totalPagadoMes.value <= 0) { importCajaEstado.value = null; return }
@@ -578,12 +596,119 @@ const labelBotonImportar = computed(() => {
 const abrirImportarModal = () => {
   if (totalPagadoMes.value <= 0) return
   importCajaResult.value = null
+  resumenImportCaja.value = null
   mostrarImportarModal.value = true
+  void cargarResumenImportacionCaja()
 }
 
 const cerrarImportarModal = () => {
   mostrarImportarModal.value = false
   importCajaResult.value = null
+}
+
+const cargarResumenImportacionCaja = async () => {
+  cargandoResumenCaja.value = true
+  try {
+    const { data } = await api.getResumenImportacionSueldos(mesSeleccionado.value, anioSeleccionado.value)
+    resumenImportCaja.value = data
+  } catch (err) {
+    resumenImportCaja.value = { error: err.response?.data?.error || err.message }
+  } finally {
+    cargandoResumenCaja.value = false
+  }
+}
+
+const imprimirResumenImportacionCajaLocal = () => {
+  const resumen = resumenImportCaja.value
+  if (!resumen || resumen.error) return
+
+  const empleados = Array.isArray(resumen.empleados) ? resumen.empleados : []
+  const filas = empleados.map((e) => {
+    const nombre = `${e.apellido || ""} ${e.nombre || ""}`.trim() || `Empleado ${e.empleado_id}`
+    return `
+      <tr>
+        <td style="padding:8px;border:1px solid #999;">${nombre}</td>
+        <td style="padding:8px;border:1px solid #999;text-align:right;">${formatearMoneda(e.efectivo)}</td>
+        <td style="padding:8px;border:1px solid #999;text-align:right;">${formatearMoneda(e.total)}</td>
+      </tr>
+    `
+  }).join("")
+
+  const html = `
+    <html>
+      <head><title>Resumen importación sueldos</title></head>
+      <body style="font-family:Arial,sans-serif;padding:18px;">
+        <h2 style="margin:0 0 8px 0;">Resumen previo de importación a Caja Tesla</h2>
+        <p style="margin:0 0 14px 0;">Período: ${resumen.periodo || "-"}</p>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead>
+            <tr>
+              <th style="padding:8px;border:1px solid #999;text-align:left;">Empleado</th>
+              <th style="padding:8px;border:1px solid #999;text-align:right;">Efectivo</th>
+              <th style="padding:8px;border:1px solid #999;text-align:right;">Total</th>
+            </tr>
+          </thead>
+          <tbody>${filas}</tbody>
+          <tfoot>
+            <tr>
+              <td style="padding:8px;border:1px solid #999;"><strong>Totales</strong></td>
+              <td style="padding:8px;border:1px solid #999;text-align:right;"><strong>${formatearMoneda(resumen?.totales?.efectivo)}</strong></td>
+              <td style="padding:8px;border:1px solid #999;text-align:right;"><strong>${formatearMoneda(resumen?.totales?.total)}</strong></td>
+            </tr>
+          </tfoot>
+        </table>
+        <p style="margin-top:12px;font-size:12px;">A Caja Tesla se importa solo efectivo: <strong>${formatearMoneda(resumen?.importara_a_caja)}</strong></p>
+      </body>
+    </html>
+  `
+
+  const w = window.open("", "_blank", "width=980,height=760")
+  if (!w) return
+  w.document.write(html)
+  w.document.close()
+  w.focus()
+  w.print()
+}
+
+const extraerMensajeErrorPdf = async (err) => {
+  const data = err?.response?.data
+  if (!data) return "Error al generar PDF del resumen"
+
+  if (data instanceof Blob) {
+    try {
+      const text = await data.text()
+      try {
+        const parsed = JSON.parse(text)
+        return parsed?.error || parsed?.mensaje || text || "Error al generar PDF del resumen"
+      } catch {
+        return text || "Error al generar PDF del resumen"
+      }
+    } catch {
+      return "Error al generar PDF del resumen"
+    }
+  }
+
+  return data?.error || data?.mensaje || err?.message || "Error al generar PDF del resumen"
+}
+
+const imprimirResumenImportacionCaja = async () => {
+  if (!resumenImportCaja.value || resumenImportCaja.value.error) return
+
+  try {
+    const res = await api.getResumenImportacionSueldosPdf(mesSeleccionado.value, anioSeleccionado.value)
+    const blob = new Blob([res.data], { type: "application/pdf" })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement("a")
+    link.href = url
+    link.download = `resumen_importacion_sueldos_${anioSeleccionado.value}-${String(mesSeleccionado.value).padStart(2, "0")}.pdf`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
+  } catch (err) {
+    error.value = await extraerMensajeErrorPdf(err)
+    imprimirResumenImportacionCajaLocal()
+  }
 }
 
 const confirmarImportarACaja = async () => {
@@ -665,21 +790,25 @@ const cancelarEdicionTarifa = () => {
   tarifaEditando.value = ""
 }
 
+const refrescarSueldosEnTiempoReal = async () => {
+  await cargarLiquidaciones()
+
+  if (vistaActual.value === "detalle" && liquidacionSeleccionada.value?.id) {
+    await verDetalle(liquidacionSeleccionada.value)
+  }
+}
+
 onMounted(async () => {
   await Promise.all([cargarLiquidaciones(), cargarEmpleados()])
-  socket.on('liquidaciones:changed', cargarLiquidaciones)
-  socket.on('horas:changed', cargarLiquidaciones)
+  socket.on('liquidaciones:changed', refrescarSueldosEnTiempoReal)
+  socket.on('horas:changed', refrescarSueldosEnTiempoReal)
 })
 onUnmounted(() => {
-  socket.off('liquidaciones:changed', cargarLiquidaciones)
-  socket.off('horas:changed', cargarLiquidaciones)
+  socket.off('liquidaciones:changed', refrescarSueldosEnTiempoReal)
+  socket.off('horas:changed', refrescarSueldosEnTiempoReal)
 })
 
-const puedeDescargarPdfLiquidacion = computed(() => {
-  if (!liquidacionSeleccionada.value) return false
-  if (estaAGenerar(liquidacionSeleccionada.value)) return false
-  return liquidacionSeleccionada.value.estado === "pagada"
-})
+const puedeDescargarPdfLiquidacion = computed(() => !!liquidacionSeleccionada.value)
 
 
 </script>
@@ -863,12 +992,8 @@ const puedeDescargarPdfLiquidacion = computed(() => {
             <button
               class="btn-pdf"
               @click="descargarPdfLiquidacion"
-              :disabled="loading || !puedeDescargarPdfLiquidacion"
-              :title="estaAGenerar(liquidacionSeleccionada)
-                ? 'No se puede descargar el PDF cuando la liquidación está en A GENERAR'
-                : (!puedeDescargarPdfLiquidacion
-                    ? 'El PDF solo está disponible cuando la liquidación está pagada'
-                    : 'Descargar PDF de liquidación')"
+              :disabled="loading"
+              :title="'Descargar PDF de liquidación'"
             >
               📄 Descargar PDF
             </button>
@@ -942,6 +1067,10 @@ const puedeDescargarPdfLiquidacion = computed(() => {
             <div class="concepto">
               <span>Feriados ({{ formatearCantidad(liquidacionSeleccionada.feriados_cantidad) }} días):</span>
               <span>{{ formatearMoneda(liquidacionSeleccionada.importe_feriados) }}</span>
+            </div>
+            <div class="concepto">
+              <span>Días por enfermedad ({{ formatearCantidad(liquidacionSeleccionada.dias_enfermedad) }} días):</span>
+              <span>{{ formatearMoneda(liquidacionSeleccionada.importe_enfermedad) }}</span>
             </div>
             <div class="concepto">
               <span>No remunerativo:</span>
@@ -1209,6 +1338,12 @@ const puedeDescargarPdfLiquidacion = computed(() => {
                 </label>
 
                 <label class="form-group form-card-field">
+                  <span>Reajuste sobre valor hora (%)</span>
+                  <input v-model.number="formConceptos.reajuste_porcentaje" type="number" min="0" step="0.01" @wheel.prevent placeholder="0" />
+                  <small class="form-help">Porcentaje de ajuste aplicado al valor hora en este período. Se muestra en el recibo.</small>
+                </label>
+
+                <label class="form-group form-card-field">
                   <span>Presentismo ($)</span>
                   <input v-model.number="formConceptos.presentismo" type="number" min="0" step="0.01" @wheel.prevent />
                   <small class="form-help">Usalo para reflejar asistencia perfecta o premios fijos del período.</small>
@@ -1267,6 +1402,12 @@ const puedeDescargarPdfLiquidacion = computed(() => {
                   <span>Feriados (cantidad de días)</span>
                   <input v-model.number="formConceptos.feriados_cantidad" type="number" min="0" step="1" @wheel.prevent />
                   <small class="form-help">Cada feriado suma 8 horas al valor común. Importe calculado: {{ formatearMoneda(importeFeriadosPreview) }}</small>
+                </label>
+
+                <label class="form-group form-card-field">
+                  <span>Días por enfermedad (cantidad)</span>
+                  <input v-model.number="formConceptos.dias_enfermedad" type="number" min="0" step="1" @wheel.prevent />
+                  <small class="form-help">Cada día suma 8 horas al valor común. Importe calculado: {{ formatearMoneda(importeEnfermedadPreview) }}</small>
                 </label>
 
                 <label class="form-group form-card-field">
@@ -1429,6 +1570,11 @@ const puedeDescargarPdfLiquidacion = computed(() => {
               <input v-model="formPago.fecha" type="date" />
             </label>
 
+            <label class="form-group">
+              <span>Detalle (opcional)</span>
+              <input v-model="formPago.detalle" type="text" placeholder="Ej: Adelanto quincena, pago parcial..." />
+            </label>
+
             <div class="modal-actions">
               <button type="submit" class="btn-primary" :disabled="loading">
                 {{ loading ? "Registrando..." : "Registrar pago" }}
@@ -1453,30 +1599,44 @@ const puedeDescargarPdfLiquidacion = computed(() => {
           </div>
 
           <div class="modal-body importar-caja-body">
-            <!-- Lista de empleados con sus pagos -->
-            <table class="importar-caja-tabla">
-              <thead>
-                <tr>
-                  <th>Empleado</th>
-                  <th class="col-monto">Total pagado</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="liq in liquidaciones.filter(l => toNumber(l.total_pagado) > 0)" :key="liq.id">
-                  <td>{{ getNombreEmpleado(liq.empleado_id) }}</td>
-                  <td class="col-monto">{{ formatearMoneda(liq.total_pagado) }}</td>
-                </tr>
-                <tr v-if="liquidaciones.filter(l => toNumber(l.total_pagado) > 0).length === 0">
-                  <td colspan="2" class="importar-caja-empty">Sin pagos registrados en este período</td>
-                </tr>
-              </tbody>
-              <tfoot>
-                <tr class="importar-caja-total">
-                  <td>Total</td>
-                  <td class="col-monto">{{ formatearMoneda(totalPagadoMes) }}</td>
-                </tr>
-              </tfoot>
-            </table>
+            <div v-if="cargandoResumenCaja" class="importar-caja-empty">Cargando resumen...</div>
+            <div v-else-if="resumenImportCaja?.error" class="importar-caja-resultado resultado-error">
+              Error al cargar resumen: {{ resumenImportCaja.error }}
+            </div>
+
+            <!-- Resumen previo separado por medio -->
+            <div class="importar-caja-resumen-box">
+              <table class="importar-caja-tabla">
+                <thead>
+                  <tr>
+                    <th>Empleado</th>
+                    <th class="col-monto">Efectivo</th>
+                    <th class="col-monto">Total pagado</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="emp in (resumenImportCaja?.empleados || [])" :key="emp.empleado_id">
+                    <td>{{ `${emp.apellido || ''} ${emp.nombre || ''}`.trim() || getNombreEmpleado(emp.empleado_id) }}</td>
+                    <td class="col-monto">{{ formatearMoneda(emp.efectivo) }}</td>
+                    <td class="col-monto">{{ formatearMoneda(emp.total) }}</td>
+                  </tr>
+                  <tr v-if="(resumenImportCaja?.empleados || []).length === 0">
+                    <td colspan="3" class="importar-caja-empty">Sin pagos registrados en este período</td>
+                  </tr>
+                </tbody>
+                <tfoot>
+                  <tr class="importar-caja-total">
+                    <td>Total</td>
+                    <td class="col-monto">{{ formatearMoneda(resumenImportCaja?.totales?.efectivo || 0) }}</td>
+                    <td class="col-monto">{{ formatearMoneda(resumenImportCaja?.totales?.total || 0) }}</td>
+                  </tr>
+                </tfoot>
+              </table>
+
+              <p class="importar-caja-nota">
+                Se importa a Caja Tesla solo efectivo: <strong>{{ formatearMoneda(resumenImportCaja?.importara_a_caja || 0) }}</strong>
+              </p>
+            </div>
 
             <!-- Estado previo (antes de confirmar) -->
             <template v-if="!importCajaResult && importCajaEstado">
@@ -1535,6 +1695,13 @@ const puedeDescargarPdfLiquidacion = computed(() => {
           <div class="modal-actions importar-caja-actions">
             <template v-if="!importCajaResult || importCajaResult.status === 'error'">
               <button
+                class="btn-secondary"
+                :disabled="cargandoResumenCaja || !resumenImportCaja || !!resumenImportCaja.error"
+                @click="imprimirResumenImportacionCaja"
+              >
+                Imprimir resumen
+              </button>
+              <button
                 class="btn-primary"
                 :disabled="importandoCaja || totalPagadoMes <= 0"
                 @click="confirmarImportarACaja"
@@ -1547,6 +1714,13 @@ const puedeDescargarPdfLiquidacion = computed(() => {
               <button class="btn-secondary" @click="cerrarImportarModal">Cancelar</button>
             </template>
             <template v-else>
+              <button
+                class="btn-secondary"
+                :disabled="cargandoResumenCaja || !resumenImportCaja || !!resumenImportCaja.error"
+                @click="imprimirResumenImportacionCaja"
+              >
+                Imprimir resumen
+              </button>
               <button class="btn-primary" :disabled="importandoCaja" @click="confirmarImportarACaja">
                 {{ importandoCaja ? 'Importando...' : 'Reimportar a Caja Tesla' }}
               </button>
@@ -1708,20 +1882,31 @@ const puedeDescargarPdfLiquidacion = computed(() => {
 
 /* Modal importar sueldos */
 .modal-importar-caja {
-  max-width: 540px;
-  width: 90%;
+  max-width: 1320px;
+  width: min(96vw, 1320px);
 }
 
 .importar-caja-body {
   padding: 1.25rem 1.5rem;
   display: grid;
   gap: 1rem;
+  max-height: min(62vh, 640px);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.importar-caja-resumen-box {
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 0.8rem;
+  padding: 0.95rem 1rem;
 }
 
 .importar-caja-tabla {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.85rem;
+  font-size: 0.92rem;
+  table-layout: fixed;
 }
 
 .importar-caja-tabla th {
@@ -1731,27 +1916,48 @@ const puedeDescargarPdfLiquidacion = computed(() => {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.07em;
-  padding: 0 0 0.5rem;
+  padding: 0.15rem 0.35rem 0.65rem;
   border-bottom: 1px solid rgba(148, 163, 184, 0.15);
 }
 
 .importar-caja-tabla td {
-  padding: 0.45rem 0;
+  padding: 0.58rem 0.35rem;
   color: #cbd5e1;
   border-bottom: 1px solid rgba(148, 163, 184, 0.07);
+}
+
+.importar-caja-tabla td:first-child,
+.importar-caja-tabla th:first-child {
+  width: 44%;
+}
+
+.importar-caja-tabla td:nth-child(2),
+.importar-caja-tabla th:nth-child(2),
+.importar-caja-tabla td:nth-child(3),
+.importar-caja-tabla th:nth-child(3),
+.importar-caja-tabla td:nth-child(4),
+.importar-caja-tabla th:nth-child(4) {
+  width: 18.66%;
 }
 
 .importar-caja-tabla .col-monto {
   text-align: right;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .importar-caja-tabla tfoot td {
-  padding-top: 0.65rem;
+  padding-top: 0.78rem;
   border-top: 1px solid rgba(148, 163, 184, 0.2);
   border-bottom: none;
   font-weight: 700;
   color: #f1f5f9;
+}
+
+.importar-caja-nota {
+  margin: 0.9rem 0 0;
+  padding-top: 0.85rem;
+  border-top: 1px dashed rgba(148, 163, 184, 0.22);
 }
 
 .importar-caja-empty {
@@ -2429,6 +2635,11 @@ td {
   width: 90%;
   max-width: 500px;
   box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+}
+
+.modal.modal-importar-caja {
+  max-width: 1320px;
+  width: min(96vw, 1320px);
 }
 
 .modal-conceptos {

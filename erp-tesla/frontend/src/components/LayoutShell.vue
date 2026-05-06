@@ -38,7 +38,8 @@ const itemsMenu = [
   { label: "Caja", path: "/caja" },
   { label: "Presupuestos", path: "/presupuestos" },
   { label: "Certificados", path: "/certificados" },
-  { label: "Facturas", path: "/facturas" }
+  { label: "Facturas", path: "/facturas" },
+  { label: "Gastos", path: "/gastos" }
 ]
 
 const activePath = computed(() => route.path)

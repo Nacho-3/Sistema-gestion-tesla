@@ -24,6 +24,7 @@ import liquidacionesRoutes from "./routes/liquidaciones.js"
 import cajaRoutes from "./routes/caja.js"
 import presupuestosRoutes from "./routes/presupuestos.js"
 import certificadosRoutes from "./routes/certificados.js"
+import gastosRouter from "./routes/gastos.js"
 
 
 dotenv.config()
@@ -188,6 +189,7 @@ app.use("/liquidaciones", liquidacionesRoutes)
 app.use("/caja", cajaRoutes)
 app.use("/presupuestos", presupuestosRoutes)
 app.use("/certificados", certificadosRoutes)
+app.use("/gastos", gastosRouter)
 
 const httpServer = createServer(app)
 

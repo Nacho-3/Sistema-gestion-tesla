@@ -1754,6 +1754,312 @@ router.delete("/:id", async (req, res) => {
   }
 })
 
+// Resumen previo de importación de sueldos (separado por medio de pago)
+router.get("/importar-sueldos/resumen", async (req, res) => {
+  try {
+    const { mes, anio } = req.query
+    const mesInt = parseInt(mes)
+    const anioInt = parseInt(anio)
+
+    if (!mesInt || !anioInt || mesInt < 1 || mesInt > 12) {
+      return res.status(400).json({ error: "Faltan mes y anio válidos" })
+    }
+
+    const inicioISO = new Date(anioInt, mesInt - 1, 1).toISOString().slice(0, 10)
+    const finISO = new Date(anioInt, mesInt, 0).toISOString().slice(0, 10)
+    const periodo = `${anioInt}-${String(mesInt).padStart(2, "0")}`
+
+    const { data: liquidaciones, error: errLiq } = await db
+      .from("liquidaciones")
+      .select("id, empleado_id")
+      .gte("periodo_inicio", inicioISO)
+      .lte("periodo_fin", finISO)
+
+    if (errLiq) return res.status(500).json({ error: errLiq.message })
+
+    if (!liquidaciones || liquidaciones.length === 0) {
+      return res.json({
+        periodo,
+        empleados: [],
+        totales: { efectivo: 0, total: 0 },
+        importara_a_caja: 0,
+      })
+    }
+
+    const liquidacionIds = liquidaciones.map((l) => l.id)
+    const empleadoIds = [...new Set(liquidaciones.map((l) => l.empleado_id).filter(Boolean))]
+
+    const placeholders = liquidacionIds.map((_, i) => `$${i + 1}`).join(", ")
+    const pagosRes = await pool.query(
+      `SELECT liquidacion_id, monto, medio_pago FROM pagos_sueldo WHERE liquidacion_id IN (${placeholders})`,
+      liquidacionIds
+    )
+    const pagos = pagosRes.rows || []
+
+    const empleadosMap = new Map()
+    if (empleadoIds.length > 0) {
+      const placeholdersEmp = empleadoIds.map((_, i) => `$${i + 1}`).join(", ")
+      const empleadosRes = await pool.query(
+        `SELECT id, nombre, apellido FROM empleados WHERE id IN (${placeholdersEmp})`,
+        empleadoIds
+      )
+
+      for (const e of empleadosRes.rows || []) {
+        empleadosMap.set(e.id, e)
+      }
+    }
+
+    const liqToEmp = new Map(liquidaciones.map((l) => [l.id, l.empleado_id]))
+    const resumenPorEmpleado = new Map()
+
+    const getOrInitEmpleado = (empleadoId) => {
+      if (!resumenPorEmpleado.has(empleadoId)) {
+        const emp = empleadosMap.get(empleadoId) || {}
+        resumenPorEmpleado.set(empleadoId, {
+          empleado_id: empleadoId,
+          nombre: String(emp.nombre || ""),
+          apellido: String(emp.apellido || ""),
+          efectivo: 0,
+          total: 0,
+          pagos: 0,
+        })
+      }
+      return resumenPorEmpleado.get(empleadoId)
+    }
+
+    for (const p of pagos) {
+      const empleadoId = liqToEmp.get(p.liquidacion_id)
+      if (!empleadoId) continue
+
+      const row = getOrInitEmpleado(empleadoId)
+      const monto = parseFloat(p.monto || 0)
+      const medio = String(p.medio_pago || "").toLowerCase().trim()
+
+      if (medio !== "efectivo") continue
+      row.efectivo += monto
+      row.total += monto
+      row.pagos += 1
+    }
+
+    const empleados = Array.from(resumenPorEmpleado.values())
+      .map((r) => ({
+        ...r,
+        efectivo: roundMoney(r.efectivo),
+        total: roundMoney(r.total),
+      }))
+      .filter((r) => r.total > 0.009)
+      .sort((a, b) => {
+        const nombreA = `${a.apellido} ${a.nombre}`.trim().toLowerCase()
+        const nombreB = `${b.apellido} ${b.nombre}`.trim().toLowerCase()
+        return nombreA.localeCompare(nombreB)
+      })
+
+    const totales = empleados.reduce((acc, r) => {
+      acc.efectivo += Number(r.efectivo || 0)
+      acc.total += Number(r.total || 0)
+      return acc
+    }, { efectivo: 0, total: 0 })
+
+    res.json({
+      periodo,
+      empleados,
+      totales: {
+        efectivo: roundMoney(totales.efectivo),
+        total: roundMoney(totales.total),
+      },
+      importara_a_caja: roundMoney(totales.efectivo),
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get("/importar-sueldos/resumen/pdf", async (req, res) => {
+  try {
+    const { mes, anio } = req.query
+    const mesInt = parseInt(mes)
+    const anioInt = parseInt(anio)
+
+    if (!mesInt || !anioInt || mesInt < 1 || mesInt > 12) {
+      return res.status(400).json({ error: "Faltan mes y anio válidos" })
+    }
+
+    const inicioISO = new Date(anioInt, mesInt - 1, 1).toISOString().slice(0, 10)
+    const finISO = new Date(anioInt, mesInt, 0).toISOString().slice(0, 10)
+    const periodo = `${anioInt}-${String(mesInt).padStart(2, "0")}`
+
+    const { data: liquidaciones, error: errLiq } = await db
+      .from("liquidaciones")
+      .select("id, empleado_id")
+      .gte("periodo_inicio", inicioISO)
+      .lte("periodo_fin", finISO)
+
+    if (errLiq) return res.status(500).json({ error: errLiq.message })
+
+    const liquidacionIds = (liquidaciones || []).map((l) => l.id)
+    const empleadoIds = [...new Set((liquidaciones || []).map((l) => l.empleado_id).filter(Boolean))]
+
+    let pagos = []
+    if (liquidacionIds.length > 0) {
+      const placeholders = liquidacionIds.map((_, i) => `$${i + 1}`).join(", ")
+      const pagosRes = await pool.query(
+        `SELECT liquidacion_id, monto, medio_pago FROM pagos_sueldo WHERE liquidacion_id IN (${placeholders})`,
+        liquidacionIds
+      )
+      pagos = pagosRes.rows || []
+    }
+
+    const empleadosMap = new Map()
+    if (empleadoIds.length > 0) {
+      const placeholdersEmp = empleadoIds.map((_, i) => `$${i + 1}`).join(", ")
+      const empleadosRes = await pool.query(
+        `SELECT id, nombre, apellido FROM empleados WHERE id IN (${placeholdersEmp})`,
+        empleadoIds
+      )
+
+      for (const e of empleadosRes.rows || []) {
+        empleadosMap.set(e.id, e)
+      }
+    }
+
+    const liqToEmp = new Map((liquidaciones || []).map((l) => [l.id, l.empleado_id]))
+    const resumenPorEmpleado = new Map()
+
+    const getOrInitEmpleado = (empleadoId) => {
+      if (!resumenPorEmpleado.has(empleadoId)) {
+        const emp = empleadosMap.get(empleadoId) || {}
+        resumenPorEmpleado.set(empleadoId, {
+          empleado_id: empleadoId,
+          nombre: String(emp.nombre || ""),
+          apellido: String(emp.apellido || ""),
+          efectivo: 0,
+          total: 0,
+        })
+      }
+      return resumenPorEmpleado.get(empleadoId)
+    }
+
+    for (const p of pagos) {
+      const empleadoId = liqToEmp.get(p.liquidacion_id)
+      if (!empleadoId) continue
+
+      const row = getOrInitEmpleado(empleadoId)
+      const monto = parseFloat(p.monto || 0)
+      const medio = String(p.medio_pago || "").toLowerCase().trim()
+      if (medio !== "efectivo") continue
+      row.efectivo += monto
+      row.total += monto
+    }
+
+    const empleados = Array.from(resumenPorEmpleado.values())
+      .map((r) => ({
+        ...r,
+        efectivo: roundMoney(r.efectivo),
+        total: roundMoney(r.total),
+      }))
+      .filter((r) => r.total > 0.009)
+      .sort((a, b) => {
+        const nombreA = `${a.apellido} ${a.nombre}`.trim().toLowerCase()
+        const nombreB = `${b.apellido} ${b.nombre}`.trim().toLowerCase()
+        return nombreA.localeCompare(nombreB)
+      })
+
+    const totales = empleados.reduce((acc, r) => {
+      acc.efectivo += Number(r.efectivo || 0)
+      acc.total += Number(r.total || 0)
+      return acc
+    }, { efectivo: 0, total: 0 })
+
+    const doc = new PDFDocument({ size: "A4", margin: 45 })
+    const chunks = []
+    const pageWidth = doc.page.width
+    const fileName = `Resumen Importacion Sueldos ${periodo}.pdf`
+
+    doc.on("data", (chunk) => chunks.push(chunk))
+    doc.on("end", () => {
+      const pdfBuffer = Buffer.concat(chunks)
+      res.setHeader("Content-Type", "application/pdf")
+      res.setHeader("Content-Disposition", `attachment; filename="${sanitizeFileText(fileName)}"`)
+      res.send(pdfBuffer)
+    })
+
+    setupPremiumFooter(doc, { leftText: "Tesla Montajes Electricos - Resumen importacion sueldos" })
+
+    const headerBottom = drawPremiumHeader(doc, {
+      title: "TESLA MONTAJES ELECTRICOS",
+      subtitle: "Resumen de importacion a Caja Tesla",
+      accentText: `Periodo ${periodo}`,
+      logoPath: LOGO_PATH,
+    })
+
+    let y = headerBottom + 12
+
+    const cardW = (pageWidth - 90 - 8) / 2
+    const cardH = 44
+    const cards = [
+      { label: "Efectivo que se importa a Caja", value: formatoMoneda(totales.efectivo) },
+      { label: "Total pagado", value: formatoMoneda(totales.total) },
+    ]
+
+    cards.forEach((card, idx) => {
+      const x = 45 + idx * (cardW + 8)
+      doc.rect(x, y, cardW, cardH).lineWidth(0.8).strokeColor(PDF_COLORS.line).stroke()
+      doc.font("Helvetica").fontSize(8.2).fillColor(PDF_COLORS.slate).text(card.label, x + 8, y + 6)
+      doc.font("Helvetica-Bold").fontSize(10.5).fillColor(PDF_COLORS.ink).text(card.value, x + 8, y + 20)
+    })
+    y += cardH + 14
+
+    doc.strokeColor(PDF_COLORS.line).lineWidth(0.7).moveTo(45, y + 11).lineTo(pageWidth - 45, y + 11).stroke()
+    doc.fillColor(PDF_COLORS.ink).font("Helvetica-Bold").fontSize(10.2).text("DETALLE POR EMPLEADO", 52, y)
+    y += 22
+
+    const rowH = 20
+    const xEmp = 50
+    const xEf = pageWidth - 250
+    const xTot = pageWidth - 145
+    const moneyColW = 95
+
+    doc.rect(45, y, pageWidth - 90, rowH).lineWidth(0.8).strokeColor(PDF_COLORS.line).stroke()
+    doc.font("Helvetica-Bold").fontSize(8.5).fillColor(PDF_COLORS.ink)
+    doc.text("Empleado", xEmp, y + 6)
+    doc.text("Efectivo", xEf, y + 6, { width: moneyColW, align: "right" })
+    doc.text("Total", xTot, y + 6, { width: moneyColW, align: "right" })
+    y += rowH
+
+    if (empleados.length === 0) {
+      doc.rect(45, y, pageWidth - 90, rowH).lineWidth(0.5).strokeColor(PDF_COLORS.line).stroke()
+      doc.font("Helvetica").fontSize(9).fillColor(PDF_COLORS.slate)
+      doc.text("Sin pagos registrados en este periodo", 52, y + 6)
+      y += rowH
+    } else {
+      empleados.forEach((emp, idx) => {
+        if (y > doc.page.height - doc.page.margins.bottom - 95) {
+          doc.addPage()
+          y = 62
+        }
+
+        const nombre = `${emp.apellido || ""} ${emp.nombre || ""}`.trim() || `Empleado ${emp.empleado_id}`
+        const bg = idx % 2 === 0 ? PDF_COLORS.light : PDF_COLORS.lightAlt
+        doc.rect(45, y, pageWidth - 90, rowH).fill(bg)
+        doc.rect(45, y, pageWidth - 90, rowH).lineWidth(0.4).strokeColor(PDF_COLORS.line).stroke()
+        doc.font("Helvetica").fontSize(8.8).fillColor(PDF_COLORS.ink)
+        doc.text(nombre, xEmp, y + 6, { width: 290 })
+        doc.text(formatoMoneda(emp.efectivo), xEf, y + 6, { width: moneyColW, align: "right" })
+        doc.text(formatoMoneda(emp.total), xTot, y + 6, { width: moneyColW, align: "right" })
+        y += rowH
+      })
+    }
+
+    y += 12
+    doc.font("Helvetica-Bold").fontSize(9.5).fillColor(PDF_COLORS.ink)
+    doc.text(`Se importa a Caja Tesla solo efectivo: ${formatoMoneda(totales.efectivo)}`, 52, y)
+
+    doc.end()
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // Consultar estado de importación de sueldos del período
 router.get("/importar-sueldos/estado", async (req, res) => {
   try {
@@ -1768,6 +2074,8 @@ router.get("/importar-sueldos/estado", async (req, res) => {
     const inicioISO = new Date(anioInt, mesInt - 1, 1).toISOString().slice(0, 10)
     const finISO = new Date(anioInt, mesInt, 0).toISOString().slice(0, 10)
     const periodo = `${anioInt}-${String(mesInt).padStart(2, "0")}`
+    const fechaImportacion = new Date().toISOString().slice(0, 10)
+    const semanaActualTesla = await asegurarCajaSemanal("tesla", fechaImportacion)
 
     // Obtener liquidaciones del período
     const { data: liquidaciones } = await db
@@ -1853,6 +2161,8 @@ router.post("/importar-sueldos", async (req, res) => {
     const inicioISO = new Date(anioInt, mesInt - 1, 1).toISOString().slice(0, 10)
     const finISO = new Date(anioInt, mesInt, 0).toISOString().slice(0, 10)
     const periodo = `${anioInt}-${String(mesInt).padStart(2, "0")}`
+    const fechaImportacion = new Date().toISOString().slice(0, 10)
+    const semanaActualTesla = await asegurarCajaSemanal("tesla", fechaImportacion)
 
     // Obtener liquidaciones del período
     const { data: liquidaciones, error: errLiq } = await db
@@ -1895,10 +2205,9 @@ router.post("/importar-sueldos", async (req, res) => {
 
     const [detallesSchema, detalleColumn] = await Promise.all([getDetallesSchema(), getDetalleColumn()])
 
-    // Procesar cada bucket (efectivo / transferencia) de forma independiente
+    // Solo se importa efectivo — los depósitos no pasan por la caja
     const buckets = [
-      { medio: "efectivo",      monto: montoEfectivo,      label: "Efectivo" },
-      { medio: "transferencia", monto: montoTransferencia, label: "Depósito" },
+      { medio: "efectivo", monto: montoEfectivo, label: "Efectivo" },
     ].filter((b) => b.monto > 0.009)
 
     const resultados = []
@@ -1934,8 +2243,11 @@ router.post("/importar-sueldos", async (req, res) => {
         const montoExistente = parseFloat(existente.monto_total || 0)
         const mismoMonto = Math.abs(montoExistente - bucket.monto) < 0.01
         const tieneObsVieja = existente.observaciones && existente.observaciones.trim() !== ""
+        const semanaExistenteId = Number(existente.caja_semanal_id || 0)
+        const semanaActualId = Number(semanaActualTesla?.id || 0)
+        const necesitaReasignarSemana = semanaExistenteId !== semanaActualId
 
-        if (mismoMonto && !tieneObsVieja) {
+        if (mismoMonto && !tieneObsVieja && !necesitaReasignarSemana) {
           resultados.push({ medio: bucket.medio, status: "sin_cambios", monto: bucket.monto })
           continue
         }
@@ -1943,7 +2255,7 @@ router.post("/importar-sueldos", async (req, res) => {
         // Actualizar monto y/o limpiar observación vieja
         const { error: errUpdate } = await db
           .from("movimientos_caja")
-          .update({ monto_total: bucket.monto, observaciones: null })
+          .update({ monto_total: bucket.monto, observaciones: null, fecha: fechaImportacion })
           .eq("id", existente.id)
 
         if (errUpdate) return res.status(500).json({ error: errUpdate.message })
@@ -1951,11 +2263,18 @@ router.post("/importar-sueldos", async (req, res) => {
         await db.from("detalles_medio_pago").delete().eq("movimiento_id", existente.id)
         await insertarDetalle(existente.id)
 
-        if (existente.caja_semanal_id) {
-          try { await recalcularCajaSemanal(existente.caja_semanal_id) } catch (_) { /* no fatal */ }
+        const cajaSemanalAnteriorId = existente.caja_semanal_id
+        try {
+          await asignarCajaSemanalAMovimiento({ movimientoId: existente.id, fecha: fechaImportacion, caja_codigo: "tesla" })
+        } catch (errSemana) {
+          return res.status(400).json({ error: `No se pudo asignar el movimiento a la semana actual de Caja Tesla: ${errSemana.message}` })
         }
 
-        resultados.push({ medio: bucket.medio, status: mismoMonto ? "sin_cambios" : "actualizado", montoAnterior: montoExistente, montoNuevo: bucket.monto })
+        if (cajaSemanalAnteriorId && String(cajaSemanalAnteriorId) !== String(semanaActualTesla?.id || "")) {
+          try { await recalcularCajaSemanal(cajaSemanalAnteriorId) } catch (_) { /* no fatal */ }
+        }
+
+        resultados.push({ medio: bucket.medio, status: (mismoMonto && !tieneObsVieja) ? "sin_cambios" : "actualizado", montoAnterior: montoExistente, montoNuevo: bucket.monto })
         continue
       }
 
@@ -1963,7 +2282,7 @@ router.post("/importar-sueldos", async (req, res) => {
       const { data: movimiento, error: errMov } = await db
         .from("movimientos_caja")
         .insert([{
-          fecha: finISO,
+          fecha: fechaImportacion,
           caja_codigo: "tesla",
           tipo: "egreso",
           [detalleColumn]: detalleValor,
@@ -1986,9 +2305,11 @@ router.post("/importar-sueldos", async (req, res) => {
       }
 
       try {
-        await asignarCajaSemanalAMovimiento({ movimientoId, fecha: finISO, caja_codigo: "tesla" })
+        await asignarCajaSemanalAMovimiento({ movimientoId, fecha: fechaImportacion, caja_codigo: "tesla" })
       } catch (errSemana) {
-        console.warn(`[importar-sueldos] No se pudo asignar semana (${bucket.medio}): ${errSemana.message}`)
+        await db.from("detalles_medio_pago").delete().eq("movimiento_id", movimientoId)
+        await db.from("movimientos_caja").delete().eq("id", movimientoId)
+        return res.status(400).json({ error: `No se pudo asignar el movimiento a la semana actual de Caja Tesla: ${errSemana.message}` })
       }
 
       resultados.push({ medio: bucket.medio, status: "creado", monto: bucket.monto })

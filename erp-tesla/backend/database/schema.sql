@@ -1,6 +1,14 @@
 -- MIGRACIÓN SEGURA: saldo_banco en cajas_semanales
 ALTER TABLE IF EXISTS cajas_semanales ADD COLUMN IF NOT EXISTS saldo_banco NUMERIC(12,2);
 ALTER TABLE IF EXISTS cajas_semanales ADD COLUMN IF NOT EXISTS saldo_pendiente_echeq NUMERIC(12,2);
+
+-- MIGRACIÓN SEGURA: detalle en pagos_sueldo y reajuste_porcentaje en liquidaciones
+ALTER TABLE IF EXISTS pagos_sueldo ADD COLUMN IF NOT EXISTS detalle TEXT DEFAULT '';
+ALTER TABLE IF EXISTS liquidaciones ADD COLUMN IF NOT EXISTS reajuste_porcentaje NUMERIC(6,2) DEFAULT 0;
+
+-- MIGRACIÓN SEGURA: dias_enfermedad en liquidaciones
+ALTER TABLE IF EXISTS liquidaciones ADD COLUMN IF NOT EXISTS dias_enfermedad NUMERIC(12,2) DEFAULT 0;
+ALTER TABLE IF EXISTS liquidaciones ADD COLUMN IF NOT EXISTS importe_enfermedad NUMERIC(12,2) DEFAULT 0;
 -- ERP Tesla - Schema PostgreSQL local
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -432,6 +440,19 @@ CREATE TABLE IF NOT EXISTS movimientos_caja (
   ),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS gastos (
+  id SERIAL PRIMARY KEY,
+  tipo VARCHAR(20) NOT NULL CHECK (tipo IN ('tesla', 'facu', 'juani')),
+  mes INTEGER NOT NULL CHECK (mes BETWEEN 1 AND 12),
+  anio INTEGER NOT NULL,
+  descripcion TEXT NOT NULL,
+  iva_impuesto NUMERIC(12,2) DEFAULT 0,
+  subtotal NUMERIC(12,2) DEFAULT 0,
+  total NUMERIC(12,2) DEFAULT 0,
+  pago_tesla NUMERIC(12,2) DEFAULT 0,
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 ALTER TABLE IF EXISTS movimientos_caja

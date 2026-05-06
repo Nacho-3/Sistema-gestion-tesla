@@ -237,6 +237,13 @@ export default {
     return api.get(`/horas/resumen/prestadas?${params.toString()}`)
   },
 
+  getResumenPrestadasPdf(mes, anio) {
+    const params = new URLSearchParams()
+    if (mes) params.append("mes", mes)
+    if (anio) params.append("anio", anio)
+    return api.get(`/horas/resumen/prestadas/pdf?${params.toString()}`, { responseType: "blob" })
+  },
+
   getResumenHorasPdf(mes, anio) {
     const params = new URLSearchParams()
     if (mes) params.append("mes", mes)
@@ -324,6 +331,14 @@ export default {
     return api.post("/caja/importar-sueldos", { mes, anio })
   },
 
+  getResumenImportacionSueldos(mes, anio) {
+    return api.get("/caja/importar-sueldos/resumen", { params: { mes, anio } })
+  },
+
+  getResumenImportacionSueldosPdf(mes, anio) {
+    return api.get("/caja/importar-sueldos/resumen/pdf", { params: { mes, anio }, responseType: "blob" })
+  },
+
   getEstadoImportacionSueldos(mes, anio) {
     return api.get("/caja/importar-sueldos/estado", { params: { mes, anio } })
   },
@@ -404,5 +419,25 @@ export default {
 
   updateCertificado(id, payload) {
     return api.put(`/certificados/${id}`, payload)
-  }
+  },
+
+  //gastos
+
+  getGastos: (tipo, mes, anio) =>
+    api.get("/gastos", { params: { tipo, mes, anio } }),
+
+  getGastosResumenPdf: (mes, anio, tipos) =>
+    api.get("/gastos/resumen/pdf", {
+      params: { mes, anio, tipos: Array.isArray(tipos) ? tipos.join(",") : tipos },
+      responseType: "blob"
+    }),
+
+  createGasto: (data) =>
+    api.post("/gastos", data),
+
+  updateGasto: (id, data) =>
+    api.put(`/gastos/${id}`, data),
+
+  deleteGasto: (id) =>
+    api.delete(`/gastos/${id}`),
 }

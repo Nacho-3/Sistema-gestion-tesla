@@ -11,6 +11,7 @@ import Caja from "./views/Caja.vue"
 import Presupuestos from "./views/Presupuestos.vue"
 import Certificados from "./views/Certificados.vue"
 import Facturas from "./views/Facturas.vue"
+
 import { hasStoredSession } from "./session"
 
 const routes = [
@@ -25,7 +26,8 @@ const routes = [
   { path: "/caja", component: Caja },
   { path: "/presupuestos", component: Presupuestos },
   { path: "/certificados", component: Certificados },
-  { path: "/facturas", component: Facturas }
+  { path: "/facturas", component: Facturas },
+  { path: "/gastos", component: () => import("./views/Gastos.vue") }
 ]
 
 const router = createRouter({

@@ -296,7 +296,7 @@ const renderPresupuestoPdfBuffer = async (presupuesto) => {
 			doc.on("data", (chunk) => chunks.push(chunk))
 			doc.on("end", async () => {
 				let buffer = Buffer.concat(chunks)
-				buffer = await removeBlankPagesFromBuffer(buffer)
+				//buffer = await removeBlankPagesFromBuffer(buffer)
 				resolve(buffer)
 			})
 			doc.on("error", reject)
@@ -553,13 +553,6 @@ const renderPresupuestoPdfBuffer = async (presupuesto) => {
 
 				y += infoBoxH + 8
 			}
-
-			const firmaY = doc.page.height - 84
-			const firmaWidth = 160
-			const firmaX = left + (width - firmaWidth) / 2
-			doc.strokeColor("#5a5a5a").lineWidth(0.6).moveTo(firmaX, firmaY).lineTo(firmaX + firmaWidth, firmaY).stroke()
-			doc.font("Helvetica").fontSize(7.4).fillColor(muted)
-			doc.text("Firma cliente", firmaX, firmaY + 3, { width: firmaWidth, align: "center" })
 
 			doc.strokeColor(lineColor).lineWidth(0.8).moveTo(left, doc.page.height - 62).lineTo(right, doc.page.height - 62).stroke()
 			doc.font("Helvetica").fontSize(7.8).fillColor(muted)
