@@ -1,0 +1,32 @@
+{"level":"info","ts":1778758478.875687,"msg":"maxprocs: Leaving GOMAXPROCS=12: CPU quota undefined"}
+{"level":"info","ts":1778758478.875687,"msg":"GOMEMLIMIT is updated","GOMEMLIMIT":14878232985,"previous":9223372036854775807}
+{"level":"info","ts":1778758478.875687,"msg":"using config from file","file":".\\\\Caddyfile"}
+{"level":"info","ts":1778758478.875687,"msg":"adapted config to JSON","adapter":"caddyfile"}
+{"level":"warn","ts":1778758478.875687,"logger":"admin","msg":"admin endpoint disabled"}
+{"level":"info","ts":1778758478.875687,"logger":"tls.cache.maintenance","msg":"started background certificate maintenance","cache":"0xeed7f923000"}
+{"level":"info","ts":1778758478.89396,"logger":"http.auto_https","msg":"server is listening only on the HTTPS port but has no TLS connection policies; adding one to enable TLS","server_name":"srv0","https_port":443}
+{"level":"info","ts":1778758478.89396,"logger":"http.auto_https","msg":"enabling automatic HTTP->HTTPS redirects","server_name":"srv0"}
+{"level":"warn","ts":1778758478.8964658,"logger":"http","msg":"HTTP/2 skipped because it requires TLS","network":"tcp","addr":":80"}
+{"level":"warn","ts":1778758478.8964658,"logger":"http","msg":"HTTP/3 skipped because it requires TLS","network":"tcp","addr":":80"}
+{"level":"info","ts":1778758478.8964658,"logger":"http.log","msg":"server running","name":"remaining_auto_https_redirects","protocols":["h1","h2","h3"]}
+{"level":"info","ts":1778758478.8964658,"logger":"http","msg":"enabling HTTP/3 listener","addr":":443"}
+{"level":"info","ts":1778758478.8969958,"logger":"http.log","msg":"server running","name":"srv0","protocols":["h1","h2","h3"]}
+{"level":"info","ts":1778758478.8969958,"logger":"http","msg":"enabling automatic TLS certificate management","domains":["erp.tesla.local"]}
+{"level":"info","ts":1778758478.9007215,"logger":"tls","msg":"cleaning storage unit","storage":"FileStorage:C:\\WINDOWS\\system32\\config\\systemprofile\\AppData\\Roaming\\Caddy"}
+{"level":"info","ts":1778758478.9038842,"logger":"tls","msg":"finished cleaning storage units"}
+{"level":"info","ts":1778758478.9054654,"logger":"tls.obtain","msg":"acquiring lock","identifier":"erp.tesla.local"}
+{"level":"info","ts":1778758478.9070656,"logger":"tls.obtain","msg":"lock acquired","identifier":"erp.tesla.local"}
+{"level":"info","ts":1778758478.9070656,"logger":"tls.obtain","msg":"obtaining certificate","identifier":"erp.tesla.local"}
+{"level":"warn","ts":1778758478.910819,"logger":"pki.ca.local","msg":"installing root certificate (you might be prompted for password)","path":"storage:pki/authorities/local/root.crt"}
+{"level":"info","ts":1778758478.9113464,"msg":"note: NSS support is not available on your platform"}
+{"level":"info","ts":1778758478.9113464,"msg":"define JAVA_HOME environment variable to use the Java trust"}
+{"level":"error","ts":1778758478.9134638,"logger":"pki.ca.local","msg":"failed to install root certificate","error":"add cert failed: Failed adding cert: The request is not supported.","certificate_file":"storage:pki/authorities/local/root.crt"}
+{"level":"info","ts":1778758478.9139953,"msg":"autosaved config (load with --resume flag)","file":"C:\\WINDOWS\\system32\\config\\systemprofile\\AppData\\Roaming\\Caddy\\autosave.json"}
+{"level":"info","ts":1778758478.9139953,"msg":"serving initial configuration"}
+{"level":"info","ts":1778758478.9181876,"logger":"tls.obtain","msg":"certificate obtained successfully","identifier":"erp.tesla.local","issuer":"local"}
+{"level":"info","ts":1778758478.9181876,"logger":"tls.obtain","msg":"releasing lock","identifier":"erp.tesla.local"}
+{"level":"warn","ts":1778758478.9223676,"logger":"tls","msg":"stapling OCSP","identifiers":["erp.tesla.local"]}
+{"level":"info","ts":1778758832.188084,"msg":"shutting down","signal":"SIGINT"}
+{"level":"warn","ts":1778758832.188084,"msg":"exiting; byeee!! 👋","signal":"SIGINT"}
+{"level":"info","ts":1778758832.188084,"logger":"http","msg":"servers shutting down with eternal grace period"}
+{"level":"info","ts":1778758832.1891074,"msg":"shutdown complete","signal":"SIGINT","exit_code":0}

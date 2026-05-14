@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed } from "vue"
+import { ref, onMounted, onUnmounted, computed, watch } from "vue"
 import { useRouter } from "vue-router"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
@@ -9,6 +9,7 @@ const router = useRouter()
 const presupuestos = ref([])
 const clientes = ref([])
 const obras = ref([])
+const indicesCac = ref([])
 const loading = ref(false)
 const saving = ref(false)
 const error = ref("")
@@ -31,28 +32,40 @@ const ESTADOS_PRESUPUESTO = [
   { key: "rechazado", label: "Rechazados", description: "Propuestas descartadas o no aprobadas." },
 ]
 
-const newMaterialItem = () => ({ uid: Date.now() + Math.random(), descripcion: "", cantidad: 1, precio_unitario: 0, ganancia_porcentaje: 0 })
-const newManoObraItem = () => ({ uid: Date.now() + Math.random(), descripcion: "" })
+const newMaterialItem = (etapaUid = null) => ({ uid: Date.now() + Math.random(), etapa_uid: etapaUid, descripcion: "", cantidad: 1, precio_unitario: 0, ganancia_porcentaje: 0 })
+const newManoObraItem = (etapaUid = null) => ({ uid: Date.now() + Math.random(), etapa_uid: etapaUid, descripcion: "" })
+const newEtapa = (titulo = "") => ({ uid: Date.now() + Math.random(), titulo })
 const newInfoInternaItem = () => ({ uid: Date.now() + Math.random(), descripcion: "", mostrar_en_pdf: false })
 
-const form = ref({
-  cliente_id: "",
-  obra_id: "",
-  fecha: new Date().toISOString().slice(0, 10),
-  validez_dias: 15,
-  forma_pago: "Contado",
-  aplica_iva: true,
-  iva_porcentaje: 21,
-  subtotal_general_mano_obra: 0,
-  observaciones: "",
-  items_materiales: [newMaterialItem()],
-  items_mano_obra: [newManoObraItem()],
-  info_interna_quien_hizo: "",
-  info_interna_quien_hizo_pdf: false,
-  info_interna_quien_aprobo: "",
-  info_interna_quien_aprobo_pdf: false,
-  items_info_interna: [],
-})
+const createEmptyForm = () => {
+  return {
+    cliente_id: "",
+    obra_id: "",
+    proyecto: "",
+    fecha: new Date().toISOString().slice(0, 10),
+    validez_dias: 15,
+    forma_pago: "Contado",
+    aplica_iva: true,
+    aplica_iva_mano_obra: false,
+    iva_porcentaje: 21,
+    subtotal_general_mano_obra: 0,
+    observaciones: "",
+    mostrar_mano_obra_pdf: true,
+    mostrar_materiales_pdf: true,
+    etapas_materiales: [],
+    etapas_mano_obra: [],
+    items_materiales: [newMaterialItem(null)],
+    items_mano_obra: [newManoObraItem(null)],
+    info_interna_quien_hizo: "",
+    info_interna_quien_hizo_pdf: false,
+    info_interna_quien_aprobo: "",
+    info_interna_quien_aprobo_pdf: false,
+    items_info_interna: [],
+    indice_cac_base_id: null,
+  }
+}
+
+const form = ref(createEmptyForm())
 
 const obrasDelCliente = computed(() => {
   if (!form.value.cliente_id) return []
@@ -103,8 +116,11 @@ const subtotalManoObra = computed(() =>
 )
 
 const ivaMonto = computed(() => {
-  if (!form.value.aplica_iva) return 0
-  return subtotalMateriales.value * ((Number(form.value.iva_porcentaje) || 0) / 100)
+  const baseIva =
+    (form.value.aplica_iva ? subtotalMateriales.value : 0)
+    + (form.value.aplica_iva_mano_obra ? subtotalManoObra.value : 0)
+  if (!(baseIva > 0)) return 0
+  return baseIva * ((Number(form.value.iva_porcentaje) || 0) / 100)
 })
 
 const total = computed(() => subtotalMateriales.value + subtotalManoObra.value + ivaMonto.value)
@@ -239,8 +255,9 @@ const getObraNombre = (id) => {
   return o ? o.nombre : "-"
 }
 
-const addMaterialRow = () => {
-  form.value.items_materiales.push(newMaterialItem())
+const addMaterialRow = (etapaUid = null) => {
+  const etapaObjetivo = etapaUid || form.value.etapas_materiales[form.value.etapas_materiales.length - 1]?.uid || null
+  form.value.items_materiales.push(newMaterialItem(etapaObjetivo))
 }
 
 const removeMaterialRow = (uid) => {
@@ -248,13 +265,87 @@ const removeMaterialRow = (uid) => {
   form.value.items_materiales = form.value.items_materiales.filter((item) => item.uid !== uid)
 }
 
-const addManoObraRow = () => {
-  form.value.items_mano_obra.push(newManoObraItem())
+const addManoObraRow = (etapaUid = null) => {
+  const etapaObjetivo = etapaUid || form.value.etapas_mano_obra[form.value.etapas_mano_obra.length - 1]?.uid || null
+  form.value.items_mano_obra.push(newManoObraItem(etapaObjetivo))
 }
 
 const removeManoObraRow = (uid) => {
   if (form.value.items_mano_obra.length === 1) return
   form.value.items_mano_obra = form.value.items_mano_obra.filter((item) => item.uid !== uid)
+}
+
+const addEtapaMaterial = () => {
+  const etapa = newEtapa(`ETAPA ${form.value.etapas_materiales.length + 1}`)
+  form.value.etapas_materiales.push(etapa)
+  form.value.items_materiales.push(newMaterialItem(etapa.uid))
+}
+
+const removeEtapaMaterial = (etapaUid) => {
+  const etapaIndex = form.value.etapas_materiales.findIndex((etapa) => etapa.uid === etapaUid)
+  if (etapaIndex < 0) return
+
+  const etiqueta = String(form.value.etapas_materiales[etapaIndex]?.titulo || `ETAPA ${etapaIndex + 1}`).trim()
+  const confirmar = window.confirm(`¿Borrar ${etiqueta}? Los items de esta etapa pasarán a la sección sin etapa.`)
+  if (!confirmar) return
+
+  form.value.items_materiales = form.value.items_materiales.map((item) => (
+    item.etapa_uid === etapaUid ? { ...item, etapa_uid: null } : item
+  ))
+  form.value.etapas_materiales = form.value.etapas_materiales.filter((etapa) => etapa.uid !== etapaUid)
+}
+
+const addEtapaManoObra = () => {
+  const etapa = newEtapa(`ETAPA ${form.value.etapas_mano_obra.length + 1}`)
+  form.value.etapas_mano_obra.push(etapa)
+  form.value.items_mano_obra.push(newManoObraItem(etapa.uid))
+}
+
+const removeEtapaManoObra = (etapaUid) => {
+  const etapaIndex = form.value.etapas_mano_obra.findIndex((etapa) => etapa.uid === etapaUid)
+  if (etapaIndex < 0) return
+
+  const etiqueta = String(form.value.etapas_mano_obra[etapaIndex]?.titulo || `ETAPA ${etapaIndex + 1}`).trim()
+  const confirmar = window.confirm(`¿Borrar ${etiqueta}? Los items de esta etapa pasarán a la sección sin etapa.`)
+  if (!confirmar) return
+
+  form.value.items_mano_obra = form.value.items_mano_obra.map((item) => (
+    item.etapa_uid === etapaUid ? { ...item, etapa_uid: null } : item
+  ))
+  form.value.etapas_mano_obra = form.value.etapas_mano_obra.filter((etapa) => etapa.uid !== etapaUid)
+}
+
+const getItemsMaterialesPorEtapa = (etapaUid) => {
+  return form.value.items_materiales.filter((item) => item.etapa_uid === etapaUid)
+}
+
+const getItemsManoObraPorEtapa = (etapaUid) => {
+  return form.value.items_mano_obra.filter((item) => item.etapa_uid === etapaUid)
+}
+
+const getEtapaLabelByUid = (etapaUid, etapas = []) => {
+  if (!etapaUid) return ""
+  const index = etapas.findIndex((etapa) => etapa.uid === etapaUid)
+  if (index < 0) return ""
+  const titulo = String(etapas[index]?.titulo || "").trim()
+  return titulo || `ETAPA ${index + 1}`
+}
+
+const buildEtapasDesdeItems = (items = []) => {
+  const grupos = []
+  const mapa = new Map()
+
+  ;(items || []).forEach((item) => {
+    const etapaTexto = String(item?.etapa || "").trim()
+    if (!etapaTexto) return
+    if (!mapa.has(etapaTexto)) {
+      const etapa = newEtapa(etapaTexto)
+      mapa.set(etapaTexto, etapa)
+      grupos.push(etapa)
+    }
+  })
+
+  return { grupos, mapa }
 }
 
 const addInfoInternaRow = () => {
@@ -268,24 +359,7 @@ const removeInfoInternaRow = (uid) => {
 const resetForm = () => {
   editingId.value = null
   editingNumero.value = null
-  form.value = {
-    cliente_id: "",
-    obra_id: "",
-    fecha: new Date().toISOString().slice(0, 10),
-    validez_dias: 15,
-    forma_pago: "Contado",
-    aplica_iva: true,
-    iva_porcentaje: 21,
-    subtotal_general_mano_obra: 0,
-    observaciones: "",
-    items_materiales: [newMaterialItem()],
-    items_mano_obra: [newManoObraItem()],
-    info_interna_quien_hizo: "",
-    info_interna_quien_hizo_pdf: false,
-    info_interna_quien_aprobo: "",
-    info_interna_quien_aprobo_pdf: false,
-    items_info_interna: [],
-  }
+  form.value = createEmptyForm()
 }
 
 const loadData = async () => {
@@ -329,36 +403,47 @@ const editPresupuesto = async (id) => {
     const { data } = await api.getPresupuesto(id)
     const materiales = (data?.items || []).filter((item) => item.tipo === "material")
     const manoObra = (data?.items || []).filter((item) => item.tipo === "mano_obra")
+    const { grupos: etapasMateriales, mapa: mapaEtapasMateriales } = buildEtapasDesdeItems(materiales)
+    const { grupos: etapasManoObra, mapa: mapaEtapasManoObra } = buildEtapasDesdeItems(manoObra)
 
     editingId.value = data.id
     editingNumero.value = data.numero
     form.value = {
       cliente_id: data.cliente_id || "",
       obra_id: data.obra_id || "",
+      proyecto: data.proyecto || "",
       fecha: data.fecha ? String(data.fecha).slice(0, 10) : new Date().toISOString().slice(0, 10),
       validez_dias: Number(data.validez_dias) || 15,
       forma_pago: data.forma_pago || "Contado",
-      aplica_iva: Number(data.iva_monto || 0) > 0,
+      aplica_iva: Boolean(data.aplica_iva_materiales ?? (Number(data.iva_monto || 0) > 0 && Number(data.subtotal_materiales || 0) > 0)),
+      aplica_iva_mano_obra: Boolean(data.aplica_iva_mano_obra),
       iva_porcentaje: Number(data.iva_porcentaje) || 21,
       subtotal_general_mano_obra: Number(data.subtotal_mano_obra) || 0,
       observaciones: data.observaciones || "",
+      mostrar_mano_obra_pdf: Boolean(data.mostrar_mano_obra_pdf ?? true),
+      mostrar_materiales_pdf: Boolean(data.mostrar_materiales_pdf ?? true),
+      etapas_materiales: etapasMateriales,
+      etapas_mano_obra: etapasManoObra,
       items_materiales: materiales.length
         ? materiales.map((item) => ({
             uid: Date.now() + Math.random(),
+            etapa_uid: (mapaEtapasMateriales.get(String(item.etapa || "").trim()) || null)?.uid || null,
             descripcion: item.descripcion || "",
             cantidad: Number(item.cantidad) || 0,
             ganancia_porcentaje: Math.max(0, Number(item.ganancia_porcentaje) || 0),
-            precio_unitario:
-              (Number(item.precio_unitario) || 0) /
-              (1 + Math.max(0, Number(item.ganancia_porcentaje) || 0) / 100),
+            precio_unitario: Math.round(
+              ((Number(item.precio_unitario) || 0) /
+              (1 + Math.max(0, Number(item.ganancia_porcentaje) || 0) / 100)) * 100
+            ) / 100,
           }))
-        : [newMaterialItem()],
+        : [newMaterialItem(null)],
       items_mano_obra: manoObra.length
         ? manoObra.map((item) => ({
             uid: Date.now() + Math.random(),
+            etapa_uid: (mapaEtapasManoObra.get(String(item.etapa || "").trim()) || null)?.uid || null,
             descripcion: item.descripcion || "",
           }))
-        : [newManoObraItem()],
+        : [newManoObraItem(null)],
       info_interna_quien_hizo: data.info_interna_quien_hizo || "",
       info_interna_quien_hizo_pdf: Boolean(data.info_interna_quien_hizo_pdf),
       info_interna_quien_aprobo: data.info_interna_quien_aprobo || "",
@@ -370,6 +455,7 @@ const editPresupuesto = async (id) => {
             mostrar_en_pdf: Boolean(item.mostrar_en_pdf),
           }))
         : [],
+      indice_cac_base_id: data.indice_cac_base_id || null,
     }
 
     showForm.value = true
@@ -408,20 +494,26 @@ const savePresupuesto = async () => {
   const payload = {
     cliente_id: Number(form.value.cliente_id),
     obra_id: Number(form.value.obra_id),
+    proyecto: String(form.value.proyecto || "").trim(),
     fecha: form.value.fecha,
     validez_dias: Number(form.value.validez_dias) || 15,
     forma_pago: form.value.forma_pago,
     aplica_iva: Boolean(form.value.aplica_iva),
+    aplica_iva_mano_obra: Boolean(form.value.aplica_iva_mano_obra),
     iva_porcentaje: Number(form.value.iva_porcentaje) || 0,
     subtotal_general_mano_obra: Number(form.value.subtotal_general_mano_obra) || 0,
     observaciones: form.value.observaciones,
+    mostrar_mano_obra_pdf: Boolean(form.value.mostrar_mano_obra_pdf),
+    mostrar_materiales_pdf: Boolean(form.value.mostrar_materiales_pdf),
     items_materiales: form.value.items_materiales.map((item) => ({
+      etapa: getEtapaLabelByUid(item.etapa_uid, form.value.etapas_materiales),
       descripcion: String(item.descripcion || "").trim(),
       cantidad: Number(item.cantidad) || 0,
       ganancia_porcentaje: Math.max(0, Number(item.ganancia_porcentaje) || 0),
       precio_unitario: Number(item.precio_unitario) || 0,
     })),
     items_mano_obra: form.value.items_mano_obra.map((item) => ({
+      etapa: getEtapaLabelByUid(item.etapa_uid, form.value.etapas_mano_obra),
       descripcion: String(item.descripcion || "").trim(),
       cantidad: 1,
       precio_unitario: 0,
@@ -434,6 +526,7 @@ const savePresupuesto = async () => {
       descripcion: String(item.descripcion || "").trim(),
       mostrar_en_pdf: Boolean(item.mostrar_en_pdf),
     })),
+    indice_cac_base_id: form.value.indice_cac_base_id ? Number(form.value.indice_cac_base_id) : null,
   }
 
   saving.value = true
@@ -465,11 +558,18 @@ const descargarPdfBlob = async (id) => {
   return new Blob([res.data], { type: "application/pdf" })
 }
 
-const triggerBlobDownload = (blob, numero) => {
+const descargarPdfMaterialesBlob = async (id) => {
+  const res = await api.getPresupuestoMaterialesPdf(id)
+  return new Blob([res.data], { type: "application/pdf" })
+}
+
+const triggerBlobDownload = (blob, numero, mode = "presupuesto") => {
   const url = window.URL.createObjectURL(blob)
   const a = document.createElement("a")
   a.href = url
-  a.download = `Presupuesto-${numero}.pdf`
+  a.download = mode === "materiales"
+    ? `Listado-Materiales-${numero}.pdf`
+    : `Presupuesto-${numero}.pdf`
   document.body.appendChild(a)
   a.click()
   a.remove()
@@ -514,7 +614,19 @@ const descargarPdf = async (id, numero) => {
   ok.value = ""
   try {
     const blob = await descargarPdfBlob(id)
-    triggerBlobDownload(blob, numero)
+    triggerBlobDownload(blob, numero, "presupuesto")
+  } catch (err) {
+    error.value = "No se pudo descargar el PDF"
+    console.error(err)
+  }
+}
+
+const descargarPdfMateriales = async (id, numero) => {
+  error.value = ""
+  ok.value = ""
+  try {
+    const blob = await descargarPdfMaterialesBlob(id)
+    triggerBlobDownload(blob, numero, "materiales")
   } catch (err) {
     error.value = "No se pudo descargar el PDF"
     console.error(err)
@@ -551,6 +663,10 @@ const eliminarPresupuesto = async () => {
 
 onMounted(async () => {
   await loadData()
+  try {
+    const res = await api.getIndicesCac()
+    indicesCac.value = res.data
+  } catch (_) { /* no bloquear */ }
   socket.on('presupuestos:changed', loadData)
 })
 onUnmounted(() => {
@@ -721,6 +837,7 @@ onUnmounted(() => {
                   </button>
                   <button type="button" class="btn-chip btn-chip-edit" @click="editPresupuesto(p.id)">Editar</button>
                   <button type="button" class="btn-chip btn-chip-download" @click="descargarPdf(p.id, p.numero)">Descargar</button>
+                  <button type="button" class="btn-chip btn-chip-materiales" @click="descargarPdfMateriales(p.id, p.numero)">Materiales PDF</button>
                   <button type="button" class="btn-chip btn-chip-whatsapp" @click="enviarWhatsapp(p)">WhatsApp</button>
                   <button type="button" class="btn-chip btn-chip-delete" @click="openDeleteConfirm(p)">Eliminar</button>
                 </div>
@@ -787,6 +904,11 @@ onUnmounted(() => {
                 </div>
 
                 <div class="field-card">
+                  <label>Proyecto</label>
+                  <input v-model="form.proyecto" type="text" placeholder="Nombre del proyecto" />
+                </div>
+
+                <div class="field-card">
                   <label>Fecha</label>
                   <input v-model="form.fecha" type="date" />
                 </div>
@@ -805,7 +927,10 @@ onUnmounted(() => {
                   <label>
                     <input v-model="form.aplica_iva" type="checkbox" /> Aplicar IVA a materiales
                   </label>
-                  <input v-model.number="form.iva_porcentaje" type="number" min="0" step="0.01" :disabled="!form.aplica_iva" />
+                  <label>
+                    <input v-model="form.aplica_iva_mano_obra" type="checkbox" /> Aplicar IVA a mano de obra
+                  </label>
+                  <input v-model.number="form.iva_porcentaje" type="number" min="0" step="0.01" :disabled="!form.aplica_iva && !form.aplica_iva_mano_obra" />
                 </div>
               </div>
             </section>
@@ -817,9 +942,16 @@ onUnmounted(() => {
                     <span class="section-kicker">Operativa</span>
                     <h4>Mano de obra</h4>
                   </div>
-                  <button type="button" class="btn-secondary" @click="addManoObraRow">+ Item</button>
+                  <div class="section-head-actions">
+                    <label class="section-pdf-check">
+                      <input v-model="form.mostrar_mano_obra_pdf" type="checkbox" />
+                      <span>Mostrar en PDF</span>
+                    </label>
+                    <button type="button" class="btn-secondary" @click="addEtapaManoObra">+ Agregar etapa</button>
+                    <button type="button" class="btn-secondary" @click="addManoObraRow()">+ Item</button>
+                  </div>
                 </div>
-                <table>
+                <table v-if="getItemsManoObraPorEtapa(null).length > 0 || form.etapas_mano_obra.length === 0">
                   <thead>
                     <tr>
                       <th>Descripcion</th>
@@ -827,12 +959,36 @@ onUnmounted(() => {
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="row in form.items_mano_obra" :key="row.uid">
+                    <tr v-for="row in getItemsManoObraPorEtapa(null)" :key="row.uid">
                       <td><input v-model="row.descripcion" type="text" placeholder="Detalle de tarea" /></td>
                       <td><button type="button" class="btn-link danger" @click="removeManoObraRow(row.uid)">Quitar</button></td>
                     </tr>
                   </tbody>
                 </table>
+                <div v-for="etapa in form.etapas_mano_obra" :key="etapa.uid" class="etapa-block">
+                  <div class="etapa-header">
+                    <strong>Etapa</strong>
+                    <input v-model="etapa.titulo" type="text" placeholder="Ej: ETAPA 1 - Tendido de canerias" />
+                    <div class="etapa-actions">
+                      <button type="button" class="btn-secondary btn-secondary-sm" @click="addManoObraRow(etapa.uid)">+ Item etapa</button>
+                      <button type="button" class="btn-link danger etapa-delete-btn" @click="removeEtapaManoObra(etapa.uid)">Borrar etapa</button>
+                    </div>
+                  </div>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Descripcion</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="row in getItemsManoObraPorEtapa(etapa.uid)" :key="row.uid">
+                        <td><input v-model="row.descripcion" type="text" placeholder="Detalle de tarea" /></td>
+                        <td><button type="button" class="btn-link danger" @click="removeManoObraRow(row.uid)">Quitar</button></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
                 <div class="subtotal-general-box">
                   <label>Subtotal general mano de obra</label>
                   <input v-model.number="form.subtotal_general_mano_obra" type="number" min="0" step="0.01" />
@@ -845,9 +1001,16 @@ onUnmounted(() => {
                     <span class="section-kicker">Costeo</span>
                     <h4>Materiales</h4>
                   </div>
-                  <button type="button" class="btn-secondary" @click="addMaterialRow">+ Item</button>
+                  <div class="section-head-actions">
+                    <label class="section-pdf-check">
+                      <input v-model="form.mostrar_materiales_pdf" type="checkbox" />
+                      <span>Mostrar en PDF</span>
+                    </label>
+                    <button type="button" class="btn-secondary" @click="addEtapaMaterial">+ Agregar etapa</button>
+                    <button type="button" class="btn-secondary" @click="addMaterialRow()">+ Item</button>
+                  </div>
                 </div>
-                <div class="materials-table-wrap">
+                <div class="materials-table-wrap" v-if="getItemsMaterialesPorEtapa(null).length > 0 || form.etapas_materiales.length === 0">
                   <table class="materials-table">
                     <thead>
                       <tr>
@@ -861,7 +1024,7 @@ onUnmounted(() => {
                       </tr>
                     </thead>
                     <tbody>
-                      <tr v-for="row in form.items_materiales" :key="row.uid">
+                      <tr v-for="row in getItemsMaterialesPorEtapa(null)" :key="row.uid">
                         <td><input v-model="row.descripcion" type="text" placeholder="Material" /></td>
                         <td><input v-model.number="row.cantidad" type="number" min="0" step="0.01" /></td>
                         <td><input v-model.number="row.precio_unitario" type="number" min="0" step="0.01" /></td>
@@ -872,6 +1035,42 @@ onUnmounted(() => {
                       </tr>
                     </tbody>
                   </table>
+                </div>
+                <div v-for="etapa in form.etapas_materiales" :key="etapa.uid" class="etapa-block">
+                  <div class="etapa-header">
+                    <strong>Etapa</strong>
+                    <input v-model="etapa.titulo" type="text" placeholder="Ej: ETAPA 1 - Tableros y conexionado" />
+                    <div class="etapa-actions">
+                      <button type="button" class="btn-secondary btn-secondary-sm" @click="addMaterialRow(etapa.uid)">+ Item etapa</button>
+                      <button type="button" class="btn-link danger etapa-delete-btn" @click="removeEtapaMaterial(etapa.uid)">Borrar etapa</button>
+                    </div>
+                  </div>
+                  <div class="materials-table-wrap">
+                    <table class="materials-table">
+                      <thead>
+                        <tr>
+                          <th>Descripcion</th>
+                          <th>Cantidad</th>
+                          <th>Precio unitario</th>
+                          <th>Ganancia % (interno)</th>
+                          <th>P. c/ganancia</th>
+                          <th>Subtotal</th>
+                          <th></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="row in getItemsMaterialesPorEtapa(etapa.uid)" :key="row.uid">
+                          <td><input v-model="row.descripcion" type="text" placeholder="Material" /></td>
+                          <td><input v-model.number="row.cantidad" type="number" min="0" step="0.01" /></td>
+                          <td><input v-model.number="row.precio_unitario" type="number" min="0" step="0.01" /></td>
+                          <td><input v-model.number="row.ganancia_porcentaje" type="number" min="0" step="0.01" /></td>
+                          <td>{{ formatMoney(precioUnitarioConGanancia(row)) }}</td>
+                          <td>{{ formatMoney(subtotalMaterialRowConGanancia(row)) }}</td>
+                          <td><button type="button" class="btn-link danger" @click="removeMaterialRow(row.uid)">Quitar</button></td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </section>
             </div>
@@ -886,6 +1085,14 @@ onUnmounted(() => {
             <div class="observaciones-block">
               <label>Observaciones</label>
               <textarea v-model="form.observaciones" rows="3" placeholder="Condiciones, alcance, notas"></textarea>
+            </div>
+
+            <div v-if="indicesCac.length" class="observaciones-block">
+              <label>Índice CAC base del presupuesto <small style="font-weight:400;color:#6b7280">— Elegí uno de los índices cargados para usarlo como referencia futura</small></label>
+              <select v-model="form.indice_cac_base_id">
+                <option :value="null">— Sin índice base registrado —</option>
+                <option v-for="idx in indicesCac" :key="idx.id" :value="idx.id">{{ idx.periodo }} — {{ idx.valor }}</option>
+              </select>
             </div>
 
             <section class="modal-section modal-section-interna">
@@ -1521,6 +1728,7 @@ textarea:focus {
 
 .btn-chip-edit { background: rgba(99, 102, 241, 0.14); color: #c7d2fe; border-color: rgba(99, 102, 241, 0.18); }
 .btn-chip-download { background: rgba(249, 115, 22, 0.12); color: #fdba74; border-color: rgba(249, 115, 22, 0.16); }
+.btn-chip-materiales { background: rgba(16, 185, 129, 0.14); color: #a7f3d0; border-color: rgba(16, 185, 129, 0.2); }
 .btn-chip-whatsapp { background: rgba(34, 197, 94, 0.12); color: #bbf7d0; border-color: rgba(34, 197, 94, 0.16); }
 .btn-chip-delete { background: rgba(239, 68, 68, 0.12); color: #fecaca; border-color: rgba(239, 68, 68, 0.16); }
 
@@ -1737,6 +1945,61 @@ textarea:focus {
   justify-content: space-between;
   align-items: center;
   gap: 10px;
+}
+
+.section-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.etapa-block {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.22);
+}
+
+.etapa-header {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.etapa-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  justify-self: end;
+}
+
+.etapa-delete-btn {
+  padding: 0;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.etapa-header strong {
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  color: #bfdbfe;
+}
+
+.section-pdf-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  color: #a9b6c9;
+}
+
+.section-pdf-check input[type="checkbox"] {
+  width: auto;
 }
 
 .section-head > div {

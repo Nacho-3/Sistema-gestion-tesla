@@ -80,6 +80,7 @@ const createEmptyFormDiaria = (overrides = {}) => ({
   cantidad_horas_extra_50: "",
   cantidad_horas_extra_100: "",
   es_hora_extra: false,
+  es_feriado: false,
   tipo_hora_extra: "",
   observaciones: "",
   es_prestada: false,
@@ -102,6 +103,7 @@ const createEmptyFormRango = (overrides = {}) => ({
   hora_inicio: "",
   hora_fin: "",
   es_hora_extra: false,
+  es_feriado: false,
   tipo_hora_extra: "",
   observaciones: "",
   es_prestada: false,
@@ -119,6 +121,7 @@ const rangoDias = ref([])
 const loadingRangoDias = ref(false)
 let rangoDiasRequestToken = 0
 let plantillaRangoEmpleadoId = ""
+let preparandoRangoEnCurso = false
 
 // Resumen
 const resumenEmpleado = ref([])
@@ -335,20 +338,21 @@ const syncExtraState = (formValue) => {
   formValue.tipo_hora_extra = extra100 > 0 && extra50 === 0 ? "100" : (extra50 > 0 ? "50" : "")
 }
 
-watch(() => formDiaria.value.fecha, (fecha) => {
-  if (esDomingo(fecha)) {
-    const fechaAjustada = parseLocalDate(fecha)
-    fechaAjustada.setDate(fechaAjustada.getDate() + 1)
-    formDiaria.value.fecha = formatLocalDate(fechaAjustada)
-    error.value = "Los domingos no se cargan. La fecha se ajustó automáticamente al lunes."
-    return
-  }
+watch(() => [formDiaria.value.fecha, formDiaria.value.es_feriado], ([fecha]) => {
+if (esDomingo(fecha)) {
+const fechaAjustada = parseLocalDate(fecha)
+fechaAjustada.setDate(fechaAjustada.getDate() + 1)
+formDiaria.value.fecha = formatLocalDate(fechaAjustada)
+error.value = "Los domingos no se cargan. La fecha se ajustó automáticamente al lunes."
+return
+}
 
-  if (!esSabado(fecha)) {
-    formDiaria.value.cantidad_horas_extra_100 = ""
-    syncExtraState(formDiaria.value)
-  }
+if (!permiteExtra100(fecha, formDiaria.value.es_feriado)) {
+formDiaria.value.cantidad_horas_extra_100 = ""
+syncExtraState(formDiaria.value)
+}
 })
+
 
 watch(() => [formDiaria.value.cantidad_horas_extra_50, formDiaria.value.cantidad_horas_extra_100], () => {
   syncExtraState(formDiaria.value)
@@ -469,6 +473,7 @@ const buildRangoDiaBase = ({ fecha, empleadoId, base = null, existentes = [] }) 
     cantidad_horas_extra_100: extra100 > 0 ? formatearHoras(extra100) : "",
     observaciones: base?.observaciones || "",
     es_prestada: Boolean(base?.es_prestada),
+    es_feriado: Boolean(base?.es_feriado),
     grupo_origen_id: base?.grupo_origen_id || "",
     grupo_destino_id: base?.grupo_destino_id || "",
   }
@@ -634,9 +639,10 @@ const getPlantillaRangoActual = (fecha = "") => {
     hora_inicio: modoRango.value === "horario" ? (formRango.value.hora_inicio || "") : "",
     hora_fin: modoRango.value === "horario" ? (formRango.value.hora_fin || "") : "",
     cantidad_horas_extra_50: formRango.value.cantidad_horas_extra_50 || "",
-    cantidad_horas_extra_100: fecha && !esSabado(fecha) ? "" : (formRango.value.cantidad_horas_extra_100 || ""),
+    cantidad_horas_extra_100: fecha && !permiteExtra100(fecha, formRango.value.es_feriado) ? "" : (formRango.value.cantidad_horas_extra_100 || ""),
     observaciones: formRango.value.observaciones || "",
     es_prestada: Boolean(formRango.value.es_prestada),
+    es_feriado: Boolean(formRango.value.es_feriado),
     grupo_origen_id: formRango.value.es_prestada ? (formRango.value.grupo_origen_id || "") : "",
     grupo_destino_id: formRango.value.es_prestada ? (formRango.value.grupo_destino_id || "") : "",
   }
@@ -657,9 +663,10 @@ const normalizeRangoEditableData = (data, fecha = "") => {
     hora_inicio: modo === "horario" ? (data?.hora_inicio || "") : "",
     hora_fin: modo === "horario" ? (data?.hora_fin || "") : "",
     cantidad_horas_extra_50: data?.cantidad_horas_extra_50 || "",
-    cantidad_horas_extra_100: fecha && !esSabado(fecha) ? "" : (data?.cantidad_horas_extra_100 || ""),
+    cantidad_horas_extra_100: fecha && !permiteExtra100(fecha, data?.es_feriado) ? "" : (data?.cantidad_horas_extra_100 || ""),
     observaciones: data?.observaciones || "",
     es_prestada: esPrestada,
+    es_feriado: Boolean(data?.es_feriado),
     grupo_origen_id: esPrestada ? (data?.grupo_origen_id || "") : "",
     grupo_destino_id: esPrestada ? (data?.grupo_destino_id || "") : "",
   }
@@ -774,7 +781,18 @@ const prepararDiasRango = async () => {
   const fechaDesde = formRango.value.fecha_desde
   const fechaHasta = formRango.value.fecha_hasta
 
-  if (!showFormRango.value || !empleadoId || !fechaDesde || !fechaHasta) {
+  if (!showFormRango.value) {
+    rangoDias.value = []
+    return
+  }
+
+  if (!empleadoId) {
+    rangoDias.value = []
+    error.value = "Seleccioná un empleado para preparar los días del rango"
+    return
+  }
+
+  if (!fechaDesde || !fechaHasta) {
     rangoDias.value = []
     return
   }
@@ -791,6 +809,8 @@ const prepararDiasRango = async () => {
 
   try {
     const meses = getMesesEnRango(fechaDesde, fechaHasta)
+    console.log("[prepararDiasRango] Empleado:", empleadoId, "es admin:", isEmpleadoAdministrativo(empleadoId), "meses:", meses)
+    
     const respuestas = await Promise.all(
       meses.map(({ mes, anio }) => api.getHoras(mes, anio, empleadoId))
     )
@@ -798,6 +818,8 @@ const prepararDiasRango = async () => {
     if (requestToken !== rangoDiasRequestToken) return
 
     const registros = respuestas.flatMap((respuesta) => respuesta?.data || [])
+    console.log("[prepararDiasRango] Registros recibidos:", registros.length, registros)
+    
     const plantilla = getPlantillaEmpleadoRango(empleadoId)
 
     if (plantillaRangoEmpleadoId !== String(empleadoId)) {
@@ -807,7 +829,10 @@ const prepararDiasRango = async () => {
       hidratarPlantillaRango(plantilla)
     }
 
-    rangoDias.value = getDiasRango(fechaDesde, fechaHasta).map((fecha) => {
+    const diasRango = getDiasRango(fechaDesde, fechaHasta)
+    console.log("[prepararDiasRango] Días en rango:", diasRango.length, diasRango)
+    
+    rangoDias.value = diasRango.map((fecha) => {
       const resumenExistente = getResumenExistentePorFecha(registros, fecha, empleadoId)
 
       if (resumenExistente?.tieneMultiplesRegistros) {
@@ -833,9 +858,12 @@ const prepararDiasRango = async () => {
         personalizado: Boolean(resumenExistente),
       }
     })
+    
+    console.log("[prepararDiasRango] Días preparados:", rangoDias.value.length)
   } catch (err) {
     if (requestToken !== rangoDiasRequestToken) return
     rangoDias.value = []
+    console.error("[prepararDiasRango] Error:", err)
     error.value = `No se pudieron preparar los días del rango: ${err?.response?.data?.error || err?.message || "Error desconocido"}`
   } finally {
     if (requestToken === rangoDiasRequestToken) {
@@ -860,9 +888,10 @@ const copiarDiaAnteriorRango = (index) => {
     hora_inicio: filaAnterior.hora_inicio,
     hora_fin: filaAnterior.hora_fin,
     cantidad_horas_extra_50: filaAnterior.cantidad_horas_extra_50,
-    cantidad_horas_extra_100: esSabado(filaActual.fecha) ? filaAnterior.cantidad_horas_extra_100 : "",
+    cantidad_horas_extra_100: permiteExtra100(filaActual.fecha, filaAnterior.es_feriado) ? filaAnterior.cantidad_horas_extra_100 : "",
     observaciones: filaAnterior.observaciones,
     es_prestada: filaAnterior.es_prestada,
+    es_feriado: Boolean(filaAnterior.es_feriado),
     grupo_origen_id: filaAnterior.grupo_origen_id,
     grupo_destino_id: filaAnterior.grupo_destino_id,
   }
@@ -1106,9 +1135,14 @@ const esDomingo = (fechaStr) => {
   return Boolean(fecha) && fecha.getDay() === 0
 }
 
-const esSabadoDiaria = computed(() => esSabado(formDiaria.value.fecha))
+const permiteExtra100 = (fechaStr, esFeriado = false) => {
+  return esSabado(fechaStr) || Boolean(esFeriado)
+}
 
-const validarDistribucionHorasExtra = (totalHoras, horasExtra50, horasExtra100) => {
+const esExtra100DiariaHabilitada = computed(() =>
+permiteExtra100(formDiaria.value.fecha, formDiaria.value.es_feriado)
+)
+const validarDistribucionHorasExtra = (totalHoras, horasExtra50, horasExtra100, ) => {
   const extra50 = horasExtra50 === "" || horasExtra50 === null || horasExtra50 === undefined ? 0 : parseNumeroHoras(horasExtra50)
   const extra100 = horasExtra100 === "" || horasExtra100 === null || horasExtra100 === undefined ? 0 : parseNumeroHoras(horasExtra100)
 
@@ -1293,9 +1327,9 @@ const saveHoraDiaria = async () => {
     return
   }
 
-  if (horasExtra100Diaria > 0 && !esSabado(formDiaria.value.fecha)) {
-    error.value = "Las horas extra al 100% corresponden a sábado. Si necesitás combinarlas, usá esta opción en una carga diaria del sábado."
-    return
+  if (horasExtra100Diaria > 0 && !permiteExtra100(formDiaria.value.fecha, formDiaria.value.es_feriado)) {
+  error.value = "Las horas extra al 100% corresponden a sábados o feriados marcados."
+  return
   }
 
   saving.value = true
@@ -1309,6 +1343,7 @@ const saveHoraDiaria = async () => {
       hora_inicio: modoDiaria.value === "horario" ? formDiaria.value.hora_inicio || null : null,
       hora_fin: modoDiaria.value === "horario" ? formDiaria.value.hora_fin || null : null,
       es_hora_extra: totalExtraDiaria > 0,
+      es_feriado: Boolean(formDiaria.value.es_feriado),
       tipo_hora_extra: horasExtra100Diaria > 0 && horasExtra50Diaria === 0 ? "100" : (totalExtraDiaria > 0 ? "50" : null),
       observaciones: formDiaria.value.observaciones || "",
       es_prestada: formDiaria.value.es_prestada,
@@ -1341,6 +1376,7 @@ const saveHoraDiaria = async () => {
       cliente_id: formDiaria.value.cliente_id || null,
       obra_id: formDiaria.value.obra_id || null,
       fecha: formDiaria.value.fecha,
+      es_feriado: Boolean(formDiaria.value.es_feriado),
     })
 
     await loadHoras()
@@ -1426,15 +1462,15 @@ const saveHoraRango = async (accionConflictos = null) => {
         : calcularHorasDesdeHorario(formRango.value.hora_inicio, formRango.value.hora_fin)
 
       const horasExtra50 = parseNumeroHoras(formRango.value.cantidad_horas_extra_50) || 0
-      const horasExtra100 = esSabado(fecha)
-        ? (parseNumeroHoras(formRango.value.cantidad_horas_extra_100) || 0)
-        : 0
+      const horasExtra100 = permiteExtra100(fecha, formRango.value.es_feriado)
+      ? (parseNumeroHoras(formRango.value.cantidad_horas_extra_100) || 0)
+      : 0
       const totalExtra = Math.round((horasExtra50 + horasExtra100) * 100) / 100
 
       const errorExtras = validarDistribucionHorasExtra(
         totalHorasFila,
         formRango.value.cantidad_horas_extra_50,
-        esSabado(fecha) ? formRango.value.cantidad_horas_extra_100 : ""
+        permiteExtra100(fecha, formRango.value.es_feriado) ? formRango.value.cantidad_horas_extra_100 : ""
       )
 
       if (errorExtras) {
@@ -1464,6 +1500,7 @@ const saveHoraRango = async (accionConflictos = null) => {
             tipo_hora_extra: horasExtra100 > 0 && horasExtra50 === 0 ? "100" : (totalExtra > 0 ? "50" : null),
             observaciones: formRango.value.observaciones || "",
             es_prestada: formRango.value.es_prestada,
+            es_feriado: Boolean(formRango.value.es_feriado),
             grupo_origen_id: formRango.value.es_prestada ? formRango.value.grupo_origen_id : null,
             grupo_destino_id: formRango.value.es_prestada ? formRango.value.grupo_destino_id : null,
           }
@@ -1527,8 +1564,8 @@ const saveHoraRango = async (accionConflictos = null) => {
       return
     }
 
-    if (horasExtra100 > 0 && !esSabado(fila.fecha)) {
-      error.value = `Las horas al 100% solo corresponden a sábado. Revisá ${formatearFecha(fila.fecha)}`
+    if (horasExtra100 > 0 && !permiteExtra100(fila.fecha, fila.es_feriado)) {
+      error.value = `Las horas al 100% solo corresponden a sábados y feriados. Revisá ${formatearFecha(fila.fecha)}`
       return
     }
 
@@ -1549,6 +1586,7 @@ const saveHoraRango = async (accionConflictos = null) => {
         tipo_hora_extra: horasExtra100 > 0 && horasExtra50 === 0 ? "100" : (totalExtra > 0 ? "50" : null),
         observaciones: fila.observaciones || "",
         es_prestada: fila.es_prestada,
+        es_feriado: Boolean(fila.es_feriado),
         grupo_origen_id: fila.es_prestada ? fila.grupo_origen_id : null,
         grupo_destino_id: fila.es_prestada ? fila.grupo_destino_id : null,
       }
@@ -1799,18 +1837,20 @@ const togglePrestadasEmpleado = (empleado) => {
   expandedPrestadas.value = new Set(expandedPrestadas.value)
 }
 
-const generarResumenPdf = async () => {
+const generarResumenPdf = async (grupo = null, tituloGrupo = "") => {
   const mesNombre = nombresMes[Math.max(0, Number(filtroMes.value) - 1)] || `Mes ${filtroMes.value}`
-  const ok = window.confirm(`Confirmación: ¿Querés generar el resumen PDF de ${mesNombre} ${filtroAnio.value}?`)
+  const etiquetaGrupo = tituloGrupo ? ` (${tituloGrupo})` : ""
+  const ok = window.confirm(`Confirmación: ¿Querés generar el resumen PDF${etiquetaGrupo} de ${mesNombre} ${filtroAnio.value}?`)
   if (!ok) return
 
   try {
-    const res = await api.getResumenHorasPdf(filtroMes.value, filtroAnio.value)
+    const res = await api.getResumenHorasPdf(filtroMes.value, filtroAnio.value, grupo)
     const blob = new Blob([res.data], { type: "application/pdf" })
     const url = window.URL.createObjectURL(blob)
     const link = document.createElement("a")
     link.href = url
-    link.download = `Resumen Horas ${mesNombre} ${filtroAnio.value}.pdf`
+    const sufijoGrupo = tituloGrupo ? ` ${tituloGrupo}` : ""
+    link.download = `Resumen Horas${sufijoGrupo} ${mesNombre} ${filtroAnio.value}.pdf`
     link.click()
     window.URL.revokeObjectURL(url)
   } catch (err) {
@@ -2111,9 +2151,20 @@ onUnmounted(() => {
             <h2>Resumen mensual</h2>
             <p>Consolidá horas por empleado, obra, grupo y préstamos para revisar el período completo con una lectura más clara.</p>
           </div>
-          <button class="btn-primary horas-main-btn" @click="generarResumenPdf">
-            Generar resumen PDF
-          </button>
+          <div class="resumen-pdf-actions">
+            <button class="btn-primary horas-main-btn" @click="generarResumenPdf()">
+              Generar resumen PDF
+            </button>
+            <button class="btn-secondary horas-main-btn" @click="generarResumenPdf('tesla', 'Tesla')">
+              Generar resumen Tesla
+            </button>
+            <button class="btn-secondary horas-main-btn" @click="generarResumenPdf('teslita', 'Teslita')">
+              Generar resumen Teslita
+            </button>
+            <button class="btn-secondary horas-main-btn" @click="generarResumenPdf('juani', 'Juani')">
+              Generar resumen Juani
+            </button>
+          </div>
         </section>
 
         <!-- Filtros para resumen -->
@@ -2381,6 +2432,11 @@ onUnmounted(() => {
               </label>
             </div>
 
+            <label class="form-group checkbox">
+              <input v-model="formDiaria.es_feriado" type="checkbox" />
+              <span>Es feriado</span>
+            </label>
+
             <div class="form-row">
               <label class="form-group">
                 <span>Horas extra al 50%</span>
@@ -2392,7 +2448,7 @@ onUnmounted(() => {
                 />
               </label>
 
-              <label v-if="esSabadoDiaria" class="form-group">
+              <label v-if="esExtra100DiariaHabilitada" class="form-group">
                 <span>Horas extra al 100%</span>
                 <input
                   v-model="formDiaria.cantidad_horas_extra_100"
@@ -2405,11 +2461,11 @@ onUnmounted(() => {
 
             <div class="info-rango">
               <div>Formato de carga: <strong>hora real</strong>. Ejemplos: <strong>8.30</strong> = 8 horas y media, <strong>0.30</strong> = media hora.</div>
-              <template v-if="esSabadoDiaria">
+              <template v-if="esExtra100DiariaHabilitada">
                 Podés separar en la misma carga cuántas horas van al <strong>50%</strong> y cuántas al <strong>100%</strong>.
               </template>
               <template v-else>
-                Para este día solo se habilitan <strong>horas extra al 50%</strong>. Las horas al <strong>100%</strong> se cargan únicamente en <strong>sábados</strong>.
+                Para este día solo se habilitan <strong>horas extra al 50%</strong>. Las horas al <strong>100%</strong> se cargan únicamente en <strong>sábados y feriados</strong>.
               </template>
             </div>
 
@@ -2662,10 +2718,15 @@ onUnmounted(() => {
                     <input v-model="formRango.cantidad_horas_extra_50" type="text" inputmode="decimal" placeholder="0.30" />
                   </label>
                   <label class="form-group compact">
-                    <span>Extra 100% para sábados</span>
+                    <span>Extra 100% (sábados y feriados)</span>
                     <input v-model="formRango.cantidad_horas_extra_100" type="text" inputmode="decimal" placeholder="0.30" />
                   </label>
                 </div>
+
+                <label class="form-group checkbox compact">
+                  <input v-model="formRango.es_feriado" type="checkbox" />
+                  <span>Es feriado (aplica Extra 100%)</span>
+                </label>
 
                 <label class="form-group checkbox compact">
                   <input v-model="formRango.es_prestada" type="checkbox" />
@@ -2806,11 +2867,16 @@ onUnmounted(() => {
                           <span>Extra 50%</span>
                           <input v-model="dia.cantidad_horas_extra_50" type="text" inputmode="decimal" placeholder="0.30" />
                         </label>
-                        <label class="form-group compact" v-if="esSabado(dia.fecha)">
+                        <label class="form-group compact" v-if="permiteExtra100(dia.fecha, dia.es_feriado)">
                           <span>Extra 100%</span>
                           <input v-model="dia.cantidad_horas_extra_100" type="text" inputmode="decimal" placeholder="0.30" />
                         </label>
                       </div>
+
+                      <label class="form-group checkbox compact">
+                        <input v-model="dia.es_feriado" type="checkbox" />
+                        <span>Es feriado</span>
+                      </label>
 
                       <label class="form-group checkbox compact">
                         <input v-model="dia.es_prestada" type="checkbox" />
@@ -3196,6 +3262,13 @@ onUnmounted(() => {
 
 .horas-main-btn {
   white-space: nowrap;
+}
+
+.resumen-pdf-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  justify-content: flex-end;
 }
 
 .horas-header {

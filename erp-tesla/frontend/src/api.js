@@ -244,10 +244,11 @@ export default {
     return api.get(`/horas/resumen/prestadas/pdf?${params.toString()}`, { responseType: "blob" })
   },
 
-  getResumenHorasPdf(mes, anio) {
+  getResumenHorasPdf(mes, anio, grupo) {
     const params = new URLSearchParams()
     if (mes) params.append("mes", mes)
     if (anio) params.append("anio", anio)
+    if (grupo) params.append("grupo", grupo)
     return api.get(`/horas/resumen/pdf?${params.toString()}`, { responseType: "blob" })
   },
 
@@ -368,6 +369,10 @@ export default {
     return api.post(`/caja/semanas/${id}/cerrar`, payload)
   },
 
+  updateSemanaCajaSaldos(id, payload) {
+    return api.post(`/caja/semanas/${id}/saldos`, payload)
+  },
+
   // Presupuestos
   getPresupuestos() {
     return api.get("/presupuestos")
@@ -397,6 +402,10 @@ export default {
     return api.get(`/presupuestos/${id}/pdf`, { responseType: "blob" })
   },
 
+  getPresupuestoMaterialesPdf(id) {
+    return api.get(`/presupuestos/${id}/pdf-materiales`, { responseType: "blob" })
+  },
+
   getNumeroSiguientePresupuesto() {
     return api.get("/presupuestos/config/numero-siguiente")
   },
@@ -419,6 +428,32 @@ export default {
 
   updateCertificado(id, payload) {
     return api.put(`/certificados/${id}`, payload)
+  },
+
+  deleteCertificado(id) {
+    return api.delete(`/certificados/${id}`)
+  },
+
+  getCertificadoPdf(id) {
+    return api.get(`/certificados/${id}/pdf`, { responseType: "blob" })
+  },
+
+  getCertificadosPresupuestoPdf(presupuestoId) {
+    return api.get(`/certificados/presupuesto/${presupuestoId}/pdf`, { responseType: "blob" })
+  },
+
+  // Índices CAC
+  getIndicesCac() {
+    return api.get("/indices-cac")
+  },
+  createIndiceCac(payload) {
+    return api.post("/indices-cac", payload)
+  },
+  updateIndiceCac(id, payload) {
+    return api.put(`/indices-cac/${id}`, payload)
+  },
+  deleteIndiceCac(id) {
+    return api.delete(`/indices-cac/${id}`)
   },
 
   //gastos

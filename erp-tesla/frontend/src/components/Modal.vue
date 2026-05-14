@@ -1,11 +1,11 @@
 <template>
   <div class="modal-overlay" @click.self="$emit('close')">
-    <div class="modal">
+    <div class="modal" :style="modalStyle">
       <div class="modal-header">
         <slot name="header"></slot>
         <button class="modal-close" @click="$emit('close')">×</button>
       </div>
-      <div class="modal-body">
+      <div class="modal-body" :style="bodyStyle">
         <slot name="body"></slot>
       </div>
       <div class="modal-footer">
@@ -16,6 +16,27 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
+
+const props = defineProps({
+  maxWidth: {
+    type: String,
+    default: '500px',
+  },
+  bodyMaxHeight: {
+    type: String,
+    default: '60vh',
+  },
+})
+
+const modalStyle = computed(() => ({
+  maxWidth: props.maxWidth,
+}))
+
+const bodyStyle = computed(() => ({
+  maxHeight: props.bodyMaxHeight,
+}))
+
 defineEmits(['close'])
 </script>
 
@@ -38,7 +59,6 @@ defineEmits(['close'])
   border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 0.75rem;
   width: 90%;
-  max-width: 500px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
   display: flex;
   flex-direction: column;
@@ -80,7 +100,6 @@ defineEmits(['close'])
 .modal-body {
   padding: 1.5rem;
   color: #e5e7eb;
-  max-height: 60vh;
   overflow-y: auto;
 }
 

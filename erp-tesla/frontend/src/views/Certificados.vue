@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from "vue"
+import { computed, onMounted, onUnmounted, ref, watch } from "vue"
 import { useRoute } from "vue-router"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
@@ -9,6 +9,7 @@ import socket from "../socket.js"
 const route = useRoute()
 const certificados = ref([])
 const presupuestos = ref([])
+const indicesCac = ref([])
 const loading = ref(false)
 const saving = ref(false)
 const error = ref("")
@@ -23,7 +24,14 @@ const buildInitialForm = () => ({
   tipo_registro: "porcentaje",
   porcentaje_avance: 0,
   monto_base: 0,
-  indice_cac: 1,
+  indice_modo: "indices",
+  indice_cac_factor: 1,
+  indice_cac_base: 0,
+  indice_cac_actual: 0,
+  indice_cac_base_sel: null,
+  indice_cac_actual_sel: null,
+  aplica_iva: false,
+  iva_porcentaje: 21,
   estado: "pendiente",
   pagos: 0,
   observaciones: "",
@@ -76,10 +84,76 @@ const montoBaseCalculado = computed(() => {
   if (form.value.tipo_registro === "monto") return Number(form.value.monto_base) || 0
   return importeOriginal.value * ((Number(form.value.porcentaje_avance) || 0) / 100)
 })
-const actualizacion = computed(() => montoBaseCalculado.value * ((Number(form.value.indice_cac) || 1) - 1))
+
+const indiceCacEfectivo = computed(() => {
+  const base = Number(form.value.indice_cac_base) || 0
+  const actual = Number(form.value.indice_cac_actual) || 0
+  if (base > 0 && actual > 0) return actual / base
+  return 1
+})
+
+const indiceCacVariacionPorcentual = computed(() => ((indiceCacEfectivo.value - 1) * 100) || 0)
+const indiceCacBaseSeleccionado = computed(() => indicesCac.value.find((item) => Number(item.id) === Number(form.value.indice_cac_base_sel)) || null)
+const indiceCacActualSeleccionado = computed(() => indicesCac.value.find((item) => Number(item.id) === Number(form.value.indice_cac_actual_sel)) || null)
+const ultimoIndiceCac = computed(() => indicesCac.value?.[0] || null)
+
+const syncIndiceSelDesdeValor = (valor, actualSel) => {
+  const match = indicesCac.value.find((item) => Number(item.valor) === Number(valor))
+  return match ? match.id : actualSel
+}
+
+watch(() => form.value.indice_cac_base_sel, (id) => {
+  if (!id) return
+  const idx = indicesCac.value.find((i) => i.id === Number(id))
+  if (idx) form.value.indice_cac_base = Number(idx.valor)
+})
+
+watch(() => form.value.indice_cac_actual_sel, (id) => {
+  if (!id) return
+  const idx = indicesCac.value.find((i) => i.id === Number(id))
+  if (idx) form.value.indice_cac_actual = Number(idx.valor)
+})
+
+watch(() => form.value.indice_cac_base, (valor) => {
+  form.value.indice_cac_base_sel = syncIndiceSelDesdeValor(valor, form.value.indice_cac_base_sel)
+})
+
+watch(() => form.value.indice_cac_actual, (valor) => {
+  form.value.indice_cac_actual_sel = syncIndiceSelDesdeValor(valor, form.value.indice_cac_actual_sel)
+})
+
+watch(() => form.value.presupuesto_id, (id, prevId) => {
+  if (editingId.value) return
+  if (String(id || "") === String(prevId || "")) return
+
+  form.value.indice_cac_base_sel = null
+  form.value.indice_cac_base = 0
+  form.value.indice_cac_actual_sel = null
+  form.value.indice_cac_actual = 0
+
+  if (!id) return
+  fillIndiceBase(id)
+  prefillIndiceActual()
+})
+
+watch(() => indicesCac.value.length, () => {
+  if (editingId.value) return
+  if (!form.value.presupuesto_id) return
+  if (!form.value.indice_cac_base_sel && Number(form.value.indice_cac_base) <= 0) {
+    fillIndiceBase(form.value.presupuesto_id)
+  }
+  prefillIndiceActual()
+})
+
+const ajustePorcentajeEfectivo = computed(() => ((indiceCacEfectivo.value - 1) * 100) || 0)
+const actualizacion = computed(() => montoBaseCalculado.value * (indiceCacEfectivo.value - 1))
 const totalCertSinIva = computed(() => montoBaseCalculado.value + actualizacion.value)
-const iva = computed(() => totalCertSinIva.value * ((Number(presupuestoSeleccionado.value?.iva_porcentaje) || 21) / 100))
+const iva = computed(() => {
+  if (!form.value.aplica_iva) return 0
+  return totalCertSinIva.value * ((Number(form.value.iva_porcentaje) || 0) / 100)
+})
 const totalCertConIva = computed(() => totalCertSinIva.value + iva.value)
+
 const acumuladoConActual = computed(() => {
   if (editingId.value) {
     const actual = certificados.value.find((c) => c.id === editingId.value)
@@ -90,8 +164,12 @@ const acumuladoConActual = computed(() => {
   }
   return (Number(ultimoCertificado.value?.acumulado_certificado) || 0) + totalCertSinIva.value
 })
+
 const saldoPreOriginal = computed(() => Math.max(0, importeOriginal.value - acumuladoConActual.value))
 const saldoPendiente = computed(() => Math.max(0, totalCertConIva.value - (Number(form.value.pagos) || 0)))
+const tieneIndiceBase = computed(() => Number(form.value.indice_cac_base) > 0)
+const tieneIndiceActual = computed(() => Number(form.value.indice_cac_actual) > 0)
+const certificadoListo = computed(() => Number(form.value.presupuesto_id) > 0 && tieneIndiceBase.value && tieneIndiceActual.value)
 
 const formatMoney = (value) => new Intl.NumberFormat("es-AR", {
   style: "currency",
@@ -121,11 +199,46 @@ const resetForm = () => {
   form.value = buildInitialForm()
 }
 
+const fillIndiceBase = (presupuestoId) => {
+  form.value.indice_cac_base_sel = null
+  form.value.indice_cac_base = 0
+
+  if (!presupuestoId) return
+  const presupuesto = presupuestos.value.find((p) => String(p.id) === String(presupuestoId))
+  if (!presupuesto) return
+
+  form.value.iva_porcentaje = Number(presupuesto.iva_porcentaje) || 21
+
+  const indiceBaseId = Number(presupuesto?.indice_cac_base_id) || 0
+  if (!indiceBaseId) return
+  const indiceBase = indicesCac.value.find((i) => Number(i.id) === indiceBaseId)
+  if (!indiceBase) return
+  form.value.indice_cac_base_sel = indiceBase.id
+  form.value.indice_cac_base = Number(indiceBase.valor) || 0
+}
+
+const prefillIndiceActual = () => {
+  if (form.value.indice_cac_actual_sel || Number(form.value.indice_cac_actual) > 0) return
+  const idx = ultimoIndiceCac.value
+  if (!idx) return
+  form.value.indice_cac_actual_sel = idx.id
+  form.value.indice_cac_actual = Number(idx.valor) || 0
+}
+
+const aplicarUltimoIndiceActual = () => {
+  const idx = ultimoIndiceCac.value
+  if (!idx) return
+  form.value.indice_cac_actual_sel = idx.id
+  form.value.indice_cac_actual = Number(idx.valor) || 0
+}
+
 const openGenerator = (presupuestoId = "") => {
   resetForm()
   selectedGroupId.value = ""
   form.value.presupuesto_id = String(presupuestoId)
   showAdvanceModal.value = false
+  fillIndiceBase(presupuestoId)
+  prefillIndiceActual()
 }
 
 const openAdvanceModal = (presupuestoId) => {
@@ -133,6 +246,8 @@ const openAdvanceModal = (presupuestoId) => {
   selectedGroupId.value = String(presupuestoId)
   form.value.presupuesto_id = String(presupuestoId)
   showAdvanceModal.value = true
+  fillIndiceBase(presupuestoId)
+  prefillIndiceActual()
 }
 
 const closeAdvanceModal = () => {
@@ -142,6 +257,13 @@ const closeAdvanceModal = () => {
 }
 
 const editCertificado = (certificado) => {
+  const indiceBase = Number(certificado.indice_base_cac) || 0
+  const indiceActual = Number(certificado.indice_actual_cac) || 0
+  const presupuestoRef = presupuestos.value.find((p) => String(p.id) === String(certificado.presupuesto_id))
+  const usaIndices = indiceBase > 0 && indiceActual > 0
+  const indiceBaseSel = indicesCac.value.find((i) => Number(i.valor) === indiceBase)?.id || null
+  const indiceActualSel = indicesCac.value.find((i) => Number(i.valor) === indiceActual)?.id || null
+
   editingId.value = certificado.id
   selectedGroupId.value = String(certificado.presupuesto_id)
   showAdvanceModal.value = true
@@ -151,10 +273,58 @@ const editCertificado = (certificado) => {
     tipo_registro: certificado.tipo_registro || "porcentaje",
     porcentaje_avance: Number(certificado.porcentaje_avance) || 0,
     monto_base: Number(certificado.monto_base) || 0,
-    indice_cac: Number(certificado.indice_cac) || 1,
+    indice_modo: "indices",
+    indice_cac_factor: Number(certificado.indice_cac) || 1,
+    indice_cac_base: usaIndices ? indiceBase : 0,
+    indice_cac_actual: usaIndices ? indiceActual : 0,
+    indice_cac_base_sel: indiceBaseSel,
+    indice_cac_actual_sel: indiceActualSel,
+    aplica_iva: Boolean(certificado.aplica_iva),
+    iva_porcentaje: Number(certificado.iva_porcentaje) || Number(presupuestoRef?.iva_porcentaje) || 21,
     estado: certificado.estado || "pendiente",
     pagos: Number(certificado.pagos) || 0,
     observaciones: certificado.observaciones || "",
+  }
+}
+
+const downloadCertificadoPdf = async (certificado) => {
+  try {
+    const response = await api.getCertificadoPdf(certificado.id)
+    const blob = new Blob([response.data], { type: "application/pdf" })
+    const url = URL.createObjectURL(blob)
+    window.open(url, "_blank", "noopener,noreferrer")
+    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  } catch (err) {
+    error.value = err?.response?.data?.error || "No se pudo generar el PDF del certificado"
+  }
+}
+
+const downloadGrupoCertificadosPdf = async (presupuestoId) => {
+  try {
+    const response = await api.getCertificadosPresupuestoPdf(presupuestoId)
+    const blob = new Blob([response.data], { type: "application/pdf" })
+    const url = URL.createObjectURL(blob)
+    window.open(url, "_blank", "noopener,noreferrer")
+    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  } catch (err) {
+    error.value = err?.response?.data?.error || "No se pudo generar el PDF del grupo de certificados"
+  }
+}
+
+const deleteCertificado = async (certificado) => {
+  if (!window.confirm(`¿Eliminar Certificado ${certificado.secuencia} del presupuesto #${certificado.numero}?`)) return
+
+  error.value = ""
+  ok.value = ""
+  try {
+    await api.deleteCertificado(certificado.id)
+    ok.value = `Certificado ${certificado.secuencia} eliminado`
+    if (editingId.value === certificado.id) {
+      closeAdvanceModal()
+    }
+    await loadData()
+  } catch (err) {
+    error.value = err?.response?.data?.error || "No se pudo eliminar el certificado"
   }
 }
 
@@ -168,7 +338,7 @@ const loadData = async () => {
     ])
     certificados.value = resCertificados.data || []
     presupuestos.value = resPresupuestos.data || []
-  } catch (err) {
+  } catch (_) {
     error.value = "No se pudieron cargar los certificados"
   } finally {
     loading.value = false
@@ -186,7 +356,11 @@ const saveCertificado = async () => {
       tipo_registro: form.value.tipo_registro,
       porcentaje_avance: Number(form.value.porcentaje_avance) || 0,
       monto_base: Number(form.value.monto_base) || 0,
-      indice_cac: Number(form.value.indice_cac) || 1,
+      indice_cac: indiceCacEfectivo.value,
+      indice_base_cac: Number(form.value.indice_cac_base || indiceCacBaseSeleccionado.value?.valor || presupuestoSeleccionado.value?.indice_base_cac || 0),
+      indice_actual_cac: Number(form.value.indice_cac_actual || indiceCacActualSeleccionado.value?.valor || 0),
+      aplica_iva: Boolean(form.value.aplica_iva),
+      iva_porcentaje: Number(form.value.iva_porcentaje) || 0,
       estado: form.value.estado,
       pagos: Number(form.value.pagos) || 0,
       observaciones: form.value.observaciones,
@@ -214,6 +388,10 @@ const saveCertificado = async () => {
 onMounted(async () => {
   await loadData()
   syncFromRoute()
+  try {
+    const res = await api.getIndicesCac()
+    indicesCac.value = res.data
+  } catch (_) { /* no bloquear si falla */ }
   socket.on("certificados:changed", loadData)
   socket.on("presupuestos:changed", loadData)
 })
@@ -288,12 +466,16 @@ onUnmounted(() => {
             <strong>{{ form.tipo_registro === "monto" ? "Por monto" : "Por porcentaje" }}</strong>
           </div>
           <div class="summary-pill">
+            <span>Actualización CAC</span>
+            <strong>{{ formatMoney(actualizacion) }}</strong>
+          </div>
+          <div class="summary-pill">
             <span>Total estimado</span>
             <strong>{{ formatMoney(totalCertConIva) }}</strong>
           </div>
         </div>
 
-        <div class="grid-form grid-form-surface">
+        <div class="grid-form grid-form-surface generator-form">
           <div class="full-span">
             <label>Presupuesto original</label>
             <select v-model="form.presupuesto_id">
@@ -304,12 +486,12 @@ onUnmounted(() => {
             </select>
           </div>
 
-          <div>
+          <div class="gen-col-3">
             <label>Fecha</label>
             <input v-model="form.fecha" type="date" />
           </div>
 
-          <div>
+          <div class="gen-col-3">
             <label>Estado</label>
             <select v-model="form.estado">
               <option value="pendiente">Pendiente</option>
@@ -317,7 +499,7 @@ onUnmounted(() => {
             </select>
           </div>
 
-          <div>
+          <div class="gen-col-3">
             <label>Tipo de avance</label>
             <select v-model="form.tipo_registro">
               <option value="porcentaje">Por porcentaje</option>
@@ -325,22 +507,66 @@ onUnmounted(() => {
             </select>
           </div>
 
-          <div v-if="form.tipo_registro === 'porcentaje'">
+          <div v-if="form.tipo_registro === 'porcentaje'" class="gen-col-3">
             <label>Porcentaje de avance</label>
             <input v-model.number="form.porcentaje_avance" type="number" min="0" step="0.01" />
           </div>
 
-          <div v-else>
+          <div v-else class="gen-col-3">
             <label>Monto base</label>
             <input v-model.number="form.monto_base" type="number" min="0" step="0.01" />
           </div>
 
-          <div>
-            <label>Indice CAC</label>
-            <input v-model.number="form.indice_cac" type="number" min="0" step="0.0001" />
+          <div class="full-span form-flow-hint">
+            <strong>Flujo sugerido</strong>
+            <span>Base CAC tomada del presupuesto original. Elegí índice actual y luego confirmá avance, IVA y pagos.</span>
           </div>
 
-          <div>
+          <div class="gen-col-3">
+            <label>Índice CAC base (presupuesto original)</label>
+            <input :value="indiceCacBaseSeleccionado ? `${indiceCacBaseSeleccionado.periodo} — ${indiceCacBaseSeleccionado.valor}` : (form.indice_cac_base ? form.indice_cac_base : 'Sin índice base en presupuesto')" type="text" readonly />
+          </div>
+
+          <div class="gen-col-3">
+            <label>Índice CAC actual</label>
+            <div class="inline-actions">
+              <select v-if="indicesCac.length" v-model="form.indice_cac_actual_sel" style="margin-bottom:.3rem">
+                <option value="">— Seleccionar del registro —</option>
+                <option v-for="idx in indicesCac" :key="idx.id" :value="idx.id">{{ idx.periodo }} — {{ idx.valor }}</option>
+              </select>
+              <button class="btn-secondary btn-mini" type="button" @click="aplicarUltimoIndiceActual">Usar último</button>
+            </div>
+          </div>
+
+          <div class="gen-col-2">
+            <label>Factor efectivo</label>
+            <input :value="Number(indiceCacEfectivo).toFixed(6)" type="text" readonly />
+          </div>
+
+          <div class="gen-col-2">
+            <label>Diferencia CAC</label>
+            <input :value="`${Number(indiceCacVariacionPorcentual).toFixed(4)}%`" type="text" readonly />
+          </div>
+
+          <div class="field-card checkbox-card gen-col-2">
+            <label class="checkbox-label">
+              <input v-model="form.aplica_iva" type="checkbox" />
+              <span>Agregar IVA en este certificado</span>
+            </label>
+          </div>
+
+          <div v-if="!tieneIndiceBase || !tieneIndiceActual" class="full-span cert-warning">
+            <strong>Falta completar índices CAC</strong>
+            <span v-if="!tieneIndiceBase">Este presupuesto no tiene índice base cargado.</span>
+            <span v-else>Seleccioná un índice CAC actual para poder generar el certificado.</span>
+          </div>
+
+          <div class="gen-col-2">
+            <label>IVA %</label>
+            <input v-model.number="form.iva_porcentaje" type="number" min="0" step="0.01" :disabled="!form.aplica_iva" />
+          </div>
+
+          <div class="gen-col-2">
             <label>Pagos</label>
             <input v-model.number="form.pagos" type="number" min="0" step="0.01" />
           </div>
@@ -365,7 +591,7 @@ onUnmounted(() => {
 
         <div class="actions">
           <button class="btn-secondary" type="button" @click="resetForm">Limpiar</button>
-          <button class="btn-primary" :disabled="saving || !form.presupuesto_id" @click="saveCertificado">
+          <button class="btn-primary" :disabled="saving || !certificadoListo" @click="saveCertificado">
             {{ saving ? "Guardando..." : "Generar certificado original" }}
           </button>
         </div>
@@ -390,48 +616,60 @@ onUnmounted(() => {
                 <p>{{ group.presupuesto?.obra }}</p>
               </div>
               <div class="group-actions">
+                <button class="btn-secondary btn-mini" type="button" @click="downloadGrupoCertificadosPdf(group.presupuestoId)">PDF grupo</button>
                 <span class="group-badge">{{ group.items.length }} certificados</span>
                 <button class="btn-secondary" type="button" @click="openAdvanceModal(group.presupuestoId)">Agregar avance</button>
               </div>
             </div>
 
             <div class="table-shell">
-            <table>
-              <thead>
-                <tr>
-                  <th>Cert.</th>
-                  <th>Fecha</th>
-                  <th>Tipo</th>
-                  <th>Avance</th>
-                  <th>CAC</th>
-                  <th>Neto</th>
-                  <th>Total c/IVA</th>
-                  <th>Pagos</th>
-                  <th>Saldo</th>
-                  <th>Estado</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="c in group.items" :key="c.id" @click="editCertificado(c)">
-                  <td>Certificado {{ c.secuencia }}</td>
-                  <td>{{ c.fecha }}</td>
-                  <td>{{ c.tipo_registro === "monto" ? "Monto" : "Porcentaje" }}</td>
-                  <td>{{ c.tipo_registro === "monto" ? formatMoney(c.monto_base) : formatPercent(c.porcentaje_avance) }}</td>
-                  <td>{{ Number(c.indice_cac || 1).toFixed(4) }}</td>
-                  <td>{{ formatMoney(c.total_cert_sin_iva) }}</td>
-                  <td>{{ formatMoney(c.total_cert_con_iva) }}</td>
-                  <td>{{ formatMoney(c.pagos) }}</td>
-                  <td>{{ formatMoney(c.saldo_pendiente) }}</td>
-                  <td><span :class="['estado-pill', c.estado === 'pagado' ? 'estado-pagado' : 'estado-pendiente']">{{ c.estado }}</span></td>
-                </tr>
-              </tbody>
-            </table>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Cert.</th>
+                    <th>Fecha</th>
+                    <th>Tipo</th>
+                    <th>Avance</th>
+                    <th>CAC</th>
+                    <th>Neto</th>
+                    <th>Total c/IVA</th>
+                    <th>Saldo</th>
+                    <th>Estado</th>
+                    <th>Acciones</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="c in group.items" :key="c.id">
+                    <td>Certificado {{ c.secuencia }}</td>
+                    <td>{{ c.fecha }}</td>
+                    <td>{{ c.tipo_registro === "monto" ? "Monto" : "Porcentaje" }}</td>
+                    <td>{{ c.tipo_registro === "monto" ? formatMoney(c.monto_base) : formatPercent(c.porcentaje_avance) }}</td>
+                    <td>{{ Number(c.indice_cac || 1).toFixed(4) }}</td>
+                    <td>{{ formatMoney(c.total_cert_sin_iva) }}</td>
+                    <td>{{ formatMoney(c.total_cert_con_iva) }}</td>
+                    <td>{{ formatMoney(c.saldo_pendiente) }}</td>
+                    <td><span :class="['estado-pill', c.estado === 'pagado' ? 'estado-pagado' : 'estado-pendiente']">{{ c.estado }}</span></td>
+                    <td class="acciones-cell">
+                      <div class="row-actions">
+                        <button class="action-btn action-edit" type="button" @click="editCertificado(c)">Editar</button>
+                        <button class="action-btn action-delete" type="button" @click="deleteCertificado(c)">Eliminar</button>
+                        <button class="action-btn action-pdf" type="button" @click="downloadCertificadoPdf(c)">PDF</button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </article>
         </div>
       </section>
 
-      <Modal v-if="showAdvanceModal" @close="closeAdvanceModal">
+      <Modal
+        v-if="showAdvanceModal"
+        :maxWidth="editingId ? '1220px' : '1080px'"
+        bodyMaxHeight="78vh"
+        @close="closeAdvanceModal"
+      >
         <template #header>
           <div class="modal-header-copy">
             <span class="section-kicker">Avance secuencial</span>
@@ -491,9 +729,47 @@ onUnmounted(() => {
               <input v-model.number="form.monto_base" type="number" min="0" step="0.01" />
             </div>
 
+            <div class="full-span form-flow-hint">
+              <strong>Flujo sugerido</strong>
+              <span>Base CAC tomada del presupuesto original. Seleccioná índice actual y luego confirmá avance, IVA y pagos.</span>
+            </div>
+
             <div class="field-card">
-              <label>Indice CAC</label>
-              <input v-model.number="form.indice_cac" type="number" min="0" step="0.0001" />
+              <label>Índice CAC base (presupuesto original)</label>
+              <input :value="indiceCacBaseSeleccionado ? `${indiceCacBaseSeleccionado.periodo} — ${indiceCacBaseSeleccionado.valor}` : (form.indice_cac_base ? form.indice_cac_base : 'Sin índice base en presupuesto')" type="text" readonly />
+            </div>
+
+            <div class="field-card">
+              <label>Índice CAC actual</label>
+              <div class="inline-actions">
+                <select v-if="indicesCac.length" v-model="form.indice_cac_actual_sel" style="margin-bottom:.3rem;width:100%">
+                  <option value="">— Seleccionar del registro —</option>
+                  <option v-for="idx in indicesCac" :key="idx.id" :value="idx.id">{{ idx.periodo }} — {{ idx.valor }}</option>
+                </select>
+                <button class="btn-secondary btn-mini" type="button" @click="aplicarUltimoIndiceActual">Usar último</button>
+              </div>
+            </div>
+
+            <div class="field-card">
+              <label>Factor efectivo</label>
+              <input :value="Number(indiceCacEfectivo).toFixed(6)" type="text" readonly />
+            </div>
+
+            <div class="field-card">
+              <label>Ajuste CAC efectivo</label>
+              <input :value="`${Number(ajustePorcentajeEfectivo).toFixed(4)}%`" type="text" readonly />
+            </div>
+
+            <div class="field-card checkbox-card">
+              <label class="checkbox-label">
+                <input v-model="form.aplica_iva" type="checkbox" />
+                <span>Agregar IVA en este certificado</span>
+              </label>
+            </div>
+
+            <div class="field-card">
+              <label>IVA %</label>
+              <input v-model.number="form.iva_porcentaje" type="number" min="0" step="0.01" :disabled="!form.aplica_iva" />
             </div>
 
             <div class="field-card">
@@ -510,11 +786,14 @@ onUnmounted(() => {
 
           <div class="stats-grid preview-grid modal-preview-grid">
             <div class="stat-card"><span>Importe original</span><strong>{{ formatMoney(importeOriginal) }}</strong></div>
-            <div class="stat-card"><span>Monto base</span><strong>{{ formatMoney(montoBaseCalculado) }}</strong></div>
-            <div class="stat-card"><span>Actualizacion CAC</span><strong>{{ formatMoney(actualizacion) }}</strong></div>
+            <div class="stat-card"><span>Avance / base</span><strong>{{ formatMoney(montoBaseCalculado) }}</strong></div>
+            <div class="stat-card"><span>Actualización CAC</span><strong>{{ formatMoney(actualizacion) }}</strong></div>
+            <div class="stat-card"><span>Total sin IVA</span><strong>{{ formatMoney(totalCertSinIva) }}</strong></div>
+            <div class="stat-card"><span>IVA</span><strong>{{ formatMoney(iva) }}</strong></div>
             <div class="stat-card"><span>Total con IVA</span><strong>{{ formatMoney(totalCertConIva) }}</strong></div>
             <div class="stat-card"><span>Acumulado</span><strong>{{ formatMoney(acumuladoConActual) }}</strong></div>
             <div class="stat-card"><span>Saldo presupuesto</span><strong>{{ formatMoney(saldoPreOriginal) }}</strong></div>
+            <div class="stat-card"><span>Saldo pendiente del certificado</span><strong>{{ formatMoney(saldoPendiente) }}</strong></div>
           </div>
 
           <div v-if="certificadosDelPresupuesto.length" class="history-inline modal-history">
@@ -540,7 +819,7 @@ onUnmounted(() => {
 
         <template #footer>
           <button class="btn-secondary" type="button" @click="closeAdvanceModal">Cerrar</button>
-          <button class="btn-primary" type="button" :disabled="saving || !form.presupuesto_id" @click="saveCertificado">
+          <button class="btn-primary" type="button" :disabled="saving || !certificadoListo" @click="saveCertificado">
             {{ saving ? "Guardando..." : editingId ? "Actualizar avance" : "Guardar avance" }}
           </button>
         </template>
@@ -690,6 +969,11 @@ onUnmounted(() => {
   color: #94a3b8;
 }
 
+.btn-mini {
+  padding: 6px 10px;
+  font-size: 0.78rem;
+}
+
 .section-head h3,
 .group-head strong {
   margin: 0;
@@ -754,6 +1038,93 @@ onUnmounted(() => {
   gap: 12px;
 }
 
+.generator-form {
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+}
+
+.gen-col-2 {
+  grid-column: span 2;
+}
+
+.gen-col-3 {
+  grid-column: span 3;
+}
+
+.form-flow-hint {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(125, 211, 252, 0.22);
+  background: rgba(14, 116, 144, 0.12);
+}
+
+.form-flow-hint strong {
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #bae6fd;
+}
+
+.form-flow-hint span {
+  font-size: 0.86rem;
+  color: #cbd5e1;
+}
+
+.inline-actions {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.inline-actions select {
+  margin-bottom: 0 !important;
+}
+
+.generator-form .inline-actions .btn-mini {
+  min-width: 96px;
+}
+
+.checkbox-card {
+  display: flex;
+  align-items: center;
+}
+
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0;
+  font-size: 0.9rem;
+  color: #e2e8f0;
+}
+
+.checkbox-label input {
+  width: auto;
+  margin: 0;
+}
+
+.cert-warning {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  background: rgba(180, 83, 9, 0.16);
+}
+
+.cert-warning strong {
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #fde68a;
+}
+
+.cert-warning span {
+  font-size: 0.86rem;
+  color: #fef3c7;
+}
+
 .grid-form-surface {
   padding: 12px;
   border-radius: 14px;
@@ -805,6 +1176,10 @@ onUnmounted(() => {
 .modal-preview-grid,
 .modal-history {
   margin-top: 0;
+}
+
+.modal-form {
+  grid-template-columns: repeat(4, minmax(160px, 1fr));
 }
 
 .field-card {
@@ -876,7 +1251,6 @@ th, td {
 }
 
 tbody tr {
-  cursor: pointer;
   transition: background-color 0.16s ease;
 }
 
@@ -920,6 +1294,59 @@ input, select {
   color: #e2e8f0;
 }
 
+.btn-danger {
+  border: 1px solid rgba(252, 165, 165, 0.38);
+  background: rgba(127, 29, 29, 0.45);
+  color: #fecaca;
+}
+
+.acciones-cell {
+  min-width: 252px;
+}
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.action-btn {
+  min-width: 72px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.action-btn:hover {
+  transform: translateY(-1px);
+}
+
+.action-edit {
+  color: #dbeafe;
+  border-color: rgba(96, 165, 250, 0.35);
+  background: linear-gradient(135deg, rgba(30, 64, 175, 0.55), rgba(29, 78, 216, 0.35));
+  box-shadow: 0 8px 18px -14px rgba(59, 130, 246, 0.8);
+}
+
+.action-delete {
+  color: #fee2e2;
+  border-color: rgba(248, 113, 113, 0.4);
+  background: linear-gradient(135deg, rgba(153, 27, 27, 0.6), rgba(127, 29, 29, 0.4));
+  box-shadow: 0 8px 18px -14px rgba(248, 113, 113, 0.75);
+}
+
+.action-pdf {
+  color: #dcfce7;
+  border-color: rgba(74, 222, 128, 0.35);
+  background: linear-gradient(135deg, rgba(22, 101, 52, 0.62), rgba(21, 128, 61, 0.4));
+  box-shadow: 0 8px 18px -14px rgba(74, 222, 128, 0.8);
+}
+
 .estado-pill {
   display: inline-flex;
   align-items: center;
@@ -959,6 +1386,42 @@ input, select {
 
   .group-actions {
     justify-content: space-between;
+  }
+
+  .inline-actions {
+    flex-direction: column;
+  }
+
+  .generator-form {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+
+  .gen-col-2,
+  .gen-col-3 {
+    grid-column: span 3;
+  }
+
+  .modal-form {
+    grid-template-columns: repeat(2, minmax(180px, 1fr));
+  }
+
+  .row-actions {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 640px) {
+  .generator-form {
+    grid-template-columns: 1fr;
+  }
+
+  .gen-col-2,
+  .gen-col-3 {
+    grid-column: 1 / -1;
+  }
+
+  .modal-form {
+    grid-template-columns: 1fr;
   }
 }
 </style>

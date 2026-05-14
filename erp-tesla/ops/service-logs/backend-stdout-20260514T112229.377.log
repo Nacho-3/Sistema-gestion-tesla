@@ -1,0 +1,4 @@
+[dotenv@17.3.1] injecting env (23) from .env -- tip: ⚡️ secrets for agents: https://dotenvx.com/as2
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  suppress all logs with { quiet: true }
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  suppress all logs with { quiet: true }
+[backup] Servicio activo. Carpeta: C:\ERP-Tesla-Backups

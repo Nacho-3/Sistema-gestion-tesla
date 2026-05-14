@@ -769,33 +769,73 @@ router.get("/semana-actual", async (req, res) => {
   }
 })
 
-router.post("/semanas/:id/cerrar", async (req, res) => {
+const parseOptionalSaldo = (value, label) => {
+  if (value === undefined || value === null || String(value).trim() === "") {
+    return null
+  }
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${label} inválido`)
+  }
+  return roundMoney(parsed)
+}
+
+router.post("/semanas/:id/saldos", async (req, res) => {
   try {
     const { id } = req.params
-    const { saldo_banco, saldo_pendiente_echeq } = req.body
+    const { saldo_banco, saldo_pendiente_echeq, saldo_echeq_depositados, saldo_efectivo, saldo_cheques } = req.body
 
     const idNumerico = Number(id)
     if (!Number.isInteger(idNumerico) || idNumerico <= 0) {
       return res.status(400).json({ error: "ID de semana inválido" })
     }
 
-    let saldoBancoNormalizado = null
-    if (saldo_banco !== undefined && saldo_banco !== null && String(saldo_banco).trim() !== "") {
-      const saldoParsed = Number(saldo_banco)
-      if (!Number.isFinite(saldoParsed)) {
-        return res.status(400).json({ error: "Saldo de banco inválido" })
-      }
-      saldoBancoNormalizado = roundMoney(saldoParsed)
+    const saldoBancoNormalizado = parseOptionalSaldo(saldo_banco, "Saldo de banco")
+    const saldoPendienteEcheqNormalizado = parseOptionalSaldo(saldo_pendiente_echeq, "Saldo de eCheqs a depositar")
+    const saldoEcheqDepositadosNormalizado = parseOptionalSaldo(saldo_echeq_depositados, "Saldo de eCheqs depositados")
+    const saldoEfectivoNormalizado = parseOptionalSaldo(saldo_efectivo, "Saldo de efectivo")
+    const saldoChequesNormalizado = parseOptionalSaldo(saldo_cheques, "Saldo de cheques")
+
+    const { data, error } = await db
+      .from("cajas_semanales")
+      .update({
+        saldo_banco: saldoBancoNormalizado,
+        saldo_pendiente_echeq: saldoPendienteEcheqNormalizado,
+        saldo_echeq_depositados: saldoEcheqDepositadosNormalizado,
+        saldo_efectivo: saldoEfectivoNormalizado,
+        saldo_cheques: saldoChequesNormalizado,
+      })
+      .eq("id", idNumerico)
+      .select()
+      .single()
+
+    if (error) throw error
+    if (!data) {
+      return res.status(404).json({ error: "Semana de caja no encontrada" })
     }
 
-    let saldoPendienteEcheqNormalizado = null
-    if (saldo_pendiente_echeq !== undefined && saldo_pendiente_echeq !== null && String(saldo_pendiente_echeq).trim() !== "") {
-      const saldoPendienteParsed = Number(saldo_pendiente_echeq)
-      if (!Number.isFinite(saldoPendienteParsed)) {
-        return res.status(400).json({ error: "Saldo pendiente de eCheqs inválido" })
-      }
-      saldoPendienteEcheqNormalizado = roundMoney(saldoPendienteParsed)
+    getIo()?.emit('caja:changed')
+    res.json(data)
+  } catch (err) {
+    res.status(400).json({ error: err.message })
+  }
+})
+
+router.post("/semanas/:id/cerrar", async (req, res) => {
+  try {
+    const { id } = req.params
+    const { saldo_banco, saldo_pendiente_echeq, saldo_echeq_depositados, saldo_efectivo, saldo_cheques } = req.body
+
+    const idNumerico = Number(id)
+    if (!Number.isInteger(idNumerico) || idNumerico <= 0) {
+      return res.status(400).json({ error: "ID de semana inválido" })
     }
+
+    const saldoBancoNormalizado = parseOptionalSaldo(saldo_banco, "Saldo de banco")
+    const saldoPendienteEcheqNormalizado = parseOptionalSaldo(saldo_pendiente_echeq, "Saldo pendiente de eCheqs")
+    const saldoEcheqDepositadosNormalizado = parseOptionalSaldo(saldo_echeq_depositados, "Saldo de eCheqs depositados")
+    const saldoEfectivoNormalizado = parseOptionalSaldo(saldo_efectivo, "Saldo de efectivo")
+    const saldoChequesNormalizado = parseOptionalSaldo(saldo_cheques, "Saldo de cheques")
 
     const semana = await recalcularCajaSemanal(idNumerico)
     if (!semana) {
@@ -809,6 +849,9 @@ router.post("/semanas/:id/cerrar", async (req, res) => {
         estado: "cerrada",
         saldo_banco: saldoBancoNormalizado,
         saldo_pendiente_echeq: saldoPendienteEcheqNormalizado,
+        saldo_echeq_depositados: saldoEcheqDepositadosNormalizado,
+        saldo_efectivo: saldoEfectivoNormalizado,
+        saldo_cheques: saldoChequesNormalizado,
       })
       .eq("id", idNumerico)
       .select()
@@ -900,6 +943,9 @@ router.get("/resumen/pdf", async (req, res) => {
         .filter((semana) => {
           return (semana?.saldo_banco !== null && semana?.saldo_banco !== undefined)
             || (semana?.saldo_pendiente_echeq !== null && semana?.saldo_pendiente_echeq !== undefined)
+            || (semana?.saldo_echeq_depositados !== null && semana?.saldo_echeq_depositados !== undefined)
+            || (semana?.saldo_efectivo !== null && semana?.saldo_efectivo !== undefined)
+            || (semana?.saldo_cheques !== null && semana?.saldo_cheques !== undefined)
         })
         .sort((a, b) => {
           const fechaA = new Date(a?.updated_at || a?.fecha_fin || a?.created_at || 0).getTime()
@@ -937,6 +983,11 @@ router.get("/resumen/pdf", async (req, res) => {
         saldo_pendiente_echeq: modoResumen === "general"
           ? ultimaSemanaConSaldosRegistrados?.saldo_pendiente_echeq ?? null
           : semanaCaja?.saldo_pendiente_echeq,
+        saldo_echeq_depositados: modoResumen === "general"
+          ? ultimaSemanaConSaldosRegistrados?.saldo_echeq_depositados ?? null
+          : semanaCaja?.saldo_echeq_depositados,
+        saldo_efectivo: modoResumen === "general" ? ultimaSemanaConSaldosRegistrados?.saldo_efectivo ?? null : semanaCaja?.saldo_efectivo,
+        saldo_cheques: modoResumen === "general" ? ultimaSemanaConSaldosRegistrados?.saldo_cheques ?? null : semanaCaja?.saldo_cheques,
       }
     }
 
@@ -1063,27 +1114,97 @@ router.get("/resumen/pdf", async (req, res) => {
     doc.y = resumenY + 92
 
     const saldoBancoInformativo = cajaSemanalResumen?.saldo_banco
-    const saldoEcheqInformativo = cajaSemanalResumen?.saldo_pendiente_echeq
+    const saldoEcheqADepositarInformativo = cajaSemanalResumen?.saldo_pendiente_echeq
+    const saldoEcheqDepositadosInformativo = cajaSemanalResumen?.saldo_echeq_depositados
+    const saldoEfectivoInformativo = cajaSemanalResumen?.saldo_efectivo
+    const saldoChequesInformativo = cajaSemanalResumen?.saldo_cheques
     const formatoMonedaOpcional = (valor) => {
       return valor === null || valor === undefined ? "No informado" : formatoMoneda(valor)
     }
 
-    const saldosInfoY = doc.y + 6
-    doc.roundedRect(45, saldosInfoY, pageWidth - 90, 58, 6).fill("#e0f2fe")
-    doc.fillColor("#0f172a").font("Helvetica-Bold").fontSize(9)
-    doc.text("SALDOS INFORMATIVOS", 58, saldosInfoY + 8, { width: 180 })
+    const calcularTotalResumenBancario = () => {
+      let total = 0
+      if (saldoBancoInformativo !== null && saldoBancoInformativo !== undefined) total += Number(saldoBancoInformativo)
+      if (saldoEcheqADepositarInformativo !== null && saldoEcheqADepositarInformativo !== undefined) total += Number(saldoEcheqADepositarInformativo)
+      if (saldoEcheqDepositadosInformativo !== null && saldoEcheqDepositadosInformativo !== undefined) total += Number(saldoEcheqDepositadosInformativo)
+      if (saldoEfectivoInformativo !== null && saldoEfectivoInformativo !== undefined) total += Number(saldoEfectivoInformativo)
+      if (saldoChequesInformativo !== null && saldoChequesInformativo !== undefined) total += Number(saldoChequesInformativo)
+      return total
+    }
 
-    doc.fillColor("#1e3a8a").font("Helvetica-Bold").fontSize(8.8)
-    doc.text("Saldo en banco", 58, saldosInfoY + 26, { width: 180 })
-    doc.text("Saldo pendiente en eCheqs", 300, saldosInfoY + 26, { width: 180 })
+    const drawResumenBancarioTable = () => {
+      drawSectionTitle("Resumen bancario")
 
-    doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(11)
-    doc.text(formatoMonedaOpcional(saldoBancoInformativo), 58, saldosInfoY + 39, { width: 180 })
-    doc.text(formatoMonedaOpcional(saldoEcheqInformativo), 300, saldosInfoY + 39, { width: 180 })
-    doc.fillColor(PDF_COLORS.ink)
-    doc.y = saldosInfoY + 70
+      const bankRows = [
+        { concepto: "Saldo banco", valor: formatoMonedaOpcional(saldoBancoInformativo) },
+        { concepto: "eCheqs a depositar", valor: formatoMonedaOpcional(saldoEcheqADepositarInformativo) },
+        { concepto: "eCheqs depositados", valor: formatoMonedaOpcional(saldoEcheqDepositadosInformativo) },
+        { concepto: "Efectivo en caja", valor: formatoMonedaOpcional(saldoEfectivoInformativo) },
+        { concepto: "Cheques en caja", valor: formatoMonedaOpcional(saldoChequesInformativo) },
+      ]
 
-    drawSectionTitle("Desglose por medio de pago")
+      const tableLeft = 45
+      const tableRight = pageWidth - 45
+      const colConceptoX = 55
+      const colValorX = 400
+      const colConceptoWidth = 330
+      const colValorWidth = 120
+
+      const drawVerticalSeparator = (y, height) => {
+        doc.strokeColor(PDF_COLORS.line).lineWidth(0.8)
+        doc.moveTo(colValorX - 12, y).lineTo(colValorX - 12, y + height).stroke()
+      }
+
+      const drawHorizontalSeparator = (y) => {
+        doc.strokeColor(PDF_COLORS.line).lineWidth(0.6)
+        doc.moveTo(tableLeft, y).lineTo(tableRight, y).stroke()
+      }
+
+      const drawTableBorders = (topY, bottomY) => {
+        doc.strokeColor(PDF_COLORS.line).lineWidth(0.8)
+        doc.moveTo(tableLeft, topY).lineTo(tableLeft, bottomY).stroke()
+        doc.moveTo(tableRight, topY).lineTo(tableRight, bottomY).stroke()
+      }
+
+      const headerY = doc.y
+      doc.rect(tableLeft, headerY, pageWidth - 90, 22).fill(PDF_COLORS.navy)
+      drawVerticalSeparator(headerY, 22)
+      doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(9)
+      doc.text("CONCEPTO", colConceptoX, headerY + 7, { width: colConceptoWidth })
+      doc.text("VALOR", colValorX, headerY + 7, { width: colValorWidth, align: "right", lineBreak: false })
+      drawHorizontalSeparator(headerY + 22)
+      doc.fillColor(PDF_COLORS.ink)
+
+      const tableTopY = headerY
+      let y = headerY + 22
+
+      bankRows.forEach((item, index) => {
+        const bg = index % 2 === 0 ? PDF_COLORS.light : PDF_COLORS.lightAlt
+        doc.rect(tableLeft, y, pageWidth - 90, 20).fill(bg)
+        drawVerticalSeparator(y, 20)
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(8.8)
+        doc.text(item.concepto, colConceptoX, y + 6, { width: colConceptoWidth, lineBreak: false })
+        doc.text(item.valor, colValorX, y + 6, { width: colValorWidth, align: "right", lineBreak: false })
+        drawHorizontalSeparator(y + 20)
+        y += 20
+      })
+
+      // Fila de total
+      const totalResumen = calcularTotalResumenBancario()
+      doc.rect(tableLeft, y, pageWidth - 90, 20).fill(PDF_COLORS.navy)
+      drawVerticalSeparator(y, 20)
+      doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(9)
+      doc.text("TOTAL SALDOS", colConceptoX, y + 6, { width: colConceptoWidth, lineBreak: false })
+      doc.text(formatoMoneda(totalResumen), colValorX, y + 6, { width: colValorWidth, align: "right", lineBreak: false })
+      drawHorizontalSeparator(y + 20)
+      y += 20
+
+      drawTableBorders(tableTopY, y)
+      doc.fillColor(PDF_COLORS.ink)
+      doc.y = y + 10
+    }
+
+    drawResumenBancarioTable()
 
     const desglosePorTipo = MEDIOS_PAGO.reduce((acc, medio) => {
       acc[medio] = { ingresos: 0, egresos: 0 }
@@ -1111,79 +1232,84 @@ router.get("/resumen/pdf", async (req, res) => {
       total: desglosePorTipo[medio].ingresos - desglosePorTipo[medio].egresos,
     }))
 
-    const colMedioX = 55
-    const colIngresosX = 190
-    const colEgresosX = 315
-    const colTotalX = 440
-    const colMedioWidth = 120
-    const colMontoWidth = 105
+    const drawDesgloseTable = () => {
+      drawSectionTitle("Desglose por medio de pago")
 
-    const tableLeft = 45
-    const tableRight = pageWidth - 45
+      const colMedioX = 55
+      const colIngresosX = 190
+      const colEgresosX = 315
+      const colTotalX = 440
+      const colMedioWidth = 120
+      const colMontoWidth = 105
 
-    const drawVerticalSeparators = (y, height) => {
-      doc.strokeColor(PDF_COLORS.line).lineWidth(0.8)
-      doc.moveTo(colEgresosX - 10, y).lineTo(colEgresosX - 10, y + height).stroke()
-      doc.moveTo(colTotalX - 10, y).lineTo(colTotalX - 10, y + height).stroke()
-    }
+      const tableLeft = 45
+      const tableRight = pageWidth - 45
 
-    const drawHorizontalSeparator = (y) => {
-      doc.strokeColor(PDF_COLORS.line).lineWidth(0.6)
-      doc.moveTo(tableLeft, y).lineTo(tableRight, y).stroke()
-    }
+      const drawVerticalSeparators = (y, height) => {
+        doc.strokeColor(PDF_COLORS.line).lineWidth(0.8)
+        doc.moveTo(colEgresosX - 10, y).lineTo(colEgresosX - 10, y + height).stroke()
+        doc.moveTo(colTotalX - 10, y).lineTo(colTotalX - 10, y + height).stroke()
+      }
 
-    const drawTableBorders = (topY, bottomY) => {
-      doc.strokeColor(PDF_COLORS.line).lineWidth(0.8)
-      doc.moveTo(tableLeft, topY).lineTo(tableLeft, bottomY).stroke()
-      doc.moveTo(tableRight, topY).lineTo(tableRight, bottomY).stroke()
-    }
+      const drawHorizontalSeparator = (y) => {
+        doc.strokeColor(PDF_COLORS.line).lineWidth(0.6)
+        doc.moveTo(tableLeft, y).lineTo(tableRight, y).stroke()
+      }
 
-    const drawDesgloseHeader = () => {
-      const headerY = doc.y
-      doc.rect(45, headerY, pageWidth - 90, 22).fill(PDF_COLORS.navy)
-      drawVerticalSeparators(headerY, 22)
-      doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(9)
-      doc.text("MEDIO", colMedioX, headerY + 7, { width: colMedioWidth })
-      doc.text("INGRESOS", colIngresosX, headerY + 7, { width: colMontoWidth, align: "right", lineBreak: false })
-      doc.text("EGRESOS", colEgresosX, headerY + 7, { width: colMontoWidth, align: "right", lineBreak: false })
-      doc.text("TOTAL", colTotalX, headerY + 7, { width: colMontoWidth, align: "right", lineBreak: false })
-      drawHorizontalSeparator(headerY + 22)
+      const drawTableBorders = (topY, bottomY) => {
+        doc.strokeColor(PDF_COLORS.line).lineWidth(0.8)
+        doc.moveTo(tableLeft, topY).lineTo(tableLeft, bottomY).stroke()
+        doc.moveTo(tableRight, topY).lineTo(tableRight, bottomY).stroke()
+      }
+
+      const drawDesgloseHeader = () => {
+        const headerY = doc.y
+        doc.rect(45, headerY, pageWidth - 90, 22).fill(PDF_COLORS.navy)
+        drawVerticalSeparators(headerY, 22)
+        doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(9)
+        doc.text("MEDIO", colMedioX, headerY + 7, { width: colMedioWidth })
+        doc.text("INGRESOS", colIngresosX, headerY + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+        doc.text("EGRESOS", colEgresosX, headerY + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+        doc.text("TOTAL", colTotalX, headerY + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+        drawHorizontalSeparator(headerY + 22)
+        doc.fillColor(PDF_COLORS.ink)
+        doc.y = headerY + 22
+      }
+
+      const tableTopY = doc.y
+      drawDesgloseHeader()
+      let yDesglose = doc.y
+
+      desgloseItems.forEach((item, idx) => {
+        const bg = idx % 2 === 0 ? PDF_COLORS.light : PDF_COLORS.lightAlt
+        doc.rect(45, yDesglose, pageWidth - 90, 20).fill(bg)
+        drawVerticalSeparators(yDesglose, 20)
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(8.8)
+        doc.text(item.label, colMedioX, yDesglose + 6, { width: colMedioWidth, lineBreak: false })
+        doc.text(formatoMoneda(item.ingresos), colIngresosX, yDesglose + 6, { width: colMontoWidth, align: "right", lineBreak: false })
+        doc.text(formatoMoneda(item.egresos), colEgresosX, yDesglose + 6, { width: colMontoWidth, align: "right", lineBreak: false })
+        doc.text(formatoMoneda(item.total), colTotalX, yDesglose + 6, { width: colMontoWidth, align: "right", lineBreak: false })
+        drawHorizontalSeparator(yDesglose + 20)
+        yDesglose += 20
+      })
+
+      doc.rect(45, yDesglose, pageWidth - 90, 22).fill(PDF_COLORS.card)
+      drawVerticalSeparators(yDesglose, 22)
+      doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(9.2)
+      doc.text("TOTAL GENERAL", colMedioX, yDesglose + 7, { width: colMedioWidth })
+      doc.text(formatoMoneda(totalIngresos), colIngresosX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+      doc.text(formatoMoneda(totalEgresos), colEgresosX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+      doc.text(formatoMoneda(balance), colTotalX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
+      drawHorizontalSeparator(yDesglose)
+      yDesglose += 22
+
+      drawHorizontalSeparator(yDesglose)
+      drawTableBorders(tableTopY, yDesglose)
       doc.fillColor(PDF_COLORS.ink)
-      doc.y = headerY + 22
+      doc.y = yDesglose + 10
     }
 
-    const tableTopY = doc.y
-    drawDesgloseHeader()
-    let yDesglose = doc.y
-    desgloseItems.forEach((item, idx) => {
-      const bg = idx % 2 === 0 ? PDF_COLORS.light : PDF_COLORS.lightAlt
-      doc.rect(45, yDesglose, pageWidth - 90, 20).fill(bg)
-      drawVerticalSeparators(yDesglose, 20)
-      doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(8.8)
-      doc.text(item.label, colMedioX, yDesglose + 6, { width: colMedioWidth, lineBreak: false })
-      doc.text(formatoMoneda(item.ingresos), colIngresosX, yDesglose + 6, { width: colMontoWidth, align: "right", lineBreak: false })
-      doc.text(formatoMoneda(item.egresos), colEgresosX, yDesglose + 6, { width: colMontoWidth, align: "right", lineBreak: false })
-      doc.text(formatoMoneda(item.total), colTotalX, yDesglose + 6, { width: colMontoWidth, align: "right", lineBreak: false })
-      drawHorizontalSeparator(yDesglose + 20)
-      yDesglose += 20
-    })
-
-    doc.rect(45, yDesglose, pageWidth - 90, 22).fill(PDF_COLORS.card)
-    drawVerticalSeparators(yDesglose, 22)
-    doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(9.2)
-    doc.text("TOTAL GENERAL", colMedioX, yDesglose + 7, { width: colMedioWidth })
-    doc.text(formatoMoneda(totalIngresos), colIngresosX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
-    doc.text(formatoMoneda(totalEgresos), colEgresosX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
-    doc.text(formatoMoneda(balance), colTotalX, yDesglose + 7, { width: colMontoWidth, align: "right", lineBreak: false })
-    drawHorizontalSeparator(yDesglose)
-    yDesglose += 22
-
-    drawHorizontalSeparator(yDesglose)
-    drawTableBorders(tableTopY, yDesglose)
-    doc.fillColor(PDF_COLORS.ink)
-    doc.y = yDesglose + 6
-
-    const drawDetallePageHeader = () => {
+    const drawDetailPageHeader = () => {
       const detalleHeaderBottom = drawPremiumHeader(doc, {
         title: "TESLA MONTAJES ELECTRICOS",
         subtitle: "Detalle de movimientos de caja",
@@ -1192,7 +1318,6 @@ router.get("/resumen/pdf", async (req, res) => {
       })
       doc.fillColor(PDF_COLORS.ink)
       doc.y = detalleHeaderBottom + 14
-      drawSectionTitle("Detalle de movimientos")
     }
 
     const drawMovHeader = () => {
@@ -1210,7 +1335,9 @@ router.get("/resumen/pdf", async (req, res) => {
 
     // El detalle siempre empieza en la segunda página.
     doc.addPage()
-    drawDetallePageHeader()
+    drawDetailPageHeader()
+    drawDesgloseTable()
+    drawSectionTitle("Detalle de movimientos")
     drawMovHeader()
     let yMov = doc.y
 
@@ -1246,7 +1373,7 @@ router.get("/resumen/pdf", async (req, res) => {
 
         if (yMov + rowHeight > doc.page.height - 74) {
           doc.addPage()
-          drawDetallePageHeader()
+          drawDetailPageHeader()
           drawMovHeader()
           yMov = doc.y
         }

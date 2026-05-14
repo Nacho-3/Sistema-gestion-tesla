@@ -45,7 +45,8 @@ const saveObraFile = async (obra, folder) => {
       .eq("id", obra.grupo_id)
       .single();
 
-    const clienteNombre = clienteData?.razon_social || "-";
+    // Sanitizar el nombre de la obra para evitar path traversal
+    const safeObraNombre = sanitizeFileText(obra.nombre);
     const grupoNombre = grupoData?.nombre || "-";
 
     const formattedFechaInicio = obra.fecha_inicio
@@ -53,8 +54,8 @@ const saveObraFile = async (obra, folder) => {
       : "-";
 
     const obraContent = `Nombre: ${obra.nombre || "-"}\nCliente: ${clienteNombre}\nGrupo: ${grupoNombre}\nFecha Inicio: ${formattedFechaInicio}\nEstado: ${obra.estado || "-"}`;
-
-    const filePath = path.join(folder, `${obra.nombre}.txt`);
+    
+    const filePath = path.join(folder, `${safeObraNombre}.txt`);
     await fs.writeFile(filePath, obraContent);
   } catch (error) {
     console.error("Error al guardar los datos de la obra:", error);
@@ -62,21 +63,25 @@ const saveObraFile = async (obra, folder) => {
   }
 };
 
+
+
 const deleteObraFile = async (obra) => {
   const folder = obra.estado === "finalizada" ? FINISHED_OBRAS_FOLDER : ACTIVE_OBRAS_FOLDER;
   const obraFilePath = path.join(folder, `${obra.nombre}.txt`);
   try {
     await fs.unlink(obraFilePath);
   } catch (err) {
-    console.error(`Error al eliminar el archivo de la obra: ${obraFilePath}`, err);
+    console.error(`Error al eliminar el archivo de la obra: ${obraFilePath}`, err); // Log the error but don't rethrow to avoid blocking
   }
 };
 
 const moveObraFile = async (obra, newEstado) => {
   const oldFolder = obra.estado === "finalizada" ? FINISHED_OBRAS_FOLDER : ACTIVE_OBRAS_FOLDER;
   const newFolder = newEstado === "finalizada" ? FINISHED_OBRAS_FOLDER : ACTIVE_OBRAS_FOLDER;
-  const oldFilePath = path.join(oldFolder, `${obra.nombre}.txt`);
-  const newFilePath = path.join(newFolder, `${obra.nombre}.txt`);
+  const safeObraNombre = sanitizeFileText(obra.nombre);
+
+  const oldFilePath = path.join(oldFolder, `${safeObraNombre}.txt`);
+  const newFilePath = path.join(newFolder, `${safeObraNombre}.txt`);
 
   try {
     await fs.rename(oldFilePath, newFilePath);
@@ -305,7 +310,8 @@ const getClienteGrupo = async (obra) => {
 
   // Mover archivo de obra al cambiar estado a finalizada
   if (obra.estado === "finalizada") {
-    const oldFilePath = path.join(ACTIVE_OBRAS_FOLDER, `${obra.nombre}.txt`);
+    const safeObraNombre = sanitizeFileText(obra.nombre);
+    const oldFilePath = path.join(ACTIVE_OBRAS_FOLDER, `${safeObraNombre}.txt`);
     const newFilePath = path.join(FINISHED_OBRAS_FOLDER, `${obra.nombre}.txt`);
     try {
       await fs.rename(oldFilePath, newFilePath);

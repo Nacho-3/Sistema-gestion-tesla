@@ -5,15 +5,14 @@ param(
 $ErrorActionPreference = "Stop"
 
 $scriptPath = Join-Path $PSScriptRoot "start-erp-services.ps1"
-$currentUser = if ($env:USERDOMAIN) { "$($env:USERDOMAIN)\$($env:USERNAME)" } else { $env:USERNAME }
 
 if (!(Test-Path $scriptPath)) {
   throw "No existe el script de arranque: $scriptPath"
 }
 
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -ExecutionPolicy Bypass -File `"" + $scriptPath + "`"")
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
-$principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Limited
+$triggerAtStartup = New-ScheduledTaskTrigger -AtStartup
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
 
 try {
@@ -22,7 +21,7 @@ try {
   # no-op
 }
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggerAtStartup -Principal $principal -Settings $settings -Force | Out-Null
 
 Write-Host "Tarea creada correctamente: $TaskName"
 Get-ScheduledTask -TaskName $TaskName | Select-Object TaskName, State, TaskPath | Format-Table -AutoSize

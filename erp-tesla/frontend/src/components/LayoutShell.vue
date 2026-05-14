@@ -38,6 +38,7 @@ const itemsMenu = [
   { label: "Caja", path: "/caja" },
   { label: "Presupuestos", path: "/presupuestos" },
   { label: "Certificados", path: "/certificados" },
+  { label: "Índices CAC", path: "/indices-cac" },
   { label: "Facturas", path: "/facturas" },
   { label: "Gastos", path: "/gastos" }
 ]

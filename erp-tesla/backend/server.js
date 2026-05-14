@@ -25,6 +25,7 @@ import cajaRoutes from "./routes/caja.js"
 import presupuestosRoutes from "./routes/presupuestos.js"
 import certificadosRoutes from "./routes/certificados.js"
 import gastosRouter from "./routes/gastos.js"
+import indicesCacRoutes from "./routes/indices_cac.js"
 
 
 dotenv.config()
@@ -157,7 +158,15 @@ app.set("trust proxy", 1)
 app.use(helmet({ crossOriginResourcePolicy: false }))
 app.use(cors({ origin: corsOriginValidator, credentials: true }))
 app.use(express.json({ limit: "1mb" }))
-app.use(apiLimiter)
+
+// Rate limiter solo para requests que modifican datos (no GET/HEAD/OPTIONS)
+app.use((req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    return next()
+  }
+  apiLimiter(req, res, next)
+})
+
 registerBackupHooks(app)
 app.get("/health", async (_req, res) => {
   try {
@@ -190,6 +199,7 @@ app.use("/caja", cajaRoutes)
 app.use("/presupuestos", presupuestosRoutes)
 app.use("/certificados", certificadosRoutes)
 app.use("/gastos", gastosRouter)
+app.use("/indices-cac", indicesCacRoutes)
 
 const httpServer = createServer(app)
 

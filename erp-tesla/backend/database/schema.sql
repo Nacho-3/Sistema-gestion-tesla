@@ -1,6 +1,9 @@
 -- MIGRACIÓN SEGURA: saldo_banco en cajas_semanales
 ALTER TABLE IF EXISTS cajas_semanales ADD COLUMN IF NOT EXISTS saldo_banco NUMERIC(12,2);
 ALTER TABLE IF EXISTS cajas_semanales ADD COLUMN IF NOT EXISTS saldo_pendiente_echeq NUMERIC(12,2);
+ALTER TABLE IF EXISTS cajas_semanales ADD COLUMN IF NOT EXISTS saldo_echeq_depositados NUMERIC(12,2);
+ALTER TABLE IF EXISTS cajas_semanales ADD COLUMN IF NOT EXISTS saldo_efectivo NUMERIC(12,2);
+ALTER TABLE IF EXISTS cajas_semanales ADD COLUMN IF NOT EXISTS saldo_cheques NUMERIC(12,2);
 
 -- MIGRACIÓN SEGURA: detalle en pagos_sueldo y reajuste_porcentaje en liquidaciones
 ALTER TABLE IF EXISTS pagos_sueldo ADD COLUMN IF NOT EXISTS detalle TEXT DEFAULT '';
@@ -402,6 +405,7 @@ CREATE TABLE IF NOT EXISTS cajas_semanales (
   saldo_final NUMERIC(12,2) NOT NULL DEFAULT 0,
   saldo_banco NUMERIC(12,2),
   saldo_pendiente_echeq NUMERIC(12,2),
+  saldo_echeq_depositados NUMERIC(12,2),
   estado VARCHAR(20) NOT NULL DEFAULT 'abierta' CONSTRAINT chk_cajas_semanales_estado CHECK (estado IN ('abierta', 'cerrada')),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -551,6 +555,7 @@ CREATE TABLE IF NOT EXISTS presupuestos (
   numero INTEGER NOT NULL UNIQUE,
   cliente_id INTEGER NOT NULL REFERENCES clientes(id),
   obra_id INTEGER NOT NULL REFERENCES obras(id),
+  proyecto TEXT DEFAULT '',
   fecha DATE NOT NULL DEFAULT CURRENT_DATE,
   validez_dias INTEGER NOT NULL DEFAULT 15,
   estado VARCHAR(20) NOT NULL DEFAULT 'pendiente',
@@ -558,9 +563,13 @@ CREATE TABLE IF NOT EXISTS presupuestos (
   observaciones TEXT DEFAULT '',
   subtotal_materiales NUMERIC(12,2) NOT NULL DEFAULT 0,
   subtotal_mano_obra NUMERIC(12,2) NOT NULL DEFAULT 0,
+  aplica_iva_materiales BOOLEAN NOT NULL DEFAULT TRUE,
+  aplica_iva_mano_obra BOOLEAN NOT NULL DEFAULT FALSE,
   iva_porcentaje NUMERIC(6,2) NOT NULL DEFAULT 21,
   iva_monto NUMERIC(12,2) NOT NULL DEFAULT 0,
   total NUMERIC(12,2) NOT NULL DEFAULT 0,
+  mostrar_mano_obra_pdf BOOLEAN NOT NULL DEFAULT TRUE,
+  mostrar_materiales_pdf BOOLEAN NOT NULL DEFAULT TRUE,
   info_interna_quien_hizo TEXT DEFAULT '',
   info_interna_quien_hizo_pdf BOOLEAN NOT NULL DEFAULT FALSE,
   info_interna_quien_aprobo TEXT DEFAULT '',
@@ -570,6 +579,11 @@ CREATE TABLE IF NOT EXISTS presupuestos (
 );
 
 ALTER TABLE IF EXISTS presupuestos
+  ADD COLUMN IF NOT EXISTS mostrar_mano_obra_pdf BOOLEAN NOT NULL DEFAULT TRUE,
+  ADD COLUMN IF NOT EXISTS mostrar_materiales_pdf BOOLEAN NOT NULL DEFAULT TRUE,
+  ADD COLUMN IF NOT EXISTS aplica_iva_materiales BOOLEAN NOT NULL DEFAULT TRUE,
+  ADD COLUMN IF NOT EXISTS aplica_iva_mano_obra BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS proyecto TEXT DEFAULT '',
   ADD COLUMN IF NOT EXISTS info_interna_quien_hizo TEXT DEFAULT '',
   ADD COLUMN IF NOT EXISTS info_interna_quien_hizo_pdf BOOLEAN NOT NULL DEFAULT FALSE,
   ADD COLUMN IF NOT EXISTS info_interna_quien_aprobo TEXT DEFAULT '',
@@ -580,6 +594,7 @@ CREATE TABLE IF NOT EXISTS presupuesto_items (
   presupuesto_id INTEGER NOT NULL REFERENCES presupuestos(id) ON DELETE CASCADE,
   tipo VARCHAR(20) NOT NULL CHECK (tipo IN ('material', 'mano_obra')),
   orden INTEGER NOT NULL,
+  etapa TEXT DEFAULT '',
   descripcion TEXT NOT NULL,
   cantidad NUMERIC(12,2) NOT NULL DEFAULT 1,
   ganancia_porcentaje NUMERIC(6,2) NOT NULL DEFAULT 0,
@@ -587,6 +602,9 @@ CREATE TABLE IF NOT EXISTS presupuesto_items (
   subtotal NUMERIC(12,2) NOT NULL DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE IF EXISTS presupuesto_items
+  ADD COLUMN IF NOT EXISTS etapa TEXT DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS presupuesto_info_interna_items (
   id SERIAL PRIMARY KEY,
@@ -610,8 +628,13 @@ CREATE TABLE IF NOT EXISTS certificados (
   certificado NUMERIC(12,2) NOT NULL DEFAULT 0,
   monto_base NUMERIC(12,2) NOT NULL DEFAULT 0,
   indice_cac NUMERIC(12,4) NOT NULL DEFAULT 1,
+  indice_base_cac NUMERIC(12,2) NOT NULL DEFAULT 0,
+  indice_actual_cac NUMERIC(12,2) NOT NULL DEFAULT 0,
+  indice_origen VARCHAR(20) NOT NULL DEFAULT 'factor' CHECK (indice_origen IN ('factor', 'indices')),
   ajuste_porcentaje NUMERIC(6,2) NOT NULL DEFAULT 0,
   actualizacion NUMERIC(12,2) NOT NULL DEFAULT 0,
+  aplica_iva BOOLEAN NOT NULL DEFAULT TRUE,
+  iva_porcentaje NUMERIC(6,2) NOT NULL DEFAULT 21,
   iva NUMERIC(12,2) NOT NULL DEFAULT 0,
   total_cert_sin_iva NUMERIC(12,2) NOT NULL DEFAULT 0,
   total_cert_con_iva NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -630,6 +653,11 @@ ALTER TABLE certificados ADD COLUMN IF NOT EXISTS tipo_registro VARCHAR(20) NOT 
 ALTER TABLE certificados ADD COLUMN IF NOT EXISTS porcentaje_avance NUMERIC(6,2) NOT NULL DEFAULT 0;
 ALTER TABLE certificados ADD COLUMN IF NOT EXISTS monto_base NUMERIC(12,2) NOT NULL DEFAULT 0;
 ALTER TABLE certificados ADD COLUMN IF NOT EXISTS indice_cac NUMERIC(12,4) NOT NULL DEFAULT 1;
+ALTER TABLE certificados ADD COLUMN IF NOT EXISTS indice_base_cac NUMERIC(12,2) NOT NULL DEFAULT 0;
+ALTER TABLE certificados ADD COLUMN IF NOT EXISTS indice_actual_cac NUMERIC(12,2) NOT NULL DEFAULT 0;
+ALTER TABLE certificados ADD COLUMN IF NOT EXISTS indice_origen VARCHAR(20) NOT NULL DEFAULT 'factor';
+ALTER TABLE certificados ADD COLUMN IF NOT EXISTS aplica_iva BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE certificados ADD COLUMN IF NOT EXISTS iva_porcentaje NUMERIC(6,2) NOT NULL DEFAULT 21;
 ALTER TABLE certificados ADD COLUMN IF NOT EXISTS total_cert_con_iva NUMERIC(12,2) NOT NULL DEFAULT 0;
 ALTER TABLE certificados ADD COLUMN IF NOT EXISTS acumulado_certificado NUMERIC(12,2) NOT NULL DEFAULT 0;
 ALTER TABLE certificados ADD COLUMN IF NOT EXISTS observaciones TEXT DEFAULT '';
@@ -642,6 +670,8 @@ SET
   porcentaje_avance = COALESCE(porcentaje_avance, 0),
   monto_base = COALESCE(monto_base, certificado, 0),
   indice_cac = COALESCE(NULLIF(indice_cac, 0), 1),
+  aplica_iva = COALESCE(aplica_iva, iva > 0),
+  iva_porcentaje = COALESCE(iva_porcentaje, 21),
   total_cert_con_iva = COALESCE(total_cert_con_iva, total_cert_sin_iva + iva, 0),
   acumulado_certificado = COALESCE(acumulado_certificado, certificado, 0),
   observaciones = COALESCE(observaciones, '')
@@ -652,6 +682,8 @@ WHERE
   OR porcentaje_avance IS NULL
   OR monto_base IS NULL
   OR indice_cac IS NULL
+  OR aplica_iva IS NULL
+  OR iva_porcentaje IS NULL
   OR total_cert_con_iva IS NULL
   OR acumulado_certificado IS NULL
   OR observaciones IS NULL;
@@ -1058,3 +1090,20 @@ BEGIN
       CHECK (monto > 0);
   END IF;
 END $$;
+
+-- =========================
+-- ÍNDICES CAC
+-- =========================
+CREATE TABLE IF NOT EXISTS indices_cac (
+  id SERIAL PRIMARY KEY,
+  periodo VARCHAR(100) NOT NULL,
+  valor NUMERIC(12,4) NOT NULL CHECK (valor > 0),
+  fecha_publicacion DATE,
+  notas TEXT DEFAULT '',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Presupuestos: columna para referenciar el índice CAC base al momento del contrato
+ALTER TABLE IF EXISTS presupuestos
+  ADD COLUMN IF NOT EXISTS indice_cac_base_id INTEGER REFERENCES indices_cac(id) ON DELETE SET NULL;

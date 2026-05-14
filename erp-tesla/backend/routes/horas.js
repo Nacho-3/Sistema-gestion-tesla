@@ -164,6 +164,7 @@ const resolveHorasExtraDetalle = ({
   fecha,
   horasComputadas,
   es_hora_extra = false,
+  es_feriado = false,
   tipo_hora_extra = null,
   cantidad_horas_extra = null,
   cantidad_horas_extra_50 = null,
@@ -202,8 +203,8 @@ const resolveHorasExtraDetalle = ({
     throw new Error("La suma de las horas extra (50% + 100%) no puede superar el total de horas cargadas")
   }
 
-  if (horasExtra100 > 0 && !isSaturdayDate(fecha)) {
-    throw new Error("Las horas extra al 100% solo corresponden a sábados")
+  if (horasExtra100 > 0 && !(isSaturdayDate(fecha) || es_feriado === true)) {
+    throw new Error("Las horas extra al 100% solo corresponden a sábados o feriados")
   }
 
   return {
@@ -313,7 +314,7 @@ const resolveObraForAdministrativeEmpleado = async (empleadoId) => {
 
 router.get("/resumen/pdf", async (req, res) => {
   try {
-    const { mes, anio } = req.query
+    const { mes, anio, grupo } = req.query
     const rango = getRangoMes(mes, anio)
 
     if (!rango) {
@@ -342,10 +343,28 @@ router.get("/resumen/pdf", async (req, res) => {
     const clientesData = clientesRes.data || []
     const horas = horasData || []
 
+    const normalizeGroupName = (value) => String(value || "").trim().toLowerCase()
+    const grupoSolicitado = normalizeGroupName(grupo)
+    const filtrosValidos = new Set(["tesla", "teslita", "juani"])
+    if (grupoSolicitado && !filtrosValidos.has(grupoSolicitado)) {
+      return res.status(400).json({ error: "Grupo inválido. Use tesla, teslita o juani" })
+    }
+
+    const isTargetGroupName = (groupNameNormalized) => {
+      if (!grupoSolicitado) return true
+      if (!groupNameNormalized) return false
+      if (grupoSolicitado === "tesla") {
+        return groupNameNormalized === "tesla" || groupNameNormalized.includes("admin")
+      }
+      return groupNameNormalized === grupoSolicitado || groupNameNormalized.includes(grupoSolicitado)
+    }
+
     const resumenEmpleado = {}
     const resumenObra = {}
     const resumenGrupo = {}
     const prestamosEntreGrupos = {}
+    const obrasOtrosGrupos = {}
+    const horasFiltradas = []
 
     horas.forEach((h) => {
       const hs = getCantidadHoras(h)
@@ -358,7 +377,11 @@ router.get("/resumen/pdf", async (req, res) => {
         grupos: gruposData,
       })
       const grupoEmpleado = gruposData.find((g) => g.id === emp?.grupo_id)
+      const grupoEmpleadoNombre = String(grupoEmpleado?.nombre || "Sin grupo").trim()
+      const grupoEmpleadoNormalizado = normalizeGroupName(grupoEmpleadoNombre)
       const esAdministrativo = /admin/i.test(String(grupoEmpleado?.nombre || ""))
+      const grupoObraNombre = String(gruposData.find((g) => g.id === obra?.grupo_id)?.nombre || grupoLabel || "Sin grupo").trim()
+      const grupoObraNormalizado = normalizeGroupName(grupoObraNombre)
 
       const clienteId = obra?.cliente_id ?? h?.cliente_id ?? null
       const cliente = clientesData.find((c) => c.id === clienteId)
@@ -374,12 +397,58 @@ router.get("/resumen/pdf", async (req, res) => {
         ? "administracion"
         : (obra?.id ? `obra_${obra.id}` : (clienteId ? `cliente_${clienteId}` : "sin_obra"))
 
+      const grupoHoraNormalizado = normalizeGroupName(grupoLabel)
+
+      const esPrestada = h.es_prestada === true || String(h.tipo || "").toLowerCase() === "prestada"
+      if (esPrestada) {
+        const grupoOrigen = String(gruposData.find((g) => g.id === h.grupo_origen_id)?.nombre || "Sin grupo origen").trim()
+        const grupoDestino = String(gruposData.find((g) => g.id === h.grupo_destino_id)?.nombre || "Sin grupo destino").trim()
+        const origenNormalizado = normalizeGroupName(grupoOrigen)
+        const destinoNormalizado = normalizeGroupName(grupoDestino)
+
+        const incluirPrestada = !grupoSolicitado
+          || isTargetGroupName(origenNormalizado)
+          || isTargetGroupName(destinoNormalizado)
+
+        if (incluirPrestada) {
+          const key = `${grupoOrigen.toLowerCase()}|||${grupoDestino.toLowerCase()}`
+          if (!prestamosEntreGrupos[key]) {
+            prestamosEntreGrupos[key] = {
+              origen: grupoOrigen,
+              destino: grupoDestino,
+              horas: 0,
+            }
+          }
+          prestamosEntreGrupos[key].horas += hs
+        }
+      }
+
+      const perteneceAlGrupoSolicitado = !grupoSolicitado || isTargetGroupName(grupoEmpleadoNormalizado)
+
+      if (!perteneceAlGrupoSolicitado) {
+        return
+      }
+
+      if (grupoSolicitado && obra && !isTargetGroupName(grupoObraNormalizado)) {
+        const otherKey = obra?.id ? `obra_${obra.id}` : `${obraLabel}__${grupoObraNombre}`
+        if (!obrasOtrosGrupos[otherKey]) {
+          obrasOtrosGrupos[otherKey] = {
+            label: obraLabel,
+            value: 0,
+            grupoDuenio: grupoObraNombre,
+          }
+        }
+        obrasOtrosGrupos[otherKey].value += hs
+        horasFiltradas.push(h)
+        return
+      }
+
       if (!resumenEmpleado[empLabel]) resumenEmpleado[empLabel] = 0
       if (!resumenObra[obraKey]) {
         resumenObra[obraKey] = {
           label: obraLabel,
           value: 0,
-          grupo: grupoLabel,
+          grupo: grupoObraNombre,
         }
       }
       if (!resumenGrupo[grupoLabel]) resumenGrupo[grupoLabel] = 0
@@ -388,28 +457,15 @@ router.get("/resumen/pdf", async (req, res) => {
       resumenObra[obraKey].value += hs
       resumenGrupo[grupoLabel] += hs
 
-      const esPrestada = h.es_prestada === true || String(h.tipo || "").toLowerCase() === "prestada"
-      if (esPrestada) {
-        const grupoOrigen = String(gruposData.find((g) => g.id === h.grupo_origen_id)?.nombre || "Sin grupo origen").trim()
-        const grupoDestino = String(gruposData.find((g) => g.id === h.grupo_destino_id)?.nombre || "Sin grupo destino").trim()
-        const key = `${grupoOrigen.toLowerCase()}|||${grupoDestino.toLowerCase()}`
-
-        if (!prestamosEntreGrupos[key]) {
-          prestamosEntreGrupos[key] = {
-            origen: grupoOrigen,
-            destino: grupoDestino,
-            horas: 0,
-          }
-        }
-        prestamosEntreGrupos[key].horas += hs
-      }
+      horasFiltradas.push(h)
     })
 
     const doc = new PDFDocument({ size: "A4", margin: 45 })
     const chunks = []
     const mesesNombre = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
     const mesNombre = mesesNombre[Math.max(0, Number(mes) - 1)] || `Mes ${mes}`
-    const nombreArchivo = `Resumen Horas ${sanitizeFileText(mesNombre)} ${sanitizeFileText(anio)}.pdf`
+    const grupoTitulo = grupoSolicitado ? ` ${String(grupo).toUpperCase()}` : ""
+    const nombreArchivo = `Resumen Horas${sanitizeFileText(grupoTitulo)} ${sanitizeFileText(mesNombre)} ${sanitizeFileText(anio)}.pdf`
     const pageWidth = doc.page.width
 
     doc.on("data", (chunk) => chunks.push(chunk))
@@ -592,8 +648,63 @@ router.get("/resumen/pdf", async (req, res) => {
     }
 
     const drawTransferDifferences = (items) => {
+      if (grupoSolicitado) {
+        // Calcular primero para saber cuántas filas habrá y reservar espacio exacto.
+        // "origen prestó a destino" = origen envió trabajadores a destino
+        // → destino RECIBIÓ trabajo → destino le DEBE a origen
+        const netPorContraparte = {}
+
+        items.forEach((item) => {
+          const origenNormalizado = normalizeGroupName(item.origen)
+          const destinoNormalizado = normalizeGroupName(item.destino)
+          const horas = Number(item.horas || 0)
+
+          if (isTargetGroupName(destinoNormalizado) && !isTargetGroupName(origenNormalizado)) {
+            if (!netPorContraparte[item.origen]) netPorContraparte[item.origen] = 0
+            netPorContraparte[item.origen] += horas
+          } else if (isTargetGroupName(origenNormalizado) && !isTargetGroupName(destinoNormalizado)) {
+            if (!netPorContraparte[item.destino]) netPorContraparte[item.destino] = 0
+            netPorContraparte[item.destino] -= horas
+          }
+        })
+
+        const deudas = Object.entries(netPorContraparte)
+          .map(([contraparte, horas]) => ({ contraparte, horas: Number(horas || 0) }))
+          .filter((item) => item.horas > 0.009)
+          .sort((a, b) => b.horas - a.horas)
+
+        // Calcular espacio necesario: título (~70) + header (26) + filas (26 c/u) + padding (20)
+        const rowCount = deudas.length || 1
+        const neededSpace = 70 + 26 + rowCount * 26 + 20
+        ensureSpace(neededSpace)
+        drawSectionTitle("Diferencia entre horas prestadas", neededSpace)
+
+        if (!deudas.length) {
+          drawList(
+            [{
+              label: `${String(grupo).toUpperCase()} no le debe horas a otros grupos`,
+              value: 0,
+            }],
+            "DEUDA",
+            "HORAS"
+          )
+          return
+        }
+
+        drawList(
+          deudas.map((item) => ({
+            label: `${String(grupo).toUpperCase()} le debe a ${item.contraparte}`,
+            value: item.horas,
+          })),
+          "DEUDA",
+          "HORAS"
+        )
+        return
+      }
+
+      // Vista global (sin grupo seleccionado): reservar espacio estimado
+      ensureSpace(190)
       drawSectionTitle("Diferencia entre horas prestadas", 140)
-      ensureSpace(120)
 
       const diferencias = {}
 
@@ -648,15 +759,18 @@ router.get("/resumen/pdf", async (req, res) => {
     const headerBottom = drawPremiumHeader(doc, {
       title: "TESLA MONTAJES ELECTRICOS",
       subtitle: "Resumen mensual de horas",
-      accentText: `${mesNombre} ${anio}`,
+      accentText: grupoSolicitado
+        ? `${mesNombre} ${anio} - Grupo ${String(grupo).toUpperCase()}`
+        : `${mesNombre} ${anio}`,
       logoPath: LOGO_PATH,
     })
 
     doc.fillColor(PDF_COLORS.ink)
     doc.y = headerBottom + 15
 
-    const totalHorasMes = horas.reduce((sum, h) => sum + getCantidadHoras(h), 0)
-    const totalRegistros = horas.length
+    const baseHorasResumen = grupoSolicitado ? horasFiltradas : horas
+    const totalHorasMes = baseHorasResumen.reduce((sum, h) => sum + getCantidadHoras(h), 0)
+    const totalRegistros = baseHorasResumen.length
     const totalPrestadas = Object.values(prestamosEntreGrupos).reduce((sum, item) => sum + Number(item.horas || 0), 0)
 
     const resumenY = doc.y
@@ -678,7 +792,7 @@ router.get("/resumen/pdf", async (req, res) => {
     doc.fillColor(PDF_COLORS.ink)
     doc.y = resumenY + 76
 
-    drawSectionTitle("Horas por obra", 200)
+    drawSectionTitle(grupoSolicitado ? `Horas por obra de ${String(grupo).toUpperCase()}` : "Horas por obra", 200)
 
     const obrasPorGrupo = Object.values(resumenObra)
       .reduce((acc, item) => {
@@ -705,15 +819,19 @@ router.get("/resumen/pdf", async (req, res) => {
         )
       })
 
-
-    drawSectionTitle("Horas por grupo", 200)
-    drawList(
-      Object.entries(resumenGrupo)
-        .map(([label, value]) => ({ label, value }))
-        .sort((a, b) => b.value - a.value),
-      "GRUPO",
-      "TOTAL"
-    )
+    if (grupoSolicitado) {
+      drawSectionTitle(`Obras de otros grupos trabajadas por ${String(grupo).toUpperCase()}`, 160)
+      drawList(
+        Object.values(obrasOtrosGrupos)
+          .map((item) => ({
+            label: `${item.label} (Grupo dueño: ${item.grupoDuenio})`,
+            value: item.value,
+          }))
+          .sort((a, b) => b.value - a.value),
+        "OBRA",
+        "TOTAL"
+      )
+    }
 
     const prestamosItems = Object.values(prestamosEntreGrupos)
       .map((item) => ({
@@ -741,6 +859,13 @@ router.get("/resumen/pdf", async (req, res) => {
 router.get("/", async (req, res) => {
   try {
     const { mes, anio, empleado_id, obra_id } = req.query
+
+    // Desabilitar caching para este endpoint
+    res.set({
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+    })
 
     let query = db.from("horas").select("*")
 
@@ -784,6 +909,7 @@ router.post("/", async (req, res) => {
       cantidad_horas_extra_100,
       horas_trabajadas,
       es_hora_extra = false,
+      es_feriado = false,
       tipo_hora_extra,
       observaciones,
       es_prestada = false,
@@ -852,6 +978,7 @@ router.post("/", async (req, res) => {
       cantidad_horas_extra,
       cantidad_horas_extra_50,
       cantidad_horas_extra_100,
+      es_feriado,
     })
 
     const registrosParaInsertar = []
@@ -954,6 +1081,7 @@ router.put("/:id", async (req, res) => {
       cantidad_horas_extra_100,
       horas_trabajadas,
       es_hora_extra,
+      es_feriado,
       tipo_hora_extra,
       observaciones,
       es_prestada,
@@ -1023,6 +1151,7 @@ router.put("/:id", async (req, res) => {
       cantidad_horas_extra,
       cantidad_horas_extra_50,
       cantidad_horas_extra_100,
+      es_feriado,
     })
 
     const payloadsToPersist = []

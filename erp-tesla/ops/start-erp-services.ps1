@@ -21,7 +21,8 @@ function Test-PortListening {
     $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop
     return ($conn | Measure-Object).Count -gt 0
   } catch {
-    $netstat = netstat -ano | Select-String (":$Port\s")
+    $listenPattern = "^\s*TCP\s+\S+:$Port\s+\S+\s+LISTENING\s+\d+\s*$"
+    $netstat = netstat -ano | Select-String $listenPattern
     return ($netstat | Measure-Object).Count -gt 0
   }
 }
@@ -117,7 +118,14 @@ if (-not $backendRunning) {
   Write-Host "Iniciando backend en $backendDir ..."
   Write-StartupLog "Iniciando backend (npm start) en $backendDir"
   if (-not $WhatIf) {
-    Start-Process -FilePath "npm.cmd" -ArgumentList "start" -WorkingDirectory $backendDir -WindowStyle Minimized | Out-Null
+    try {
+      $npmCmd = Get-Command npm.cmd -ErrorAction Stop | Select-Object -ExpandProperty Source
+      Start-Process -FilePath $npmCmd -ArgumentList "start" -WorkingDirectory $backendDir -WindowStyle Minimized | Out-Null
+      Write-StartupLog "Backend iniciado con npm.cmd: $npmCmd"
+    } catch {
+      Write-StartupLog "ERROR iniciando backend: $_"
+      Write-Host "ERROR: No se pudo iniciar backend. Ver log para detalles."
+    }
   }
 } else {
   Write-Host "Backend ya estaba activo (puerto $BackendPort)."
@@ -128,7 +136,13 @@ if (-not $caddyRunning) {
   Write-Host "Iniciando Caddy con config $caddyConfig ..."
   Write-StartupLog "Iniciando Caddy usando $resolvedCaddyExe"
   if (-not $WhatIf) {
-    Start-Process -FilePath $resolvedCaddyExe -ArgumentList @("run", "--config", $caddyConfig) -WorkingDirectory $repoRoot -WindowStyle Minimized | Out-Null
+    try {
+      Start-Process -FilePath $resolvedCaddyExe -ArgumentList @("run", "--config", $caddyConfig) -WorkingDirectory $repoRoot -WindowStyle Minimized | Out-Null
+      Write-StartupLog "Caddy iniciado correctamente"
+    } catch {
+      Write-StartupLog "ERROR iniciando Caddy: $_"
+      Write-Host "ERROR: No se pudo iniciar Caddy. Ver log para detalles."
+    }
   }
 } else {
   Write-Host "Caddy ya estaba activo (puerto $CaddyHttpsPort)."

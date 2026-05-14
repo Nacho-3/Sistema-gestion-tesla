@@ -1,0 +1,6 @@
+[dotenv@17.3.1] injecting env (23) from .env -- tip: ⚙️  override existing env vars with { override: true }
+[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  write to custom object with { processEnv: myObject }
+[dotenv@17.3.1] injecting env (0) from .env -- tip: 🤖 agentic secret storage: https://dotenvx.com/as2
+[backup] Servicio activo. Carpeta: C:\ERP-Tesla-Backups
+Servidor corriendo en 0.0.0.0:3000
+Cliente conectado: FjZmRq4F-xtkJHjyAAAB

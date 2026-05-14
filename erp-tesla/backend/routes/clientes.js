@@ -1,4 +1,4 @@
-﻿import express from "express"
+﻿﻿import express from "express"
 import db from "../db.js"
 import { pool } from "../db.js"
 import { getIo } from '../socket.js'
@@ -389,7 +389,31 @@ const deleteClientFolder = async (clientName) => {
   }
 };
 
-const saveFileToClientFolder = async (clientName, fileName, buffer, clientData) => {
+/**
+ * Guarda un presupuesto o listado de materiales en la subcarpeta específica del cliente.
+ * Estructura solicitada: clientes/RAZON_SOCIAL/Presupuestos (EMPRESA)/archivo.pdf
+ */
+export const saveBudgetToClientFolder = async (client, fileName, buffer) => {
+  try {
+    const clientName = sanitizeFileText(client.razon_social || "Cliente Sin Nombre");
+    const companyName = sanitizeFileText(client.empresa || client.razon_social || "Empresa");
+
+    const baseDir = "C:\\Users\\usuario\\Desktop\\GESTION TESLA\\clientes";
+    // Creamos la ruta: .../clientes/Razon Social/Presupuestos (Empresa)
+    const budgetSubfolder = path.join(baseDir, clientName, `Presupuestos (${companyName})`);
+
+    await fs.mkdir(budgetSubfolder, { recursive: true });
+
+    const filePath = path.join(budgetSubfolder, fileName);
+    await fs.writeFile(filePath, buffer);
+    console.log(`[FileSave] Archivo guardado correctamente en: ${filePath}`);
+  } catch (error) {
+    console.error("[FileSave] Error al guardar archivo de presupuesto:", error);
+    // No lanzamos el error para no bloquear la respuesta al usuario (descarga del navegador)
+  }
+};
+
+export const saveFileToClientFolder = async (clientName, fileName, buffer, clientData) => {
   try {
     const mainFolderPath = path.join("C:\\Users\\usuario\\Desktop\\GESTION TESLA", "clientes");
     const clientFolderPath = path.join(mainFolderPath, clientName);

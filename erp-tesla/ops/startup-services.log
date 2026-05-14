@@ -8,3 +8,60 @@
 [2026-04-29 07:41:15] Iniciando Caddy usando C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
 [2026-04-29 07:41:18] Estado final: backend=False caddy=True
 [2026-05-04 08:25:29] Inicio de script. CaddyExe=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe BackendPort=3000 CaddyPort=443 WhatIf=False ForceRestart=False
+[2026-05-07 08:05:59] Inicio de script. CaddyExe=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe BackendPort=3000 CaddyPort=443 WhatIf=False ForceRestart=False
+[2026-05-07 08:06:00] Atenci贸n: el puerto 443 est谩 en escucha pero no hay proceso caddy.exe.
+[2026-05-07 08:06:00] Iniciando backend (npm start) en C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla\backend
+[2026-05-07 08:06:01] Iniciando Caddy usando C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-05-07 08:06:03] Estado final: backend=False caddy=True
+[2026-05-13 08:20:41] Inicio de script. CaddyExe=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe BackendPort=3000 CaddyPort=443 WhatIf=False ForceRestart=False
+[2026-05-13 08:20:42] Atenci贸n: el puerto 443 est谩 en escucha pero no hay proceso caddy.exe.
+[2026-05-13 08:20:42] Iniciando backend (npm start) en C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla\backend
+[2026-05-13 08:20:42] Iniciando Caddy usando C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-05-13 08:20:45] Estado final: backend=False caddy=True
+[2026-05-14 07:37:21] Inicio de script. CaddyExe=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe BackendPort=3000 CaddyPort=443 WhatIf=False ForceRestart=False
+[2026-05-14 07:37:23] Atenci贸n: el puerto 443 est谩 en escucha pero no hay proceso caddy.exe.
+[2026-05-14 07:37:23] Iniciando backend (npm start) en C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla\backend
+[2026-05-14 07:37:23] Iniciando Caddy usando C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-05-14 07:37:25] Estado final: backend=False caddy=True
+[2026-05-14 07:53:31] Inicio de script. CaddyExe=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe BackendPort=3000 CaddyPort=443 WhatIf=False ForceRestart=False
+[2026-05-14 07:53:32] Backend ya activo en puerto 3000
+[2026-05-14 07:53:32] Caddy ya activo en puerto 443
+[2026-05-14 07:53:34] Estado final: backend=True caddy=True
+[2026-05-14 07:53:59] Inicio de script. CaddyExe=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe BackendPort=3000 CaddyPort=443 WhatIf=False ForceRestart=False
+[2026-05-14 07:54:00] Atenci贸n: el puerto 443 est谩 en escucha pero no hay proceso caddy.exe.
+[2026-05-14 07:54:00] Backend ya activo en puerto 3000
+[2026-05-14 07:54:00] Iniciando Caddy usando C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-05-14 07:54:02] Estado final: backend=True caddy=True
+[2026-05-14 07:54:18] Inicio de script. CaddyExe=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe BackendPort=3000 CaddyPort=443 WhatIf=False ForceRestart=False
+[2026-05-14 07:54:18] Atenci贸n: el puerto 443 est谩 en escucha pero no hay proceso caddy.exe.
+[2026-05-14 07:54:18] Backend ya activo en puerto 3000
+[2026-05-14 07:54:18] Iniciando Caddy usando C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-05-14 07:54:20] Estado final: backend=True caddy=True
+[2026-05-14 07:56:59] Inicio de script. CaddyExe=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe BackendPort=3000 CaddyPort=443 WhatIf=False ForceRestart=False
+[2026-05-14 07:57:00] Atenci贸n: el puerto 443 est谩 en escucha pero no hay proceso caddy.exe.
+[2026-05-14 07:57:00] Iniciando backend (npm start) en C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla\backend
+[2026-05-14 07:57:00] ERROR iniciando backend: Los par醡etros "-NoNewWindow" y "-WindowStyle" no se pueden especificar al mismo tiempo.
+[2026-05-14 07:57:00] Iniciando Caddy usando C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-05-14 07:57:00] ERROR iniciando Caddy: Los par醡etros "-NoNewWindow" y "-WindowStyle" no se pueden especificar al mismo tiempo.
+[2026-05-14 07:57:02] Estado final: backend=False caddy=True
+[2026-05-14 07:57:22] Inicio de script. CaddyExe=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe BackendPort=3000 CaddyPort=443 WhatIf=False ForceRestart=True
+[2026-05-14 07:57:22] Atenci贸n: el puerto 443 est谩 en escucha pero no hay proceso caddy.exe.
+[2026-05-14 07:57:23] Iniciando backend (npm start) en C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla\backend
+[2026-05-14 07:57:23] ERROR iniciando backend: Los par醡etros "-NoNewWindow" y "-WindowStyle" no se pueden especificar al mismo tiempo.
+[2026-05-14 07:57:23] Iniciando Caddy usando C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-05-14 07:57:23] ERROR iniciando Caddy: Los par醡etros "-NoNewWindow" y "-WindowStyle" no se pueden especificar al mismo tiempo.
+[2026-05-14 07:57:25] Estado final: backend=False caddy=True
+[2026-05-14 07:58:08] Inicio de script. CaddyExe=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe BackendPort=3000 CaddyPort=443 WhatIf=False ForceRestart=True
+[2026-05-14 07:58:18] Inicio de script. CaddyExe=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe BackendPort=3000 CaddyPort=443 WhatIf=False ForceRestart=True
+[2026-05-14 07:58:18] Atenci贸n: el puerto 443 est谩 en escucha pero no hay proceso caddy.exe.
+[2026-05-14 07:58:19] Iniciando backend (npm start) en C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla\backend
+[2026-05-14 07:58:19] Backend iniciado con npm.cmd: C:\Program Files\nodejs\npm.cmd
+[2026-05-14 07:58:19] Iniciando Caddy usando C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-05-14 07:58:19] Caddy iniciado correctamente
+[2026-05-14 07:58:21] Estado final: backend=True caddy=True
+[2026-05-14 08:03:19] Inicio de script. CaddyExe=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe BackendPort=3000 CaddyPort=443 WhatIf=False ForceRestart=False
+[2026-05-14 08:03:20] Atenci贸n: el puerto 443 est谩 en escucha pero no hay proceso caddy.exe.
+[2026-05-14 08:03:20] Backend ya activo en puerto 3000
+[2026-05-14 08:03:20] Iniciando Caddy usando C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-05-14 08:03:20] Caddy iniciado correctamente
+[2026-05-14 08:03:22] Estado final: backend=True caddy=True

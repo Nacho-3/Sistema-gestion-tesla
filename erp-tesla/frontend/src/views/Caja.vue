@@ -31,6 +31,15 @@ const semanaSeleccionadaId = ref("")
 const mostrarModalCerrarSemana = ref(false)
 const saldoBancoCierre = ref("")
 const saldoPendienteEcheqCierre = ref("")
+const saldoEcheqDepositadosCierre = ref("")
+const saldoEfectivoCierre = ref("")
+const saldoChequesCierre = ref("")
+const saldoBancoEditable = ref("")
+const saldoEcheqADepositarEditable = ref("")
+const saldoEcheqDepositadosEditable = ref("")
+const saldoEfectivoEditable = ref("")
+const saldoChequesEditable = ref("")
+const guardandoSaldosSemana = ref(false)
 const proximaSemanaInfo = ref(null)
 const confirmandoCierre = ref(false)
 
@@ -138,6 +147,9 @@ const normalizarSemanaCaja = (semana, defaults = {}) => {
     saldo_final_cheques: Number(semana.saldo_final_cheques ?? defaults.saldo_final_cheques ?? 0),
     saldo_banco: semana.saldo_banco === null || semana.saldo_banco === undefined ? null : Number(semana.saldo_banco),
     saldo_pendiente_echeq: semana.saldo_pendiente_echeq === null || semana.saldo_pendiente_echeq === undefined ? null : Number(semana.saldo_pendiente_echeq),
+    saldo_echeq_depositados: semana.saldo_echeq_depositados === null || semana.saldo_echeq_depositados === undefined ? null : Number(semana.saldo_echeq_depositados),
+    saldo_efectivo: semana.saldo_efectivo === null || semana.saldo_efectivo === undefined ? null : Number(semana.saldo_efectivo),
+    saldo_cheques: semana.saldo_cheques === null || semana.saldo_cheques === undefined ? null : Number(semana.saldo_cheques),
     estado: String(semana.estado || defaults.estado || "cerrada").toLowerCase(),
   }
 }
@@ -586,9 +598,65 @@ const abrirModalCerrarSemana = () => {
     }
   }
 
-  saldoBancoCierre.value = ""
-  saldoPendienteEcheqCierre.value = ""
+  saldoBancoCierre.value = saldoBancoEditable.value
+  saldoPendienteEcheqCierre.value = saldoEcheqADepositarEditable.value
+  saldoEcheqDepositadosCierre.value = saldoEcheqDepositadosEditable.value
+  saldoEfectivoCierre.value = saldoEfectivoEditable.value
+  saldoChequesCierre.value = saldoChequesEditable.value
   mostrarModalCerrarSemana.value = true
+}
+
+const cargarSaldosEditablesDesdeSemana = () => {
+  saldoBancoEditable.value = semanaActiva.value?.saldo_banco ?? ""
+  saldoEcheqADepositarEditable.value = semanaActiva.value?.saldo_pendiente_echeq ?? ""
+  saldoEcheqDepositadosEditable.value = semanaActiva.value?.saldo_echeq_depositados ?? ""
+  saldoEfectivoEditable.value = semanaActiva.value?.saldo_efectivo ?? ""
+  saldoChequesEditable.value = semanaActiva.value?.saldo_cheques ?? ""
+}
+
+const descartarSaldosSemana = async () => {
+  if (!semanaActiva.value?.id) return
+  try {
+    guardandoSaldosSemana.value = true
+    await api.updateSemanaCajaSaldos(semanaActiva.value.id, {
+      saldo_banco: null,
+      saldo_pendiente_echeq: null,
+      saldo_echeq_depositados: null,
+      saldo_efectivo: null,
+      saldo_cheques: null,
+    })
+    await refrescarCaja({ mantenerSeleccion: true })
+    saldoBancoEditable.value = ""
+    saldoEcheqADepositarEditable.value = ""
+    saldoEcheqDepositadosEditable.value = ""
+    saldoEfectivoEditable.value = ""
+    saldoChequesEditable.value = ""
+  } catch (err) {
+    error.value = `Error al descartar saldos: ${err.response?.data?.error || err.message}`
+  } finally {
+    guardandoSaldosSemana.value = false
+  }
+}
+
+const guardarSaldosSemana = async () => {
+  if (!semanaActiva.value?.id) return
+
+  try {
+    guardandoSaldosSemana.value = true
+    await api.updateSemanaCajaSaldos(semanaActiva.value.id, {
+      saldo_banco: saldoBancoEditable.value !== "" ? Number(saldoBancoEditable.value) : null,
+      saldo_pendiente_echeq: saldoEcheqADepositarEditable.value !== "" ? Number(saldoEcheqADepositarEditable.value) : null,
+      saldo_echeq_depositados: saldoEcheqDepositadosEditable.value !== "" ? Number(saldoEcheqDepositadosEditable.value) : null,
+      saldo_efectivo: saldoEfectivoEditable.value !== "" ? Number(saldoEfectivoEditable.value) : null,
+      saldo_cheques: saldoChequesEditable.value !== "" ? Number(saldoChequesEditable.value) : null,
+    })
+    await refrescarCaja({ mantenerSeleccion: true })
+    cargarSaldosEditablesDesdeSemana()
+  } catch (err) {
+    error.value = `Error al guardar saldos semanales: ${err.response?.data?.error || err.message}`
+  } finally {
+    guardandoSaldosSemana.value = false
+  }
 }
 
 const confirmarCerrarSemana = async () => {
@@ -599,6 +667,9 @@ const confirmarCerrarSemana = async () => {
     const body = {
       saldo_banco: saldoBancoCierre.value !== "" ? Number(saldoBancoCierre.value) : null,
       saldo_pendiente_echeq: saldoPendienteEcheqCierre.value !== "" ? Number(saldoPendienteEcheqCierre.value) : null,
+      saldo_echeq_depositados: saldoEcheqDepositadosCierre.value !== "" ? Number(saldoEcheqDepositadosCierre.value) : null,
+      saldo_efectivo: saldoEfectivoCierre.value !== "" ? Number(saldoEfectivoCierre.value) : null,
+      saldo_cheques: saldoChequesCierre.value !== "" ? Number(saldoChequesCierre.value) : null,
     }
     const res = await api.cerrarSemanaCaja(semanaActiva.value.id, body)
     const proximaSemanaId = res?.data?.proximaSemana?.id
@@ -995,6 +1066,10 @@ watch(semanaSeleccionadaId, () => {
   error.value = ""
 })
 
+watch(semanaActiva, () => {
+  cargarSaldosEditablesDesdeSemana()
+}, { immediate: true })
+
 watch(() => form.value.tipo, (tipo) => {
   if (tipo === "egreso") {
     form.value.categoria = ""
@@ -1119,16 +1194,78 @@ onUnmounted(() => {
               <small class="caja-semana-meta">Efectivo: {{ formatoMoneda(saldoFinalEfectivoSemana) }}</small>
               <small class="caja-semana-meta">Cheques: {{ formatoMoneda(saldoFinalChequesSemana) }}</small>
             </div>
+          </article>
+        </div>
+
+        <div
+          v-if="semanaActiva.saldo_banco !== null && semanaActiva.saldo_banco !== undefined
+            || semanaActiva.saldo_pendiente_echeq !== null && semanaActiva.saldo_pendiente_echeq !== undefined
+            || semanaActiva.saldo_echeq_depositados !== null && semanaActiva.saldo_echeq_depositados !== undefined
+            || semanaActiva.saldo_efectivo !== null && semanaActiva.saldo_efectivo !== undefined
+            || semanaActiva.saldo_cheques !== null && semanaActiva.saldo_cheques !== undefined"
+          class="caja-resumen-bancario-card"
+        >
+          <span class="caja-resumen-bancario-title">Resumen bancario</span>
+          <div class="caja-resumen-bancario-grid">
             <div v-if="semanaActiva.saldo_banco !== null && semanaActiva.saldo_banco !== undefined" class="caja-semana-bank-box">
               <span class="bank-label">Saldo Banco</span>
               <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_banco) }}</strong>
             </div>
             <div v-if="semanaActiva.saldo_pendiente_echeq !== null && semanaActiva.saldo_pendiente_echeq !== undefined" class="caja-semana-bank-box caja-semana-echeq-box">
-              <span class="bank-label">eCheqs pendientes</span>
+              <span class="bank-label">eCheqs a depositar</span>
               <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_pendiente_echeq) }}</strong>
             </div>
-          </article>
+            <div v-if="semanaActiva.saldo_echeq_depositados !== null && semanaActiva.saldo_echeq_depositados !== undefined" class="caja-semana-bank-box caja-semana-echeq-box">
+              <span class="bank-label">eCheqs depositados</span>
+              <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_echeq_depositados) }}</strong>
+            </div>
+            <div v-if="semanaActiva.saldo_efectivo !== null && semanaActiva.saldo_efectivo !== undefined" class="caja-semana-bank-box caja-semana-cash-box">
+              <span class="bank-label">Efectivo ingresado</span>
+              <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_efectivo) }}</strong>
+            </div>
+            <div v-if="semanaActiva.saldo_cheques !== null && semanaActiva.saldo_cheques !== undefined" class="caja-semana-bank-box caja-semana-cash-box">
+              <span class="bank-label">Cheques ingresados</span>
+              <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_cheques) }}</strong>
+            </div>
+          </div>
         </div>
+
+        <section class="caja-bank-inline-shell">
+          <div class="caja-bank-inline-head">
+            <span class="section-kicker">Resumen bancario semanal</span>
+            <p>{{ semanaEstaCerrada ? 'Semana cerrada: no se pueden modificar estos valores.' : 'Podés editar estos montos en cualquier momento. Al cerrar semana se vuelven a confirmar.' }}</p>
+          </div>
+          <div class="caja-bank-inline-grid">
+            <label class="form-group form-card-field form-card-field-accent">
+              <span>Saldo banco ($)</span>
+              <input v-model.number="saldoBancoEditable" type="number" @wheel.prevent placeholder="0.00" step="0.01" :disabled="semanaEstaCerrada" />
+            </label>
+            <label class="form-group form-card-field form-card-field-accent">
+              <span>eCheqs a depositar ($)</span>
+              <input v-model.number="saldoEcheqADepositarEditable" type="number" @wheel.prevent placeholder="0.00" step="0.01" :disabled="semanaEstaCerrada" />
+            </label>
+            <label class="form-group form-card-field form-card-field-accent">
+              <span>eCheqs depositados ($)</span>
+              <input v-model.number="saldoEcheqDepositadosEditable" type="number" @wheel.prevent placeholder="0.00" step="0.01" :disabled="semanaEstaCerrada" />
+            </label>
+            <label class="form-group form-card-field form-card-field-accent">
+              <span>Efectivo en caja ($)</span>
+              <input v-model.number="saldoEfectivoEditable" type="number" @wheel.prevent placeholder="0.00" step="0.01" :disabled="semanaEstaCerrada" />
+            </label>
+            <label class="form-group form-card-field form-card-field-accent">
+              <span>Cheques en caja ($)</span>
+              <input v-model.number="saldoChequesEditable" type="number" @wheel.prevent placeholder="0.00" step="0.01" :disabled="semanaEstaCerrada" />
+            </label>
+          </div>
+          <div class="caja-bank-inline-actions">
+            <button type="button" class="btn btn-secondary" :disabled="guardandoSaldosSemana || semanaEstaCerrada" @click="descartarSaldosSemana()">
+              Descartar cambios
+            </button>
+            <button type="button" class="btn btn-primary" :disabled="guardandoSaldosSemana || semanaEstaCerrada" @click="guardarSaldosSemana()">
+              {{ guardandoSaldosSemana ? "Guardando..." : "Guardar saldos" }}
+            </button>
+          </div>
+        </section>
 
         <section class="caja-stats-grid">
           <article class="caja-stat-card caja-stat-balance">
@@ -1675,9 +1812,27 @@ onUnmounted(() => {
         </label>
 
         <label class="form-group form-card-field form-card-field-accent">
-          <span>Saldo pendiente en eCheqs ($)</span>
+          <span>eCheqs a depositar ($)</span>
           <input v-model.number="saldoPendienteEcheqCierre" type="number" @wheel.prevent placeholder="0.00" step="0.01" />
-          <small class="form-help">Ingresá el total pendiente de acreditación en eCheqs al momento del cierre.</small>
+          <small class="form-help">Ingresá el total de eCheqs pendientes de depósito al momento del cierre.</small>
+        </label>
+
+        <label class="form-group form-card-field form-card-field-accent">
+          <span>eCheqs depositados ($)</span>
+          <input v-model.number="saldoEcheqDepositadosCierre" type="number" @wheel.prevent placeholder="0.00" step="0.01" />
+          <small class="form-help">Ingresá el total de eCheqs ya depositados para esta semana.</small>
+        </label>
+
+        <label class="form-group form-card-field form-card-field-accent">
+          <span>Efectivo en caja ($)</span>
+          <input v-model.number="saldoEfectivoCierre" type="number" @wheel.prevent placeholder="0.00" step="0.01" />
+          <small class="form-help">Ingresá el efectivo disponible en la caja al momento del cierre.</small>
+        </label>
+
+        <label class="form-group form-card-field form-card-field-accent">
+          <span>Cheques en caja ($)</span>
+          <input v-model.number="saldoChequesCierre" type="number" @wheel.prevent placeholder="0.00" step="0.01" />
+          <small class="form-help">Ingresá el total de cheques en poder de la caja al cierre.</small>
         </label>
 
         <div class="modal-actions">
@@ -1878,6 +2033,40 @@ onUnmounted(() => {
     linear-gradient(180deg, rgba(15, 23, 42, 0.78), rgba(15, 23, 42, 0.94));
 }
 
+.caja-bank-inline-shell {
+  margin-top: 1rem;
+  margin-bottom: 2rem;
+  padding: 1rem;
+  border-radius: 0.9rem;
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.55), rgba(15, 23, 42, 0.65));
+}
+
+.caja-bank-inline-head {
+  display: grid;
+  gap: 0.2rem;
+  margin-bottom: 0.8rem;
+}
+
+.caja-bank-inline-head p {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.84rem;
+}
+
+.caja-bank-inline-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 0.8rem;
+}
+
+.caja-bank-inline-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.7rem;
+  margin-top: 0.85rem;
+}
+
 .caja-semana-header {
   display: flex;
   justify-content: space-between;
@@ -1930,9 +2119,10 @@ onUnmounted(() => {
 
 .caja-semana-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(4, 1fr);
   gap: 0.9rem;
   margin-bottom: 1rem;
+  align-items: start;
 }
 
 .caja-semana-card {
@@ -1979,18 +2169,59 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
-  margin-bottom: 0.5rem;
+  margin-top: 0.3rem;
+}
+
+.caja-resumen-bancario-card {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: 0.75rem;
+  padding: 0.85rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.caja-resumen-bancario-title {
+  display: block;
+  color: #94a3b8;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 0.6rem;
+}
+
+.caja-resumen-bancario-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 0.55rem;
 }
 
 .caja-semana-bank-box {
-  margin-top: 0.5rem;
-  padding: 0.6rem;
+  padding: 0.45rem 0.55rem;
   background: rgba(34, 197, 94, 0.15);
   border: 1px solid rgba(74, 222, 128, 0.3);
-  border-radius: 0.5rem;
+  border-radius: 0.45rem;
   display: flex;
   flex-direction: column;
-  gap: 0.1rem;
+  gap: 0.08rem;
+}
+
+.caja-semana-echeq-box {
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(96, 165, 250, 0.3);
+}
+
+.caja-semana-echeq-box .bank-label {
+  color: #93c5fd !important;
+}
+
+.caja-semana-cash-box {
+  background: rgba(168, 85, 247, 0.15);
+  border: 1px solid rgba(196, 181, 253, 0.3);
+}
+
+.caja-semana-cash-box .bank-label {
+  color: #d8b4fe !important;
 }
 
 .bank-label {

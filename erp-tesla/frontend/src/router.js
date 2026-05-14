@@ -11,6 +11,7 @@ import Caja from "./views/Caja.vue"
 import Presupuestos from "./views/Presupuestos.vue"
 import Certificados from "./views/Certificados.vue"
 import Facturas from "./views/Facturas.vue"
+import IndicesCac from "./views/IndicesCac.vue"
 
 import { hasStoredSession } from "./session"
 
@@ -26,6 +27,7 @@ const routes = [
   { path: "/caja", component: Caja },
   { path: "/presupuestos", component: Presupuestos },
   { path: "/certificados", component: Certificados },
+  { path: "/indices-cac", component: IndicesCac },
   { path: "/facturas", component: Facturas },
   { path: "/gastos", component: () => import("./views/Gastos.vue") }
 ]

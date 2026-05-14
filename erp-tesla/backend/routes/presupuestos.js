@@ -1,48 +1,12 @@
 import express from "express"
-import fs from "fs"
+import { existsSync } from "fs"
+import fs from "fs/promises"
 import db, { pool } from "../db.js"
 import { getIo } from '../socket.js'
 import PDFDocument from "pdfkit"
 import path from "path"
 import { fileURLToPath } from "url"
 import { sanitizeFileText } from "../pdf/premiumTheme.js"
-import { PDFDocument as PDFLib } from "pdf-lib"
-
-const removeBlankPagesFromBuffer = async (pdfBuffer) => {
-	try {
-		const pdfDoc = await PDFLib.load(pdfBuffer)
-		const pages = pdfDoc.getPages()
-		const pagesToRemove = []
-
-		for (let i = 0; i < pages.length; i++) {
-			const page = pages[i]
-			const text = page.getTextContent()
-			const hasContent = text.items && text.items.length > 0
-			if (!hasContent) {
-				pagesToRemove.push(i)
-			}
-		}
-
-		if (pagesToRemove.length === 0) {
-			return pdfBuffer
-		}
-
-		console.log(`Removing ${pagesToRemove.length} blank pages from PDF`)
-
-		const newPdfDoc = new PDFLib()
-		for (let i = 0; i < pages.length; i++) {
-			if (!pagesToRemove.includes(i)) {
-				const [copiedPage] = await newPdfDoc.copyPages(pdfDoc, [i])
-				newPdfDoc.addPage(copiedPage)
-			}
-		}
-
-		return Buffer.from(await newPdfDoc.save())
-	} catch (e) {
-		console.error("Error removing blank pages:", e)
-		return pdfBuffer
-}
-}
 
 const router = express.Router()
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -79,6 +43,7 @@ const normalizeItems = (items = [], tipo = "material") => {
 
 	return items
 		.map((item, idx) => {
+			const etapa = sanitizeDescripcion(item?.etapa)
 			const descripcion = sanitizeDescripcion(item.descripcion)
 			const cantidadBase = toNumber(item.cantidad, 0)
 			const precioUnitarioBase = toNumber(item.precio_unitario, 0)
@@ -94,6 +59,7 @@ const normalizeItems = (items = [], tipo = "material") => {
 			return {
 				tipo,
 				orden: idx + 1,
+				etapa,
 				descripcion,
 				cantidad,
 				ganancia_porcentaje: gananciaPorcentaje,
@@ -116,10 +82,11 @@ const normalizeInfoInternaItems = (items = []) => {
 		.filter((item) => item.descripcion)
 }
 
-const calcularTotales = ({ materiales, manoObra, aplicaIva, ivaPorcentaje, subtotalGeneralManoObra = 0 }) => {
+const calcularTotales = ({ materiales, manoObra, aplicaIvaMateriales, aplicaIvaManoObra, ivaPorcentaje, subtotalGeneralManoObra = 0 }) => {
 	const subtotalMateriales = materiales.reduce((acc, item) => acc + item.subtotal, 0)
 	const subtotalManoObra = subtotalGeneralManoObra
-	const ivaMonto = aplicaIva ? subtotalMateriales * (ivaPorcentaje / 100) : 0
+	const baseIva = (aplicaIvaMateriales ? subtotalMateriales : 0) + (aplicaIvaManoObra ? subtotalManoObra : 0)
+	const ivaMonto = baseIva > 0 ? baseIva * (ivaPorcentaje / 100) : 0
 	const total = subtotalMateriales + subtotalManoObra + ivaMonto
 
 	return {
@@ -216,7 +183,7 @@ const getPresupuestoCompleto = async (id) => {
 
 	const itemsQuery = await pool.query(
 		`
-			SELECT id, tipo, orden, descripcion, cantidad, ganancia_porcentaje, precio_unitario, subtotal
+			SELECT id, tipo, orden, etapa, descripcion, cantidad, ganancia_porcentaje, precio_unitario, subtotal
 			FROM presupuesto_items
 			WHERE presupuesto_id = $1
 			ORDER BY tipo ASC, orden ASC
@@ -241,35 +208,43 @@ const getPresupuestoCompleto = async (id) => {
 	}
 }
 
-const getPresupuestoEmpresaNombre = (presupuesto = {}) => {
-	return sanitizeFileText(presupuesto.cliente_empresa || presupuesto.cliente_razon_social || "Cliente") || "Cliente"
-}
-
-const getPresupuestoPdfFileName = (presupuesto = {}) => {
+const getPresupuestoPdfFileName = (presupuesto = {}, mode = "presupuesto") => {
 	const numero = sanitizeFileText(String(presupuesto.numero || "SinNumero")) || "SinNumero"
-	const empresa = getPresupuestoEmpresaNombre(presupuesto)
-	return `Presupuesto ${numero} - ${empresa}.pdf`
+	const clienteNombre = sanitizeFileText(presupuesto.cliente_empresa || presupuesto.cliente_razon_social || "Cliente") || "Cliente"
+	const obraNombre = sanitizeFileText(presupuesto.obra_nombre || "SinObra")
+	if (mode === "materiales") {
+		return `Listado materiales (${obraNombre}) (${clienteNombre}) (${numero}).pdf`
+	}
+	return `Presupuesto-${numero}.pdf`
 }
 
-const getPresupuestoPdfFolderPath = (presupuesto = {}) => {
-	return path.join(PRESUPUESTOS_BASE_FOLDER, `Presupuestos ${getPresupuestoEmpresaNombre(presupuesto)}`)
+const getPresupuestoPdfFolderPath = (presupuesto = {}, mode = "presupuesto") => {
+	const companyName = sanitizeFileText(presupuesto.cliente_empresa || presupuesto.cliente_razon_social || "Empresa")
+	let folderPath = path.join(PRESUPUESTOS_BASE_FOLDER, `Presupuestos ${companyName}`)
+	if (mode === "materiales") {
+		folderPath = path.join(folderPath, "Listados de materiales")
+	}
+	return folderPath
 }
 
-const getPresupuestoPdfFilePath = (presupuesto = {}) => {
-	return path.join(getPresupuestoPdfFolderPath(presupuesto), getPresupuestoPdfFileName(presupuesto))
+const getPresupuestoPdfFilePath = (presupuesto = {}, mode = "presupuesto") => {
+	return path.join(getPresupuestoPdfFolderPath(presupuesto, mode), getPresupuestoPdfFileName(presupuesto, mode))
 }
 
 const removeStoredPresupuestoPdf = async (presupuesto = {}) => {
-	const filePath = getPresupuestoPdfFilePath(presupuesto)
-	if (fs.existsSync(filePath)) {
-		await fs.promises.unlink(filePath)
-	}
-	return filePath
+	const filePathPresupuesto = getPresupuestoPdfFilePath(presupuesto, "presupuesto")
+	const filePathMateriales = getPresupuestoPdfFilePath(presupuesto, "materiales")
+	if (existsSync(filePathPresupuesto)) await fs.unlink(filePathPresupuesto)
+	if (existsSync(filePathMateriales)) await fs.unlink(filePathMateriales)
 }
 
-const renderPresupuestoPdfBuffer = async (presupuesto) => {
+const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 	return new Promise((resolve, reject) => {
 		try {
+			const pdfMode = options?.mode === "materiales" ? "materiales" : "presupuesto"
+			const isMaterialesMode = pdfMode === "materiales"
+			const mostrarManoObraEnPdf = !isMaterialesMode && Boolean(presupuesto.mostrar_mano_obra_pdf ?? true)
+			const mostrarMaterialesEnPdf = isMaterialesMode ? true : Boolean(presupuesto.mostrar_materiales_pdf ?? true)
 			const itemsMateriales = presupuesto.items.filter((item) => item.tipo === "material")
 			const itemsManoObra = presupuesto.items.filter((item) => item.tipo === "mano_obra")
 			const infoInternaItems = Array.isArray(presupuesto.items_info_interna) ? presupuesto.items_info_interna : []
@@ -290,7 +265,7 @@ const renderPresupuestoPdfBuffer = async (presupuesto) => {
 				}
 			}
 
-			const doc = new PDFDocument({ size: "A4", margin: 45 })
+			const doc = new PDFDocument({ size: "A4", margin: 45, bufferPages: true })
 			const chunks = []
 
 			doc.on("data", (chunk) => chunks.push(chunk))
@@ -314,11 +289,36 @@ const renderPresupuestoPdfBuffer = async (presupuesto) => {
 				return text ? text : "-"
 			}
 
+			const getEtapaLabel = (value) => {
+				const text = sanitizeDescripcion(value)
+				return text || "General"
+			}
+
+			const agruparPorEtapa = (items = []) => {
+				const grupos = []
+				const mapa = new Map()
+
+				items.forEach((item) => {
+					const etapa = getEtapaLabel(item?.etapa)
+					if (!mapa.has(etapa)) {
+						const grupo = { etapa, items: [] }
+						mapa.set(etapa, grupo)
+						grupos.push(grupo)
+					}
+					mapa.get(etapa).items.push(item)
+				})
+
+				return grupos
+			}
+
 			const clienteEmpresa = getSafe(presupuesto.cliente_empresa)
 			const clienteCuit = getSafe(presupuesto.cliente_cuit)
 			const clienteIva = getSafe(presupuesto.cliente_iva)
 			const clienteDireccion = getSafe(presupuesto.cliente_direccion)
 			const clienteTelefono = getSafe(presupuesto.cliente_telefono)
+			const proyectoPresupuesto = getSafe(presupuesto.proyecto || presupuesto.obra_nombre)
+			const validezDiasNumero = Number(presupuesto.validez_dias)
+			const validezTexto = Number.isFinite(validezDiasNumero) && validezDiasNumero > 0 ? `${validezDiasNumero} dias` : "-"
 
 			const sectionHeader = (title, y) => {
 				doc.font("Helvetica-Bold").fontSize(9.6).fillColor("#111")
@@ -328,69 +328,96 @@ const renderPresupuestoPdfBuffer = async (presupuesto) => {
 			}
 
 			const pageBottomLimit = doc.page.height - 98
-			const drawContinuationHeader = () => {
-				let y = top + 2
-				doc.font("Helvetica-Bold").fontSize(12).fillColor("#111")
-				doc.text(`PRESUPUESTO Nro ${presupuesto.numero} - CONTINUACION`, left, y)
-				doc.strokeColor(lineColor).lineWidth(0.8).moveTo(left, y + 16).lineTo(right, y + 16).stroke()
-				return y + 24
+			const drawSubtotalBand = ({ yStart, label, value }) => {
+				let yBand = yStart
+				if (yBand + 18 > pageBottomLimit) {
+					doc.addPage()
+					yBand = top + 2
+				}
+
+				doc.rect(left, yBand, width, 16).fillAndStroke("#efede8", lineColor)
+				doc.font("Helvetica-Bold").fontSize(8.7).fillColor("#111")
+				doc.text(`${String(label)}: ${String(value)}`, left + 6, yBand + 4, {
+					width: width - 12,
+					align: "right",
+					lineBreak: false,
+				})
+
+				return yBand + 22
 			}
 
 			const drawTable = ({ yStart, sectionTitle, columns, rows, rowHeight = 16, subtotalLabel = null, subtotalValue = null }) => {
 				let y = yStart
+				const baseRowHeight = rowHeight
+
+				const getRowHeight = (row) => {
+					let maxHeight = baseRowHeight
+					columns.forEach((col, idx) => {
+						doc.font("Helvetica").fontSize(8.6)
+						const value = String(row[idx] ?? "-")
+						const textHeight = doc.heightOfString(value, {
+							width: col.width - 12,
+							align: col.align || "left",
+						})
+						maxHeight = Math.max(maxHeight, Math.ceil(textHeight) + 8)
+					})
+					return maxHeight
+				}
 
 				const drawHeaderRow = () => {
-					doc.rect(left, y, width, rowHeight).fillAndStroke("#f3f3f3", lineColor)
+					doc.rect(left, y, width, baseRowHeight).fillAndStroke("#f3f3f3", lineColor)
 					let x = left
 					columns.forEach((col, idx) => {
 						doc.font("Helvetica-Bold").fontSize(8.5).fillColor("#111")
 						doc.text(col.label, x + 6, y + 4, { width: col.width - 12, align: col.align || "left" })
 						x += col.width
 						if (idx < columns.length - 1) {
-							doc.moveTo(x, y).lineTo(x, y + rowHeight).strokeColor(lineColor).lineWidth(0.6).stroke()
+							doc.moveTo(x, y).lineTo(x, y + baseRowHeight).strokeColor(lineColor).lineWidth(0.6).stroke()
 						}
 					})
-					y += rowHeight
+					y += baseRowHeight
 				}
 
 				drawHeaderRow()
 
 				rows.forEach((row, rowIdx) => {
-					if (y + rowHeight > pageBottomLimit) {
+					const currentRowHeight = getRowHeight(row)
+					if (y + currentRowHeight > pageBottomLimit) {
 						doc.addPage()
-						y = drawContinuationHeader()
-						y = sectionHeader(`${sectionTitle} (continuacion)`, y)
+						y = top + 2
+						y = sectionHeader(sectionTitle, y)
 						drawHeaderRow()
 					}
 
 					if (rowIdx % 2 === 0) {
-						doc.rect(left, y, width, rowHeight).fill("#fbfbfb")
+						doc.rect(left, y, width, currentRowHeight).fill("#fbfbfb")
 					}
-					doc.rect(left, y, width, rowHeight).lineWidth(0.5).strokeColor("#6b6b6b").stroke()
+					doc.rect(left, y, width, currentRowHeight).lineWidth(0.5).strokeColor("#6b6b6b").stroke()
 					let cellX = left
 					columns.forEach((col, idx) => {
 						doc.font("Helvetica").fontSize(8.6).fillColor("#111")
 						doc.text(String(row[idx] ?? "-"), cellX + 6, y + 4, {
 							width: col.width - 12,
 							align: col.align || "left",
+							height: currentRowHeight - 8,
 						})
 						cellX += col.width
 						if (idx < columns.length - 1) {
-							doc.moveTo(cellX, y).lineTo(cellX, y + rowHeight).strokeColor("#808080").lineWidth(0.35).stroke()
+							doc.moveTo(cellX, y).lineTo(cellX, y + currentRowHeight).strokeColor("#808080").lineWidth(0.35).stroke()
 						}
 					})
-					y += rowHeight
+					y += currentRowHeight
 				})
 
 				if (subtotalLabel !== null && subtotalValue !== null) {
-					if (y + rowHeight > pageBottomLimit) {
+					if (y + baseRowHeight > pageBottomLimit) {
 						doc.addPage()
-						y = drawContinuationHeader()
-						y = sectionHeader(`${sectionTitle} (continuacion)`, y)
+						y = top + 2
+						y = sectionHeader(sectionTitle, y)
 						drawHeaderRow()
 					}
 
-					doc.rect(left, y, width, rowHeight).fillAndStroke("#efede8", lineColor)
+					doc.rect(left, y, width, baseRowHeight).fillAndStroke("#efede8", lineColor)
 					doc.font("Helvetica-Bold").fontSize(8.7).fillColor("#111")
 					const subtotalText = `${String(subtotalLabel)}: ${String(subtotalValue)}`
 					doc.text(subtotalText, left + 6, y + 4, {
@@ -398,28 +425,19 @@ const renderPresupuestoPdfBuffer = async (presupuesto) => {
 						align: "right",
 						lineBreak: false,
 					})
-					y += rowHeight
+					y += baseRowHeight
 				}
 
 				return y + 8
 			}
 
-			const logoToUse = fs.existsSync(LOGO_PRESUPUESTO_PATH) ? LOGO_PRESUPUESTO_PATH : LOGO_PATH
+			const logoToUse = existsSync(LOGO_PRESUPUESTO_PATH) ? LOGO_PRESUPUESTO_PATH : LOGO_PATH
 			let y = top
 
 			doc.strokeColor(lineColor).lineWidth(1).moveTo(left, y + 58).lineTo(right, y + 58).stroke()
 			doc.strokeColor("#7a7a7a").lineWidth(0.6).moveTo(left, y + 62).lineTo(right, y + 62).stroke()
-			doc.font("Helvetica-Bold").fontSize(34).fillColor("#111")
-			doc.text("PRESUPUESTO", left, y + 19)
-
-			const infoBoxW = 142
-			doc.rect(right - infoBoxW, y + 5, infoBoxW, 40).lineWidth(0.8).strokeColor(lineColor).stroke()
-			doc.font("Helvetica").fontSize(8.4).fillColor(muted)
-			doc.text("Numero", right - infoBoxW + 8, y + 11)
-			doc.text("Fecha", right - infoBoxW + 8, y + 25)
-			doc.font("Helvetica-Bold").fontSize(8.8).fillColor("#111")
-			doc.text(String(presupuesto.numero), right - 58, y + 11, { width: 48, align: "right" })
-			doc.text(formatoFecha(presupuesto.fecha), right - 90, y + 25, { width: 80, align: "right" })
+			doc.font("Helvetica-Bold").fontSize(isMaterialesMode ? 26 : 34).fillColor("#111")
+			doc.text(isMaterialesMode ? "LISTADO DE MATERIALES" : "PRESUPUESTO", left, y + 19, { width, align: "center" })
 
 			y += 74
 			const blockGap = 12
@@ -428,7 +446,7 @@ const renderPresupuestoPdfBuffer = async (presupuesto) => {
 			const logoBandW = 82
 
 			doc.rect(left, y, blockW, blockH).lineWidth(0.8).strokeColor(lineColor).stroke()
-			if (fs.existsSync(logoToUse)) {
+			if (existsSync(logoToUse)) {
 				doc.image(logoToUse, left + blockW - logoBandW - 4, y + 20, { fit: [78, 56], align: "center", valign: "center" })
 			}
 			const empresaTextW = blockW - logoBandW - 14
@@ -451,92 +469,147 @@ const renderPresupuestoPdfBuffer = async (presupuesto) => {
 			doc.text(`Direccion: ${clienteDireccion}`, rightBoxX + 8, y + 60, { width: blockW - 16, lineBreak: false })
 			doc.text(`Telefono: ${clienteTelefono}`, rightBoxX + 8, y + 73, { width: blockW - 16, lineBreak: false })
 
-			y += blockH + 12
-			doc.rect(left, y, width, 34).lineWidth(0.8).strokeColor(lineColor).stroke()
-			doc.font("Helvetica").fontSize(9).fillColor("#111")
-			doc.text(`Proyecto: ${getSafe(presupuesto.obra_nombre)}`, left + 8, y + 6, { width: width * 0.56 })
-			doc.text(`Validez: ${presupuesto.validez_dias || 15} dias`, left + width * 0.58, y + 6)
-			doc.text(`Forma de pago: ${(presupuesto.forma_pago || "Contado").toUpperCase()}`, left + 8, y + 20)
+			y += blockH + 10
+			const boxDatosH = 46
+			doc.rect(left, y, width, boxDatosH).lineWidth(0.8).strokeColor(lineColor).stroke()
+			doc.strokeColor("#d0d0d0").lineWidth(0.5).moveTo(left, y + 23).lineTo(right, y + 23).stroke()
+			doc.font("Helvetica").fontSize(8.6).fillColor(muted)
+			doc.text("Proyecto:", left + 8, y + 7)
+			doc.text("Nro presupuesto", right - 164, y + 7, { width: 94, align: "left" })
+			doc.text("Fecha:", left + 8, y + 30)
+			doc.text("Validez", right - 164, y + 30, { width: 94, align: "left" })
+			doc.font("Helvetica-Bold").fontSize(8.8).fillColor("#111")
+			doc.text(String(proyectoPresupuesto), left + 58, y + 7, { width: width - 232, lineBreak: false })
+			doc.text(String(presupuesto.numero || "-"), right - 70, y + 7, { width: 62, align: "right", lineBreak: false })
+			doc.text(formatoFecha(presupuesto.fecha), left + 58, y + 30, { width: width - 232, lineBreak: false })
+			doc.text(validezTexto, right - 70, y + 30, { width: 62, align: "right", lineBreak: false })
 
-			y += 46
-			y = sectionHeader("Detalle mano de obra", y)
-			const manoRows = itemsManoObra.map((item, idx) => [
-				`${idx + 1}. ${item.descripcion || "-"}`,
-			])
-			y = drawTable({
-				yStart: y,
-				sectionTitle: "Detalle mano de obra",
-				columns: [
-					{ label: "Descripcion", width },
-				],
-				rows: manoRows.length ? manoRows : [["Sin items"]],
-				subtotalLabel: "Subtotal mano de obra",
-				subtotalValue: formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)),
-			})
+			y += boxDatosH + 12
 
-			y = sectionHeader("Detalle materiales", y)
-			const materialRows = itemsMateriales.map((item, idx) => [
-				`${idx + 1}. ${item.descripcion || "-"}`,
-				String(Number(item.cantidad || 0)),
-				formatoMoneda(item.precio_unitario),
-				formatoMoneda(item.subtotal),
-			])
-			y = drawTable({
-				yStart: y,
-				sectionTitle: "Detalle materiales",
-				columns: [
-					{ label: "Descripcion", width: width - 290 },
-					{ label: "Cant.", width: 60, align: "right" },
-					{ label: "P. unitario", width: 115, align: "right" },
-					{ label: "Subtotal", width: 115, align: "right" },
-				],
-				rows: materialRows.length ? materialRows : [["Sin items", "0", formatoMoneda(0), formatoMoneda(0)]],
-				subtotalLabel: "Subtotal materiales",
-				subtotalValue: formatoMoneda(Number(presupuesto.subtotal_materiales || 0)),
-			})
+			if (mostrarManoObraEnPdf) {
+				y = sectionHeader("Detalle mano de obra", y)
+				const gruposManoObra = agruparPorEtapa(itemsManoObra)
+				const manoObraConEtapas = gruposManoObra.some((grupo) => grupo.etapa !== "General")
+
+				if (manoObraConEtapas) {
+					gruposManoObra.forEach((grupo) => {
+						y = sectionHeader(grupo.etapa, y)
+						const rowsGrupo = grupo.items.map((item, idx) => [`${idx + 1}. ${item.descripcion || "-"}`])
+						y = drawTable({
+							yStart: y,
+							sectionTitle: grupo.etapa,
+							columns: [{ label: "Descripcion", width }],
+							rows: rowsGrupo.length ? rowsGrupo : [["Sin items"]],
+						})
+					})
+					y = drawSubtotalBand({
+						yStart: y,
+						label: "Subtotal mano de obra",
+						value: formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)),
+					})
+				} else {
+					const manoRows = gruposManoObra.flatMap((grupo) =>
+						grupo.items.map((item, idx) => [`${idx + 1}. ${item.descripcion || "-"}`])
+					)
+					y = drawTable({
+						yStart: y,
+						sectionTitle: "Detalle mano de obra",
+						columns: [{ label: "Descripcion", width }],
+						rows: manoRows.length ? manoRows : [["Sin items"]],
+						subtotalLabel: "Subtotal mano de obra",
+						subtotalValue: formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)),
+					})
+				}
+			}
+
+			if (mostrarMaterialesEnPdf) {
+				y = sectionHeader("Detalle materiales", y)
+				const gruposMateriales = agruparPorEtapa(itemsMateriales)
+				const materialesConEtapas = gruposMateriales.some((grupo) => grupo.etapa !== "General")
+
+				if (materialesConEtapas) {
+					gruposMateriales.forEach((grupo) => {
+						y = sectionHeader(grupo.etapa, y)
+						const rowsGrupo = grupo.items.map((item, idx) => (
+							isMaterialesMode
+								? [`${idx + 1}. ${item.descripcion || "-"}`, String(Number(item.cantidad || 0))]
+								: [`${idx + 1}. ${item.descripcion || "-"}`, String(Number(item.cantidad || 0)), formatoMoneda(item.precio_unitario), formatoMoneda(item.subtotal)]
+						))
+						y = drawTable({
+							yStart: y,
+							sectionTitle: grupo.etapa,
+							columns: isMaterialesMode
+								? [
+									{ label: "Descripcion", width: width - 58 },
+									{ label: "Cant.", width: 58, align: "center" },
+								]
+								: [
+									{ label: "Descripcion", width: width - 290 },
+									{ label: "Cant.", width: 60, align: "right" },
+									{ label: "P. unitario", width: 115, align: "right" },
+									{ label: "Subtotal", width: 115, align: "right" },
+								],
+							rows: rowsGrupo.length
+								? rowsGrupo
+								: (isMaterialesMode
+									? [["Sin items", "0"]]
+									: [["Sin items", "0", formatoMoneda(0), formatoMoneda(0)]]),
+						})
+					})
+					if (!isMaterialesMode) {
+						y = drawSubtotalBand({
+							yStart: y,
+							label: "Subtotal materiales",
+							value: formatoMoneda(Number(presupuesto.subtotal_materiales || 0)),
+						})
+					}
+				} else {
+					const materialRows = gruposMateriales.flatMap((grupo) =>
+						grupo.items.map((item, idx) => (
+							isMaterialesMode
+								? [`${idx + 1}. ${item.descripcion || "-"}`, String(Number(item.cantidad || 0))]
+								: [`${idx + 1}. ${item.descripcion || "-"}`, String(Number(item.cantidad || 0)), formatoMoneda(item.precio_unitario), formatoMoneda(item.subtotal)]
+						))
+					)
+					y = drawTable({
+						yStart: y,
+						sectionTitle: "Detalle materiales",
+						columns: isMaterialesMode
+							? [
+								{ label: "Descripcion", width: width - 58 },
+								{ label: "Cant.", width: 58, align: "center" },
+							]
+							: [
+								{ label: "Descripcion", width: width - 290 },
+								{ label: "Cant.", width: 60, align: "right" },
+								{ label: "P. unitario", width: 115, align: "right" },
+								{ label: "Subtotal", width: 115, align: "right" },
+							],
+						rows: materialRows.length
+							? materialRows
+							: (isMaterialesMode
+								? [["Sin items", "0"]]
+								: [["Sin items", "0", formatoMoneda(0), formatoMoneda(0)]]),
+						subtotalLabel: isMaterialesMode ? null : "Subtotal materiales",
+						subtotalValue: isMaterialesMode ? null : formatoMoneda(Number(presupuesto.subtotal_materiales || 0)),
+					})
+				}
+			}
 
 			const ivaMonto = Number(presupuesto.iva_monto || 0)
 			const totalGeneral = Number(presupuesto.total || 0)
 			const summaryBoxH = 84
 			const summaryLeftW = width - 182
+			const observacionesTexto = sanitizeDescripcion(presupuesto.observaciones)
 
-			if (y + summaryBoxH + 24 > pageBottomLimit) {
-				doc.addPage()
-				y = drawContinuationHeader()
-			}
-
-			doc.rect(left, y, summaryLeftW, summaryBoxH).lineWidth(0.8).strokeColor(lineColor).stroke()
-			doc.font("Helvetica-Bold").fontSize(8.8).text("Observaciones", left + 8, y + 6)
-			doc.font("Helvetica").fontSize(8.2).fillColor("#111")
-			doc.text(String(presupuesto.observaciones || "-"), left + 8, y + 18, {
-				width: summaryLeftW - 16,
-				height: summaryBoxH - 24,
-			})
-
-			const sumX = left + summaryLeftW
-			doc.rect(sumX, y, width - summaryLeftW, summaryBoxH).lineWidth(0.8).strokeColor(lineColor).stroke()
-			doc.font("Helvetica").fontSize(8.5).fillColor("#111")
-			doc.text("Subtotal mano de obra", sumX + 8, y + 8)
-			doc.text(formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)), right - 8 - 80, y + 8, { width: 80, align: "right" })
-			doc.text("Subtotal materiales", sumX + 8, y + 24)
-			doc.text(formatoMoneda(Number(presupuesto.subtotal_materiales || 0)), right - 8 - 80, y + 24, { width: 80, align: "right" })
-			doc.text(`IVA ${Number(presupuesto.iva_porcentaje || 21)}%`, sumX + 8, y + 40)
-			doc.text(formatoMoneda(ivaMonto), right - 8 - 80, y + 40, { width: 80, align: "right" })
-
-			doc.rect(sumX + 6, y + 57, width - summaryLeftW - 12, 21).fillAndStroke("#1f1f1f", lineColor)
-			doc.font("Helvetica-Bold").fontSize(9.8).fillColor("#ffffff")
-			doc.text("TOTAL", sumX + 12, y + 64)
-			doc.text(formatoMoneda(totalGeneral), right - 8 - 80, y + 64, { width: 80, align: "right" })
-			y += summaryBoxH + 10
-
-			if (infoInternaVisible.length > 0) {
+			if (!isMaterialesMode && infoInternaVisible.length > 0) {
 				const infoHeaderH = 22
 				const infoRowH = 15
 				const infoBoxH = infoHeaderH + (infoInternaVisible.length * infoRowH) + 8
 
 				if (y + infoBoxH + 24 > pageBottomLimit) {
 					doc.addPage()
-					y = drawContinuationHeader()
+					y = top + 2
 				}
 
 				doc.rect(left, y, width, infoBoxH).lineWidth(0.8).strokeColor(lineColor).stroke()
@@ -554,10 +627,55 @@ const renderPresupuestoPdfBuffer = async (presupuesto) => {
 				y += infoBoxH + 8
 			}
 
-			doc.strokeColor(lineColor).lineWidth(0.8).moveTo(left, doc.page.height - 62).lineTo(right, doc.page.height - 62).stroke()
-			doc.font("Helvetica").fontSize(7.8).fillColor(muted)
-			doc.text("Tesla Montajes Electricos - Documento comercial", left, doc.page.height - 60)
-			doc.text(`Pagina 1`, left, doc.page.height - 60, { width, align: "right" })
+			if (!isMaterialesMode) {
+				if (y + summaryBoxH + 24 > pageBottomLimit) {
+					doc.addPage()
+					y = top + 2
+				}
+
+				const ySummary = pageBottomLimit - summaryBoxH
+				doc.rect(left, ySummary, summaryLeftW, summaryBoxH).lineWidth(0.8).strokeColor(lineColor).stroke()
+				doc.font("Helvetica-Bold").fontSize(8.8).fillColor("#111")
+				doc.text("Observaciones", left + 8, ySummary + 6)
+				doc.font("Helvetica").fontSize(8.2).fillColor("#111")
+				doc.text(observacionesTexto, left + 8, ySummary + 18, {
+					width: summaryLeftW - 16,
+					height: summaryBoxH - 24,
+				})
+
+				const sumX = left + summaryLeftW
+				doc.rect(sumX, ySummary, width - summaryLeftW, summaryBoxH).lineWidth(0.8).strokeColor(lineColor).stroke()
+				doc.font("Helvetica").fontSize(8.5).fillColor("#111")
+				doc.text("Subtotal mano de obra", sumX + 8, ySummary + 8)
+				doc.text(formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)), right - 8 - 80, ySummary + 8, { width: 80, align: "right" })
+				doc.text("Subtotal materiales", sumX + 8, ySummary + 24)
+				doc.text(formatoMoneda(Number(presupuesto.subtotal_materiales || 0)), right - 8 - 80, ySummary + 24, { width: 80, align: "right" })
+				const aplicaIvaMaterialesPdf = Boolean(presupuesto.aplica_iva_materiales)
+				const aplicaIvaManoObraPdf = Boolean(presupuesto.aplica_iva_mano_obra)
+				let labelIva = `IVA ${Number(presupuesto.iva_porcentaje || 21)}%`
+				if (aplicaIvaMaterialesPdf && aplicaIvaManoObraPdf) labelIva += " (Mat. + M.O.)"
+				else if (aplicaIvaMaterialesPdf) labelIva += " (Mat.)"
+				else if (aplicaIvaManoObraPdf) labelIva += " (M.O.)"
+				else labelIva += " (No aplica)"
+				doc.text(labelIva, sumX + 8, ySummary + 40)
+				doc.text(formatoMoneda(ivaMonto), right - 8 - 80, ySummary + 40, { width: 80, align: "right" })
+
+				doc.rect(sumX + 6, ySummary + 57, width - summaryLeftW - 12, 21).fillAndStroke("#1f1f1f", lineColor)
+				doc.font("Helvetica-Bold").fontSize(9.8).fillColor("#ffffff")
+				doc.text("TOTAL", sumX + 12, ySummary + 64)
+				doc.text(formatoMoneda(totalGeneral), right - 8 - 80, ySummary + 64, { width: 80, align: "right" })
+				y = ySummary + summaryBoxH + 10
+			}
+
+			const footerTipo = isMaterialesMode ? "detalle materiales" : "presupuesto"
+			const range = doc.bufferedPageRange()
+			for (let i = 0; i < range.count; i += 1) {
+				doc.switchToPage(i)
+				doc.strokeColor(lineColor).lineWidth(0.8).moveTo(left, doc.page.height - 62).lineTo(right, doc.page.height - 62).stroke()
+				doc.font("Helvetica").fontSize(7.8).fillColor(muted)
+				doc.text(`Tesla Montajes Eléctricos - ${footerTipo}`, left, doc.page.height - 60)
+				doc.text(`Pagina ${i + 1}`, left, doc.page.height - 60, { width, align: "right" })
+			}
 
 			doc.end()
 		} catch (error) {
@@ -566,17 +684,17 @@ const renderPresupuestoPdfBuffer = async (presupuesto) => {
 	})
 }
 
-const syncPresupuestoPdfStorage = async (presupuesto, previousPresupuesto = null) => {
-	const previousPath = previousPresupuesto ? getPresupuestoPdfFilePath(previousPresupuesto) : null
-	const folderPath = getPresupuestoPdfFolderPath(presupuesto)
-	const filePath = getPresupuestoPdfFilePath(presupuesto)
-	const buffer = await renderPresupuestoPdfBuffer(presupuesto)
+const syncPresupuestoPdfStorage = async (presupuesto, previousPresupuesto = null, mode = "presupuesto") => {
+	const folderPath = getPresupuestoPdfFolderPath(presupuesto, mode)
+	const filePath = getPresupuestoPdfFilePath(presupuesto, mode)
+	const buffer = await renderPresupuestoPdfBuffer(presupuesto, { mode })
+	const previousPath = previousPresupuesto ? getPresupuestoPdfFilePath(previousPresupuesto, mode) : null
 
-	await fs.promises.mkdir(folderPath, { recursive: true })
-	await fs.promises.writeFile(filePath, buffer)
+	await fs.mkdir(folderPath, { recursive: true })
+	await fs.writeFile(filePath, buffer)
 
-	if (previousPath && previousPath !== filePath && fs.existsSync(previousPath)) {
-		await fs.promises.unlink(previousPath)
+	if (previousPath && previousPath !== filePath && existsSync(previousPath)) {
+		await fs.unlink(previousPath)
 	}
 
 	return { buffer, filePath }
@@ -593,7 +711,7 @@ const recalcularCertificadosPorPresupuesto = async (client, presupuestoId) => {
 	const presupuesto = presupuestoResult.rows[0]
 	const certificadosResult = await client.query(
 		`
-			SELECT id, tipo_registro, porcentaje_avance, monto_base, indice_cac, pagos
+			SELECT id, tipo_registro, porcentaje_avance, monto_base, indice_cac, indice_base_cac, indice_actual_cac, pagos
 			FROM certificados
 			WHERE presupuesto_id = $1
 			ORDER BY secuencia ASC, id ASC
@@ -613,7 +731,11 @@ const recalcularCertificadosPorPresupuesto = async (client, presupuestoId) => {
 		const montoBase = tipoEfectivo === "monto"
 			? Math.max(0, toNumber(row.monto_base, row.certificado))
 			: Math.round((importeOriginal * (porcentajeAvance / 100) + Number.EPSILON) * 100) / 100
-		const indiceCac = Math.max(0, toNumber(row.indice_cac, 1)) || 1
+		const indiceBaseCac = Math.max(0, toNumber(row.indice_base_cac, 0))
+		const indiceActualCac = Math.max(0, toNumber(row.indice_actual_cac, 0))
+		const indiceCac = indiceBaseCac > 0 && indiceActualCac > 0
+			? (indiceActualCac / indiceBaseCac)
+			: (Math.max(0, toNumber(row.indice_cac, 1)) || 1)
 		const ajustePorcentaje = Math.round((((indiceCac - 1) * 100) + Number.EPSILON) * 100) / 100
 		const actualizacion = Math.round((montoBase * (indiceCac - 1) + Number.EPSILON) * 100) / 100
 		const certificado = Math.round((montoBase + actualizacion + Number.EPSILON) * 100) / 100
@@ -716,6 +838,7 @@ router.get("/", async (req, res) => {
 					p.fecha,
 					p.estado,
 					p.total,
+					p.indice_cac_base_id,
 					p.forma_pago,
 					COALESCE(cert.cantidad_certificados, 0) AS cantidad_certificados,
 					COALESCE(cert.total_certificado, 0) AS total_certificado,
@@ -766,20 +889,25 @@ router.post("/", async (req, res) => {
 		const {
 			cliente_id,
 			obra_id,
+			proyecto,
 			fecha,
 			validez_dias,
 			forma_pago,
 			observaciones,
 			aplica_iva,
+			aplica_iva_mano_obra,
 			iva_porcentaje,
 			subtotal_general_mano_obra,
 			items_materiales,
 			items_mano_obra,
+			mostrar_mano_obra_pdf,
+			mostrar_materiales_pdf,
 			info_interna_quien_hizo,
 			info_interna_quien_hizo_pdf,
 			info_interna_quien_aprobo,
 			info_interna_quien_aprobo_pdf,
 			items_info_interna,
+			indice_cac_base_id,
 		} = req.body || {}
 
 		if (!cliente_id || !obra_id) {
@@ -797,17 +925,21 @@ router.post("/", async (req, res) => {
 		const infoInternaItems = normalizeInfoInternaItems(items_info_interna)
 		const infoInternaQuienHizo = sanitizeDescripcion(info_interna_quien_hizo)
 		const infoInternaQuienAprobo = sanitizeDescripcion(info_interna_quien_aprobo)
+		const proyectoPresupuesto = sanitizeDescripcion(proyecto)
+		const indiceCacBaseId = indice_cac_base_id ? Number(indice_cac_base_id) : null
 
 		if (materiales.length === 0 && manoObra.length === 0) {
 			return res.status(400).json({ error: "Debe ingresar al menos un item" })
 		}
 
 		const ivaPorcentaje = toNumber(iva_porcentaje, 21)
-		const aplicaIva = Boolean(aplica_iva)
+		const aplicaIvaMateriales = Boolean(aplica_iva)
+		const aplicaIvaManoObra = Boolean(aplica_iva_mano_obra)
 		const { subtotalMateriales, subtotalManoObra, ivaMonto, total } = calcularTotales({
 			materiales,
 			manoObra,
-			aplicaIva,
+			aplicaIvaMateriales,
+			aplicaIvaManoObra,
 			ivaPorcentaje,
 			subtotalGeneralManoObra,
 		})
@@ -820,10 +952,11 @@ router.post("/", async (req, res) => {
 			`
 				INSERT INTO presupuestos (
 					numero, cliente_id, obra_id, fecha, validez_dias, forma_pago, observaciones,
-					subtotal_materiales, subtotal_mano_obra, iva_porcentaje, iva_monto, total,
-					info_interna_quien_hizo, info_interna_quien_hizo_pdf,
-					info_interna_quien_aprobo, info_interna_quien_aprobo_pdf
-				) VALUES ($1,$2,$3,COALESCE($4::date, CURRENT_DATE),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+					subtotal_materiales, subtotal_mano_obra, aplica_iva_materiales, aplica_iva_mano_obra, iva_porcentaje, iva_monto, total,
+					mostrar_mano_obra_pdf, mostrar_materiales_pdf,
+					proyecto, info_interna_quien_hizo, info_interna_quien_hizo_pdf,
+					info_interna_quien_aprobo, info_interna_quien_aprobo_pdf, indice_cac_base_id
+				) VALUES ($1,$2,$3,COALESCE($4::date, CURRENT_DATE),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
 				RETURNING *
 			`,
 			[
@@ -836,13 +969,19 @@ router.post("/", async (req, res) => {
 				observaciones || "",
 				subtotalMateriales,
 				subtotalManoObra,
+				aplicaIvaMateriales,
+				aplicaIvaManoObra,
 				ivaPorcentaje,
 				ivaMonto,
 				total,
+				Boolean(mostrar_mano_obra_pdf ?? true),
+				Boolean(mostrar_materiales_pdf ?? true),
+				proyectoPresupuesto,
 				infoInternaQuienHizo,
 				Boolean(info_interna_quien_hizo_pdf),
 				infoInternaQuienAprobo,
 				Boolean(info_interna_quien_aprobo_pdf),
+				indiceCacBaseId,
 			]
 		)
 
@@ -853,13 +992,14 @@ router.post("/", async (req, res) => {
 			await client.query(
 				`
 					INSERT INTO presupuesto_items (
-						presupuesto_id, tipo, orden, descripcion, cantidad, ganancia_porcentaje, precio_unitario, subtotal
-					) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+						presupuesto_id, tipo, orden, etapa, descripcion, cantidad, ganancia_porcentaje, precio_unitario, subtotal
+					) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 				`,
 				[
 					presupuesto.id,
 					item.tipo,
 					item.orden,
+					item.etapa,
 					item.descripcion,
 					item.cantidad,
 					item.ganancia_porcentaje,
@@ -890,6 +1030,7 @@ router.post("/", async (req, res) => {
 		const completo = await getPresupuestoCompleto(presupuesto.id)
 		try {
 			await syncPresupuestoPdfStorage(completo)
+			await syncPresupuestoPdfStorage(completo, null, "materiales")
 		} catch (storageError) {
 			console.error("No se pudo guardar el PDF del presupuesto en disco", storageError)
 		}
@@ -916,20 +1057,25 @@ router.put("/:id", async (req, res) => {
 		const {
 			cliente_id,
 			obra_id,
+			proyecto,
 			fecha,
 			validez_dias,
 			forma_pago,
 			observaciones,
 			aplica_iva,
+			aplica_iva_mano_obra,
 			iva_porcentaje,
 			subtotal_general_mano_obra,
 			items_materiales,
 			items_mano_obra,
+			mostrar_mano_obra_pdf,
+			mostrar_materiales_pdf,
 			info_interna_quien_hizo,
 			info_interna_quien_hizo_pdf,
 			info_interna_quien_aprobo,
 			info_interna_quien_aprobo_pdf,
 			items_info_interna,
+			indice_cac_base_id,
 		} = req.body || {}
 
 		if (!cliente_id || !obra_id) {
@@ -947,17 +1093,21 @@ router.put("/:id", async (req, res) => {
 		const infoInternaItems = normalizeInfoInternaItems(items_info_interna)
 		const infoInternaQuienHizo = sanitizeDescripcion(info_interna_quien_hizo)
 		const infoInternaQuienAprobo = sanitizeDescripcion(info_interna_quien_aprobo)
+		const proyectoPresupuesto = sanitizeDescripcion(proyecto)
+		const indiceCacBaseId = indice_cac_base_id ? Number(indice_cac_base_id) : null
 
 		if (materiales.length === 0 && manoObra.length === 0) {
 			return res.status(400).json({ error: "Debe ingresar al menos un item" })
 		}
 
 		const ivaPorcentaje = toNumber(iva_porcentaje, 21)
-		const aplicaIva = Boolean(aplica_iva)
+		const aplicaIvaMateriales = Boolean(aplica_iva)
+		const aplicaIvaManoObra = Boolean(aplica_iva_mano_obra)
 		const { subtotalMateriales, subtotalManoObra, ivaMonto, total } = calcularTotales({
 			materiales,
 			manoObra,
-			aplicaIva,
+			aplicaIvaMateriales,
+			aplicaIvaManoObra,
 			ivaPorcentaje,
 			subtotalGeneralManoObra,
 		})
@@ -986,14 +1136,20 @@ router.put("/:id", async (req, res) => {
 					observaciones = $6,
 					subtotal_materiales = $7,
 					subtotal_mano_obra = $8,
-					iva_porcentaje = $9,
-					iva_monto = $10,
-					total = $11,
-					info_interna_quien_hizo = $12,
-					info_interna_quien_hizo_pdf = $13,
-					info_interna_quien_aprobo = $14,
-					info_interna_quien_aprobo_pdf = $15
-				WHERE id = $16
+					aplica_iva_materiales = $9,
+					aplica_iva_mano_obra = $10,
+					iva_porcentaje = $11,
+					iva_monto = $12,
+					total = $13,
+					mostrar_mano_obra_pdf = $14,
+					mostrar_materiales_pdf = $15,
+					info_interna_quien_hizo = $16,
+					info_interna_quien_hizo_pdf = $17,
+					info_interna_quien_aprobo = $18,
+					info_interna_quien_aprobo_pdf = $19,
+					proyecto = $20,
+					indice_cac_base_id = $21
+				WHERE id = $22
 			`,
 			[
 				validacionRelacion.clienteId,
@@ -1004,13 +1160,19 @@ router.put("/:id", async (req, res) => {
 				observaciones || "",
 				subtotalMateriales,
 				subtotalManoObra,
+				aplicaIvaMateriales,
+				aplicaIvaManoObra,
 				ivaPorcentaje,
 				ivaMonto,
 				total,
+				Boolean(mostrar_mano_obra_pdf ?? true),
+				Boolean(mostrar_materiales_pdf ?? true),
 				infoInternaQuienHizo,
 				Boolean(info_interna_quien_hizo_pdf),
 				infoInternaQuienAprobo,
 				Boolean(info_interna_quien_aprobo_pdf),
+				proyectoPresupuesto,
+				indiceCacBaseId,
 				presupuestoId,
 			]
 		)
@@ -1025,13 +1187,14 @@ router.put("/:id", async (req, res) => {
 			await client.query(
 				`
 					INSERT INTO presupuesto_items (
-						presupuesto_id, tipo, orden, descripcion, cantidad, ganancia_porcentaje, precio_unitario, subtotal
-					) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+						presupuesto_id, tipo, orden, etapa, descripcion, cantidad, ganancia_porcentaje, precio_unitario, subtotal
+					) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 				`,
 				[
 					presupuestoId,
 					item.tipo,
 					item.orden,
+					item.etapa,
 					item.descripcion,
 					item.cantidad,
 					item.ganancia_porcentaje,
@@ -1062,6 +1225,7 @@ router.put("/:id", async (req, res) => {
 		const completo = await getPresupuestoCompleto(presupuestoId)
 		try {
 			await syncPresupuestoPdfStorage(completo, presupuestoPrevio)
+			await syncPresupuestoPdfStorage(completo, presupuestoPrevio, "materiales")
 		} catch (storageError) {
 			console.error("No se pudo actualizar el PDF del presupuesto en disco", storageError)
 		}
@@ -1125,7 +1289,7 @@ router.delete("/:id", async (req, res) => {
 
 		if (presupuestoPrevio) {
 			try {
-				await removeStoredPresupuestoPdf(presupuestoPrevio)
+				await removeStoredPresupuestoPdf(presupuestoPrevio) // This function now removes both types
 			} catch (storageError) {
 				console.error("No se pudo eliminar el PDF del presupuesto del disco", storageError)
 			}
@@ -1148,8 +1312,32 @@ router.get("/:id/pdf", async (req, res) => {
 			return res.status(404).json({ error: "Presupuesto no encontrado" })
 		}
 
-		const { buffer } = await syncPresupuestoPdfStorage(presupuesto)
-		const nombreArchivo = getPresupuestoPdfFileName(presupuesto)
+		const pdfMode = String(req.query?.tipo || "").toLowerCase() === "materiales" ? "materiales" : "presupuesto"
+		const { buffer, filePath } = await syncPresupuestoPdfStorage(presupuesto, null, pdfMode)
+		const nombreArchivo = getPresupuestoPdfFileName(presupuesto, pdfMode)
+
+		console.log(`[Presupuestos] PDF ${pdfMode} guardado en: ${filePath}`)
+
+		res.setHeader("Content-Type", "application/pdf")
+		res.setHeader("Content-Disposition", `attachment; filename="${nombreArchivo}"`)
+		res.send(buffer)
+	} catch (err) {
+		res.status(500).json({ error: err.message })
+	}
+})
+
+router.get("/:id/pdf-materiales", async (req, res) => {
+	try {
+		const presupuesto = await getPresupuestoCompleto(req.params.id)
+		if (!presupuesto) {
+			return res.status(404).json({ error: "Presupuesto no encontrado" })
+		}
+
+		const { buffer, filePath } = await syncPresupuestoPdfStorage(presupuesto, null, "materiales")
+		const nombreArchivo = getPresupuestoPdfFileName(presupuesto, "materiales")
+
+		console.log(`[Presupuestos] PDF materiales guardado en: ${filePath}`)
+
 		res.setHeader("Content-Type", "application/pdf")
 		res.setHeader("Content-Disposition", `attachment; filename="${nombreArchivo}"`)
 		res.send(buffer)
@@ -1159,4 +1347,3 @@ router.get("/:id/pdf", async (req, res) => {
 })
 
 export default router
-

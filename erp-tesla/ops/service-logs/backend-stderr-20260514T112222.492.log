@@ -1,0 +1,2 @@
+[security] La sesión HTTP usa cookie HttpOnly. Si publicás el sistema por HTTPS, activá COOKIE_SECURE=true.
+No se pudo iniciar el backend porque 0.0.0.0:3000 ya está en uso
