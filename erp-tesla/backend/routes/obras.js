@@ -47,7 +47,9 @@ const saveObraFile = async (obra, folder) => {
 
     // Sanitizar el nombre de la obra para evitar path traversal
     const safeObraNombre = sanitizeFileText(obra.nombre);
+    const clienteNombre = clienteData?.razon_social || "-";
     const grupoNombre = grupoData?.nombre || "-";
+
 
     const formattedFechaInicio = obra.fecha_inicio
       ? new Date(obra.fecha_inicio).toLocaleDateString("es-AR")
@@ -64,16 +66,18 @@ const saveObraFile = async (obra, folder) => {
 };
 
 
-
 const deleteObraFile = async (obra) => {
   const folder = obra.estado === "finalizada" ? FINISHED_OBRAS_FOLDER : ACTIVE_OBRAS_FOLDER;
-  const obraFilePath = path.join(folder, `${obra.nombre}.txt`);
+  const safeObraNombre = sanitizeFileText(obra.nombre);
+  const obraFilePath = path.join(folder, `${safeObraNombre}.txt`);
   try {
     await fs.unlink(obraFilePath);
   } catch (err) {
     console.error(`Error al eliminar el archivo de la obra: ${obraFilePath}`, err); // Log the error but don't rethrow to avoid blocking
   }
 };
+
+
 
 const moveObraFile = async (obra, newEstado) => {
   const oldFolder = obra.estado === "finalizada" ? FINISHED_OBRAS_FOLDER : ACTIVE_OBRAS_FOLDER;
@@ -94,12 +98,19 @@ const moveObraFile = async (obra, newEstado) => {
 // Listar todas las obras (opcionalmente filtrar por estado)
 router.get("/", async (req, res) => {
   try {
-    const { estado } = req.query
+    const { estado, include_admin } = req.query
     let query = db.from("obras").select("*").order("created_at", { ascending: false })
     if (estado) query = query.eq("estado", estado)
 
     const { data, error } = await query
     if (error) return res.status(400).json({ error: error.message })
+
+    const includeAdmin = String(include_admin || "").toLowerCase() === "1" || String(include_admin || "").toLowerCase() === "true"
+
+    // Permitir incluir obras administrativas cuando otro modulo lo necesite.
+    if (includeAdmin) {
+      return res.json(data || [])
+    }
 
     // Filtrar obras administrativas
     const { data: grupos } = await db.from("grupos").select("id, nombre")
@@ -253,35 +264,59 @@ router.patch("/:id/estado", async (req, res) => {
   }
 })
 
-// Eliminar obra (solo si no tiene movimientos asociados)
+// Eliminar obra (borrado fisico completo y transaccional)
 router.delete("/:id", async (req, res) => {
+  const id = Number(req.params.id)
+
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ error: "ID de obra invalido" });
+  }
+
+  const client = await pool.connect();
+
   try {
-    const { id } = req.params
+    await client.query("BEGIN");
 
-    const { data: obra, error: obraError } = await db
-      .from("obras")
-      .select("*")
-      .eq("id", id)
-      .single();
+    const obraResult = await client.query(
+      "SELECT id, nombre, estado FROM obras WHERE id = $1 FOR UPDATE",
+      [id]
+    );
 
-    if (obraError || !obra) {
+    if (obraResult.rowCount === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: "Obra no encontrada" });
     }
 
-    const { error } = await db.from("obras").delete().eq("id", id);
+    const obra = obraResult.rows[0];
 
-    if (error) {
-      return res.status(500).json({ error: "Error al eliminar la obra." });
+    // Si queres borrado completo, elimina presupuestos ligados a la obra.
+    // (presupuesto_items cuelga con ON DELETE CASCADE, se limpia solo)
+    await client.query("DELETE FROM presupuestos WHERE obra_id = $1", [id]);
+
+    const deleteObraResult = await client.query(
+      "DELETE FROM obras WHERE id = $1 RETURNING id",
+      [id]
+    );
+
+    if (deleteObraResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Obra no encontrada" });
     }
 
+    await client.query("COMMIT");
+
+    // Limpieza de archivo fuera de la transaccion DB
     await deleteObraFile(obra);
 
-    getIo()?.emit('obras:changed')
-    res.json({ mensaje: "Obra eliminada correctamente." });
+    getIo()?.emit("obras:changed");
+    return res.json({ mensaje: "Obra eliminada correctamente." });
   } catch (err) {
-    return handleInternalError(res, err, "eliminar_obra")
+    await client.query("ROLLBACK").catch(() => {});
+    return handleInternalError(res, err, "eliminar_obra");
+  } finally {
+    client.release();
   }
-})
+});
 
 // Obtener nombres de cliente y grupo
 const getClienteGrupo = async (obra) => {

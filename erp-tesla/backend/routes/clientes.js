@@ -339,53 +339,113 @@ router.put("/:id", async (req, res) => {
   }
 });
 
-// Eliminar cliente (borrado fisico con validacion de dependencias)
+// Eliminar cliente (compatible con [db.js](http://_vscodecontentref_/0) local)
 router.delete("/:id", async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = Number(req.params.id)
 
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: "ID de cliente invalido." })
+    }
+
+    // En este proyecto existe single(), no maybeSingle()
     const { data: cliente, error: clienteError } = await db
       .from("clientes")
-      .select("razon_social")
+      .select("id, razon_social")
       .eq("id", id)
-      .single();
+      .single()
 
     if (clienteError || !cliente) {
-      return res.status(404).json({ error: "Cliente no encontrado" });
+      return res.status(404).json({ error: "Cliente no encontrado." })
     }
 
-    const { error } = await db.from("clientes").delete().eq("id", id);
+    // El wrapper [db.js](http://_vscodecontentref_/1) no soporta count/head estilo Supabase
+    const obrasCountResult = await db.query(
+      "SELECT COUNT(*)::int AS total FROM obras WHERE cliente_id = $1",
+      [id]
+    )
+    const presupuestosCountResult = await db.query(
+      "SELECT COUNT(*)::int AS total FROM presupuestos WHERE cliente_id = $1",
+      [id]
+    )
 
-    if (error) {
-      return res.status(500).json({ error: "Error al eliminar el cliente." });
+    const totalObras = Number(obrasCountResult.rows?.[0]?.total || 0)
+    const totalPresupuestos = Number(presupuestosCountResult.rows?.[0]?.total || 0)
+
+    if (totalObras > 0 || totalPresupuestos > 0) {
+      return res.status(409).json({
+        error: "No se puede eliminar el cliente porque tiene registros asociados.",
+        detalle: {
+          obras: totalObras,
+          presupuestos: totalPresupuestos
+        }
+      })
     }
 
-    // Eliminar la carpeta del cliente
-    await deleteClientFolder(cliente.razon_social);
+    const { error: deleteError } = await db
+      .from("clientes")
+      .delete()
+      .eq("id", id)
 
-    res.json({ message: "Cliente eliminado correctamente." });
+    if (deleteError) {
+      const isForeignKeyViolation = deleteError.code === "23503"
+      return res.status(isForeignKeyViolation ? 409 : 500).json({
+        error: isForeignKeyViolation
+          ? "No se puede eliminar el cliente porque tiene registros asociados."
+          : "Error al eliminar el cliente.",
+        detalle: deleteError.message || null,
+        codigo: deleteError.code || null
+      })
+    }
+
+    const folderCleanup = await deleteClientFolder(cliente.razon_social)
+
+    getIo()?.emit("clientes:changed")
+
+    return res.json({
+      message: "Cliente eliminado correctamente.",
+      advertencia: folderCleanup.ok
+        ? null
+        : "El cliente se elimino en base de datos, pero hubo un problema limpiando su carpeta.",
+      detalle_folder: folderCleanup.ok ? null : folderCleanup.error
+    })
   } catch (err) {
-    console.error("Error al eliminar el cliente:", err);
-    res.status(500).send("Error al eliminar el cliente.");
+    return handleInternalError(res, err, "eliminar_cliente")
   }
-});
+})
 
-// Función para eliminar la carpeta de un cliente
+
+// Funcion para eliminar la carpeta de un cliente
 const deleteClientFolder = async (clientName) => {
   try {
     const mainFolderPath = path.join("C:\\Users\\usuario\\Desktop\\GESTION TESLA", "clientes");
-    const clientFolderPath = path.join(mainFolderPath, clientName);
+    const safeClientName = sanitizeFileText(String(clientName || ""));
 
-    // Verificar si la carpeta del cliente existe
-    const folderExists = await fs.access(clientFolderPath).then(() => true).catch(() => false);
-
-    if (folderExists) {
-      await fs.rm(clientFolderPath, { recursive: true, force: true });
-      console.log(`Carpeta del cliente eliminada: ${clientFolderPath}`);
+    if (!safeClientName) {
+      return { ok: true, skipped: true };
     }
+
+    const clientFolderPath = path.join(mainFolderPath, safeClientName);
+
+    const folderExists = await fs
+      .access(clientFolderPath)
+      .then(() => true)
+      .catch(() => false);
+
+    if (!folderExists) {
+      return { ok: true, skipped: true };
+    }
+
+    await fs.rm(clientFolderPath, { recursive: true, force: true });
+    console.log("Carpeta del cliente eliminada: " + clientFolderPath);
+
+    return { ok: true, skipped: false };
   } catch (error) {
     console.error("Error al eliminar la carpeta del cliente:", error);
-    throw error;
+    return {
+      ok: false,
+      error: error?.message || "Error desconocido al eliminar carpeta",
+    };
   }
 };
 

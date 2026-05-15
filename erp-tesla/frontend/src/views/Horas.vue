@@ -179,7 +179,7 @@ const loadDatos = async () => {
     const [resEmpleados, resClientes, resObras, resGrupos] = await Promise.all([
       api.getEmpleados(),
       api.getClientes(),
-      api.getObras(),
+      api.getObras(true),
       api.getGrupos()
     ])
     empleados.value = resEmpleados.data || []
@@ -512,6 +512,15 @@ const getDiasRango = (fechaDesde, fechaHasta) => {
   return dias
 }
 
+const getHorasWithTimeout = async (mes, anio, empleadoId, timeoutMs = 12000) => {
+  return Promise.race([
+    api.getHoras(mes, anio, empleadoId),
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("Timeout al consultar horas")), timeoutMs)
+    }),
+  ])
+}
+
 const getResumenExistentePorFecha = (registros = [], fecha, empleadoId) => {
   const registrosDia = registros.filter((item) => String(item.empleado_id) === String(empleadoId) && String(item.fecha) === String(fecha))
   if (!registrosDia.length) return null
@@ -558,6 +567,22 @@ const getResumenExistentePorFecha = (registros = [], fecha, empleadoId) => {
 }
 
 const getPlantillaEmpleadoRango = (empleadoId) => {
+  if (isEmpleadoAdministrativo(empleadoId)) {
+    const obraAdmin = getObraAdministrativaParaEmpleado(empleadoId)
+    return {
+      cliente_id: "",
+      obra_id: obraAdmin?.id || "",
+      modo: "cantidad",
+      cantidad_horas: "",
+      hora_inicio: "",
+      hora_fin: "",
+      observaciones: "",
+      es_prestada: false,
+      grupo_origen_id: "",
+      grupo_destino_id: "",
+    }
+  }
+
   if (String(ultimaCargaRapida.value?.empleado_id || "") === String(empleadoId)) {
     return {
       cliente_id: ultimaCargaRapida.value?.cliente_id || "",
@@ -783,17 +808,20 @@ const prepararDiasRango = async () => {
 
   if (!showFormRango.value) {
     rangoDias.value = []
+    loadingRangoDias.value = false
     return
   }
 
   if (!empleadoId) {
     rangoDias.value = []
     error.value = "Seleccioná un empleado para preparar los días del rango"
+    loadingRangoDias.value = false
     return
   }
 
   if (!fechaDesde || !fechaHasta) {
     rangoDias.value = []
+    loadingRangoDias.value = false
     return
   }
 
@@ -801,6 +829,7 @@ const prepararDiasRango = async () => {
   const fin = parseLocalDate(fechaHasta)
   if (!inicio || !fin || inicio > fin) {
     rangoDias.value = []
+    loadingRangoDias.value = false
     return
   }
 
@@ -812,7 +841,7 @@ const prepararDiasRango = async () => {
     console.log("[prepararDiasRango] Empleado:", empleadoId, "es admin:", isEmpleadoAdministrativo(empleadoId), "meses:", meses)
     
     const respuestas = await Promise.all(
-      meses.map(({ mes, anio }) => api.getHoras(mes, anio, empleadoId))
+      meses.map(({ mes, anio }) => getHorasWithTimeout(mes, anio, empleadoId))
     )
 
     if (requestToken !== rangoDiasRequestToken) return

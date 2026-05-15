@@ -110,7 +110,10 @@ export default {
   },
 
   // Obras
-  getObras() {
+  getObras(includeAdmin = false) {
+    if (includeAdmin) {
+      return api.get("/obras?include_admin=1")
+    }
     return api.get("/obras")
   },
 
