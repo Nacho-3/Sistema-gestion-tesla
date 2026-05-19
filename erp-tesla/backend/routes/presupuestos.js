@@ -52,9 +52,7 @@ const normalizeItems = (items = [], tipo = "material") => {
 			const precioUnitario = tipo === "material"
 				? precioUnitarioBase * (1 + gananciaPorcentaje / 100)
 				: precioUnitarioBase
-			const subtotal = tipo === "mano_obra"
-				? 0
-				: cantidad * precioUnitario
+			const subtotal = cantidad * precioUnitario
 
 			return {
 				tipo,
@@ -67,7 +65,7 @@ const normalizeItems = (items = [], tipo = "material") => {
 				subtotal,
 			}
 		})
-		.filter((item) => item.descripcion && item.cantidad > 0 && (tipo === "mano_obra" || item.precio_unitario >= 0))
+		.filter((item) => item.descripcion && item.cantidad > 0 && item.precio_unitario >= 0)
 }
 
 const normalizeInfoInternaItems = (items = []) => {
@@ -84,7 +82,12 @@ const normalizeInfoInternaItems = (items = []) => {
 
 const calcularTotales = ({ materiales, manoObra, aplicaIvaMateriales, aplicaIvaManoObra, ivaPorcentaje, subtotalGeneralManoObra = 0 }) => {
 	const subtotalMateriales = materiales.reduce((acc, item) => acc + item.subtotal, 0)
-	const subtotalManoObra = subtotalGeneralManoObra
+	const subtotalManoObraCalculado = manoObra.reduce((acc, item) => {
+		const precioUnitario = Math.max(0, toNumber(item.precio_unitario, 0))
+		if (precioUnitario <= 0) return acc
+		return acc + item.subtotal
+	}, 0)
+	const subtotalManoObra = subtotalManoObraCalculado > 0 ? subtotalManoObraCalculado : subtotalGeneralManoObra
 	const baseIva = (aplicaIvaMateriales ? subtotalMateriales : 0) + (aplicaIvaManoObra ? subtotalManoObra : 0)
 	const ivaMonto = baseIva > 0 ? baseIva * (ivaPorcentaje / 100) : 0
 	const total = subtotalMateriales + subtotalManoObra + ivaMonto
@@ -99,25 +102,33 @@ const calcularTotales = ({ materiales, manoObra, aplicaIvaMateriales, aplicaIvaM
 
 const validarClienteObraRelacion = async (client, clienteId, obraId) => {
 	const clienteNumero = Number(clienteId)
-	const obraNumero = Number(obraId)
 
 	if (!Number.isInteger(clienteNumero) || clienteNumero <= 0) {
 		return { ok: false, status: 400, error: "cliente_id invalido" }
 	}
 
-	if (!Number.isInteger(obraNumero) || obraNumero <= 0) {
-		return { ok: false, status: 400, error: "obra_id invalido" }
-	}
-
+	// Validar que el cliente existe
 	const clienteResult = await client.query(`SELECT id FROM clientes WHERE id = $1 LIMIT 1`, [clienteNumero])
-	const obraResult = await client.query(`SELECT id, cliente_id FROM obras WHERE id = $1 LIMIT 1`, [obraNumero])
-
 	const clienteExiste = clienteResult.rowCount > 0
-	const obra = obraResult.rows[0]
 
 	if (!clienteExiste) {
 		return { ok: false, status: 404, error: "Cliente no encontrado" }
 	}
+
+	// Si obra_id viene vacío, nulo o 0, permitir (presupuesto sin obra)
+	if (!obraId || obraId === "" || Number(obraId) <= 0) {
+		return { ok: true, clienteId: clienteNumero, obraId: null }
+	}
+
+	const obraNumero = Number(obraId)
+
+	// Si viene un obra_id, validar que sea un número válido
+	if (!Number.isInteger(obraNumero) || obraNumero <= 0) {
+		return { ok: false, status: 400, error: "obra_id invalido" }
+	}
+
+	const obraResult = await client.query(`SELECT id, cliente_id FROM obras WHERE id = $1 LIMIT 1`, [obraNumero])
+	const obra = obraResult.rows[0]
 
 	if (!obra) {
 		return { ok: false, status: 404, error: "Obra no encontrada" }
@@ -172,7 +183,7 @@ const getPresupuestoCompleto = async (id) => {
 				o.nombre AS obra_nombre
 			FROM presupuestos p
 			INNER JOIN clientes c ON c.id = p.cliente_id
-			INNER JOIN obras o ON o.id = p.obra_id
+			LEFT JOIN obras o ON o.id = p.obra_id
 			WHERE p.id = $1
 			LIMIT 1
 		`,
@@ -247,6 +258,8 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 			const mostrarMaterialesEnPdf = isMaterialesMode ? true : Boolean(presupuesto.mostrar_materiales_pdf ?? true)
 			const itemsMateriales = presupuesto.items.filter((item) => item.tipo === "material")
 			const itemsManoObra = presupuesto.items.filter((item) => item.tipo === "mano_obra")
+			const manoObraTienePrecio = itemsManoObra.some((item) => Number(item.precio_unitario || 0) > 0)
+			const manoObraTieneCantidad = itemsManoObra.some((item) => Number(item.cantidad || 0) > 1)
 			const infoInternaItems = Array.isArray(presupuesto.items_info_interna) ? presupuesto.items_info_interna : []
 			const infoInternaVisible = []
 			const quienHizo = sanitizeDescripcion(presupuesto.info_interna_quien_hizo)
@@ -490,16 +503,44 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 				y = sectionHeader("Detalle mano de obra", y)
 				const gruposManoObra = agruparPorEtapa(itemsManoObra)
 				const manoObraConEtapas = gruposManoObra.some((grupo) => grupo.etapa !== "General")
+				const modoManoObraPdf = String(presupuesto.modo_mano_obra || "").trim() || (!manoObraTienePrecio ? "subtotal" : (manoObraTieneCantidad ? "cantidad" : "item"))
 
-				if (manoObraConEtapas) {
-					gruposManoObra.forEach((grupo) => {
-						y = sectionHeader(grupo.etapa, y)
-						const rowsGrupo = grupo.items.map((item, idx) => [`${idx + 1}. ${item.descripcion || "-"}`])
+				const construirBloquesManoObra = (items = []) => {
+					const bloques = []
+					let index = 0
+
+					while (index < items.length) {
+						const actual = items[index]
+						const cantidadBloque = Math.max(1, Number(actual?.cantidad || 1))
+						const itemsBloque = items.slice(index, Math.min(items.length, index + cantidadBloque))
+						const subtotalDirecto = Number(actual?.subtotal || 0)
+						const subtotalBloque = subtotalDirecto > 0
+							? subtotalDirecto
+							: itemsBloque.reduce((acc, item) => acc + Number(item?.subtotal || 0), 0)
+
+						bloques.push({
+							items: itemsBloque,
+							subtotal: subtotalBloque,
+						})
+
+						index += Math.max(1, cantidadBloque)
+					}
+
+					return bloques
+				}
+
+				if (modoManoObraPdf === "cantidad") {
+					const bloques = construirBloquesManoObra(itemsManoObra)
+					bloques.forEach((bloque, idx) => {
+						y = sectionHeader(`Bloque ${idx + 1}`, y)
+						const rowsBloque = bloque.items.map((item, itemIdx) => [`${itemIdx + 1}. ${item.descripcion || "-"}`])
 						y = drawTable({
 							yStart: y,
-							sectionTitle: grupo.etapa,
+							sectionTitle: `Bloque ${idx + 1}`,
 							columns: [{ label: "Descripcion", width }],
-							rows: rowsGrupo.length ? rowsGrupo : [["Sin items"]],
+							rows: rowsBloque.length ? rowsBloque : [["Sin items"]],
+							subtotalLabel: "Subtotal bloque",
+							subtotalValue: formatoMoneda(Number(bloque.subtotal || 0)),
 						})
 					})
 					y = drawSubtotalBand({
@@ -508,17 +549,70 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 						value: formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)),
 					})
 				} else {
-					const manoRows = gruposManoObra.flatMap((grupo) =>
-						grupo.items.map((item, idx) => [`${idx + 1}. ${item.descripcion || "-"}`])
-					)
+				const manoObraDetalle = modoManoObraPdf !== "subtotal" && manoObraTienePrecio
+				const manoObraConCantidad = manoObraDetalle && modoManoObraPdf === "cantidad"
+
+				const manoObraColumns = manoObraConCantidad
+					? [
+						{ label: "Descripcion", width: width - 290 },
+						{ label: "Cant.", width: 60, align: "right" },
+						{ label: "P. unitario", width: 115, align: "right" },
+						{ label: "Subtotal", width: 115, align: "right" },
+					]
+					: manoObraDetalle
+						? [
+							{ label: "Descripcion", width: width - 115 },
+							{ label: "Precio", width: 115, align: "right" },
+						]
+						: [{ label: "Descripcion", width }]
+
+				const manoObraRowsFromItems = (items = []) => items.map((item, idx) => {
+					const descripcion = `${idx + 1}. ${item.descripcion || "-"}`
+					if (!manoObraDetalle) {
+						return [descripcion]
+					}
+					const cantidad = Number(item.cantidad || 0)
+					const precioUnitario = Number(item.precio_unitario || 0)
+					const subtotal = Number(item.subtotal || 0)
+					if (manoObraConCantidad) {
+						return [descripcion, String(cantidad || 1), formatoMoneda(precioUnitario), formatoMoneda(subtotal)]
+					}
+					return [descripcion, formatoMoneda(precioUnitario)]
+				})
+
+				const manoObraEmptyRow = manoObraDetalle
+					? (manoObraConCantidad ? [["Sin items", "0", formatoMoneda(0), formatoMoneda(0)]] : [["Sin items", formatoMoneda(0)]])
+					: [["Sin items"]]
+
+				const drawManoObraGrupo = (grupo) => {
+					y = sectionHeader(grupo.etapa, y)
+					const rowsGrupo = manoObraRowsFromItems(grupo.items)
+					y = drawTable({
+						yStart: y,
+						sectionTitle: grupo.etapa,
+						columns: manoObraColumns,
+						rows: rowsGrupo.length ? rowsGrupo : manoObraEmptyRow,
+					})
+				}
+
+				if (manoObraConEtapas) {
+					gruposManoObra.forEach(drawManoObraGrupo)
+					y = drawSubtotalBand({
+						yStart: y,
+						label: "Subtotal mano de obra",
+						value: formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)),
+					})
+				} else {
+					const manoRows = gruposManoObra.flatMap((grupo) => manoObraRowsFromItems(grupo.items))
 					y = drawTable({
 						yStart: y,
 						sectionTitle: "Detalle mano de obra",
-						columns: [{ label: "Descripcion", width }],
-						rows: manoRows.length ? manoRows : [["Sin items"]],
+						columns: manoObraColumns,
+						rows: manoRows.length ? manoRows : manoObraEmptyRow,
 						subtotalLabel: "Subtotal mano de obra",
 						subtotalValue: formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)),
 					})
+				}
 				}
 			}
 
@@ -850,7 +944,7 @@ router.get("/", async (req, res) => {
 					o.nombre AS obra
 				FROM presupuestos p
 				INNER JOIN clientes c ON c.id = p.cliente_id
-				INNER JOIN obras o ON o.id = p.obra_id
+				LEFT JOIN obras o ON o.id = p.obra_id
 				LEFT JOIN (
 					SELECT
 						presupuesto_id,
@@ -896,6 +990,7 @@ router.post("/", async (req, res) => {
 			observaciones,
 			aplica_iva,
 			aplica_iva_mano_obra,
+			modo_mano_obra,
 			iva_porcentaje,
 			subtotal_general_mano_obra,
 			items_materiales,
@@ -910,11 +1005,11 @@ router.post("/", async (req, res) => {
 			indice_cac_base_id,
 		} = req.body || {}
 
-		if (!cliente_id || !obra_id) {
-			return res.status(400).json({ error: "cliente_id y obra_id son obligatorios" })
+		if (!cliente_id) {
+			return res.status(400).json({ error: "cliente_id es obligatorio" })
 		}
 
-		const validacionRelacion = await validarClienteObraRelacion(client, cliente_id, obra_id)
+		const validacionRelacion = await validarClienteObraRelacion(client, cliente_id, obra_id || null)
 		if (!validacionRelacion.ok) {
 			return res.status(validacionRelacion.status).json({ error: validacionRelacion.error })
 		}
@@ -1029,8 +1124,9 @@ router.post("/", async (req, res) => {
 
 		const completo = await getPresupuestoCompleto(presupuesto.id)
 		try {
-			await syncPresupuestoPdfStorage(completo)
-			await syncPresupuestoPdfStorage(completo, null, "materiales")
+			const presupuestoPdf = { ...completo, modo_mano_obra: String(modo_mano_obra || "") }
+			await syncPresupuestoPdfStorage(presupuestoPdf)
+			await syncPresupuestoPdfStorage(presupuestoPdf, null, "materiales")
 		} catch (storageError) {
 			console.error("No se pudo guardar el PDF del presupuesto en disco", storageError)
 		}
@@ -1064,6 +1160,7 @@ router.put("/:id", async (req, res) => {
 			observaciones,
 			aplica_iva,
 			aplica_iva_mano_obra,
+			modo_mano_obra,
 			iva_porcentaje,
 			subtotal_general_mano_obra,
 			items_materiales,
@@ -1078,11 +1175,11 @@ router.put("/:id", async (req, res) => {
 			indice_cac_base_id,
 		} = req.body || {}
 
-		if (!cliente_id || !obra_id) {
-			return res.status(400).json({ error: "cliente_id y obra_id son obligatorios" })
+		if (!cliente_id) {
+			return res.status(400).json({ error: "cliente_id es obligatorio" })
 		}
 
-		const validacionRelacion = await validarClienteObraRelacion(client, cliente_id, obra_id)
+		const validacionRelacion = await validarClienteObraRelacion(client, cliente_id, obra_id || null)
 		if (!validacionRelacion.ok) {
 			return res.status(validacionRelacion.status).json({ error: validacionRelacion.error })
 		}
@@ -1224,8 +1321,9 @@ router.put("/:id", async (req, res) => {
 
 		const completo = await getPresupuestoCompleto(presupuestoId)
 		try {
-			await syncPresupuestoPdfStorage(completo, presupuestoPrevio)
-			await syncPresupuestoPdfStorage(completo, presupuestoPrevio, "materiales")
+			const presupuestoPdf = { ...completo, modo_mano_obra: String(modo_mano_obra || "") }
+			await syncPresupuestoPdfStorage(presupuestoPdf, presupuestoPrevio)
+			await syncPresupuestoPdfStorage(presupuestoPdf, presupuestoPrevio, "materiales")
 		} catch (storageError) {
 			console.error("No se pudo actualizar el PDF del presupuesto en disco", storageError)
 		}

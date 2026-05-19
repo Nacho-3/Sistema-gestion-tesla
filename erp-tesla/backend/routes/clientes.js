@@ -120,133 +120,201 @@ router.get("/:id/ficha-pdf", async (req, res) => {
       .fontSize(11)
       .text(`Actualizada al ${fechaTexto}`, 45, headerBottom + 8, { align: "right", width: pageWidth - 90 })
 
-    doc.moveTo(45, headerBottom + 28).lineTo(pageWidth - 45, headerBottom + 28).strokeColor(PDF_COLORS.line).lineWidth(0.8).stroke()
-    doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(12).text("DATOS DEL CLIENTE", 45, headerBottom + 36)
-
-    // Mostrar razón social como subtítulo destacado
-    doc.fillColor(PDF_COLORS.ink).font("Helvetica-Bold").fontSize(13).text(`Razón social: ${cliente.razon_social || "-"}`, 45, headerBottom + 54)
-    doc.font("Helvetica").fontSize(10)
-    doc.text(`CUIT: ${cliente.cuit || "-"}`, 45, headerBottom + 74)
-    doc.text(`Email: ${cliente.email || "-"}`, 45, headerBottom + 94)
-    doc.text(`Dirección: ${cliente.direccion || "-"}`, 45, headerBottom + 114)
-    doc.text(`Teléfono: ${cliente.telefono || "-"}`, 45, headerBottom + 134)
-    doc.text(`IVA: ${cliente.iva || "-"}`, 45, headerBottom + 154)
-
-    // Resumen
+    // Datos asociados
     const { data: obras, error: obrasError } = await db
       .from("obras")
-      .select("*")
+      .select("id, nombre, estado, fecha_inicio")
       .eq("cliente_id", id)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
 
-    if (obrasError) {
-      console.error("Error al obtener obras:", obrasError);
-      return res.status(500).json({ error: "Error al obtener las obras del cliente." });
-    }
+    if (obrasError) throw obrasError
 
-    const totalObras = obras?.length || 0
-    const obrasActivas = (obras || []).filter((obra) => obra.estado === "activa").length
-    const obrasFinalizadas = (obras || []).filter((obra) => obra.estado !== "activa").length
+    const { data: presupuestos, error: presupuestosError } = await db
+      .from("presupuestos")
+      .select("id, numero, fecha, estado, total, obra_id")
+      .eq("cliente_id", id)
+      .order("fecha", { ascending: false })
 
-    const resumenY = headerBottom + 176
-    doc.roundedRect(45, resumenY, pageWidth - 90, 48, 6).fill(PDF_COLORS.card)
-    doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(10)
-    doc.text(`Total obras: ${totalObras}`, 60, resumenY + 18)
-    doc.text(`Activas: ${obrasActivas}`, 230, resumenY + 18)
-    doc.text(`Finalizadas: ${obrasFinalizadas}`, 360, resumenY + 18)
-    doc.fillColor(PDF_COLORS.ink)
+    if (presupuestosError) throw presupuestosError
 
-    // Tabla de obras
-    let currentY = resumenY + 72
-    doc.font("Helvetica-Bold").fontSize(12).fillColor(PDF_COLORS.navy).text("OBRAS ASOCIADAS", 45, currentY)
-    currentY += 22
-
-    const drawTableHeader = () => {
-      doc.rect(45, currentY, pageWidth - 90, 24).fill(PDF_COLORS.navy)
-      doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(9)
-      doc.text("NOMBRE", 55, currentY + 8, { width: 250 })
-      doc.text("ESTADO", 315, currentY + 8, { width: 90 })
-      doc.text("FECHA INICIO", 410, currentY + 8, { width: 140 })
-      doc.fillColor(PDF_COLORS.ink)
-      currentY += 24
-    }
-
-    drawTableHeader()
-
-    if (!obras || obras.length === 0) {
-      doc.font("Helvetica").fontSize(10.5).text("No hay obras asociadas a este cliente.", 45, currentY + 12)
-    } else {
-      obras.forEach((obra, index) => {
-        if (currentY > doc.page.height - 90) {
-          doc.addPage()
-          currentY = 60
-          drawTableHeader()
-        }
-
-        const fechaInicio = obra.fecha_inicio
-          ? new Date(obra.fecha_inicio).toLocaleDateString("es-AR")
-          : "-"
-
-        const fill = index % 2 === 0 ? PDF_COLORS.light : PDF_COLORS.lightAlt
-        doc.rect(45, currentY, pageWidth - 90, 22).fill(fill)
-        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9.5)
-        doc.text(obra.nombre || "Sin nombre", 55, currentY + 7, { width: 250, ellipsis: true })
-        doc.text(normalizeEstado(obra.estado), 315, currentY + 7, { width: 90 })
-        doc.text(fechaInicio, 410, currentY + 7, { width: 140 })
-
-        currentY += 22
-      })
-    }
-
-    // =========================
-    // Movimientos de caja asociados
-    // =========================
-    // Consultar movimientos de caja (solo ingresos) asociados a este cliente
-    const { data: movimientosCaja, error: errorMovimientosCaja } = await db
+    const { data: movimientosCaja, error: movimientosCajaError } = await db
       .from("movimientos_caja")
       .select("fecha, detalle, monto_total, observaciones")
       .eq("cliente_id", id)
       .eq("tipo", "ingreso")
       .order("fecha", { ascending: true })
 
-    let movimientosY = currentY + 40
-    doc.font("Helvetica-Bold").fontSize(12).fillColor(PDF_COLORS.navy).text("MOVIMIENTOS DE CAJA (Ingresos)", 45, movimientosY)
-    movimientosY += 22
+    if (movimientosCajaError) throw movimientosCajaError
 
-    const drawMovimientosHeader = () => {
-      doc.rect(45, movimientosY, pageWidth - 90, 24).fill(PDF_COLORS.navy)
-      doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(9)
-      doc.text("FECHA", 55, movimientosY + 8, { width: 90 })
-      doc.text("DETALLE", 150, movimientosY + 8, { width: 200 })
-      doc.text("MONTO", 355, movimientosY + 8, { width: 90 })
-      doc.text("OBSERVACIONES", 450, movimientosY + 8, { width: 120 })
+    const obrasList = obras || []
+    const presupuestosList = presupuestos || []
+    const movimientosList = movimientosCaja || []
+
+    const obraNombrePorId = new Map(obrasList.map((obra) => [Number(obra.id), obra.nombre || "Sin obra"]))
+    const isAceptado = (p) => ["aprobado", "aceptado"].includes(String(p.estado || "").toLowerCase())
+
+    const totalObras = obrasList.length
+    const obrasActivas = obrasList.filter((obra) => obra.estado === "activa").length
+    const obrasFinalizadas = obrasList.filter((obra) => obra.estado !== "activa").length
+
+    const totalPresupuestos = presupuestosList.length
+    const presupuestosAceptados = presupuestosList.filter(isAceptado).length
+    const presupuestosPendientes = totalPresupuestos - presupuestosAceptados
+
+    // start content a bit lower to avoid overlapping long headers
+    let cursorY = headerBottom + 48
+
+    const footerSafe = 80
+    const ensureSpace = (requiredHeight = 30) => {
+      if (cursorY + requiredHeight <= doc.page.height - footerSafe) return
+      doc.addPage()
+      cursorY = 60
+    }
+
+    const drawSectionTitle = (title) => {
+      ensureSpace(34)
+      doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(12)
+      doc.text(title, 45, cursorY)
+      cursorY += 18
+      doc.moveTo(45, cursorY).lineTo(pageWidth - 45, cursorY).strokeColor(PDF_COLORS.line).lineWidth(0.8).stroke()
+      cursorY += 10
       doc.fillColor(PDF_COLORS.ink)
-      movimientosY += 24
     }
 
-    drawMovimientosHeader()
-
-    if (!movimientosCaja || movimientosCaja.length === 0) {
-      doc.font("Helvetica").fontSize(10.5).text("No hay movimientos de caja asociados a este cliente.", 45, movimientosY + 12)
-      movimientosY += 22
-    } else {
-      movimientosCaja.forEach((mov, idx) => {
-        if (movimientosY > doc.page.height - 90) {
-          doc.addPage()
-          movimientosY = 60
-          drawMovimientosHeader()
-        }
-        const fecha = mov.fecha ? new Date(mov.fecha).toLocaleDateString("es-AR") : "-"
-        const fill = idx % 2 === 0 ? PDF_COLORS.light : PDF_COLORS.lightAlt
-        doc.rect(45, movimientosY, pageWidth - 90, 20).fill(fill)
-        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9)
-        doc.text(fecha, 55, movimientosY + 6, { width: 90 })
-        doc.text(mov.detalle || "-", 150, movimientosY + 6, { width: 200 })
-        doc.text(Number(mov.monto_total).toLocaleString("es-AR", { minimumFractionDigits: 2 }), 355, movimientosY + 6, { width: 90 })
-        doc.text(mov.observaciones || "-", 450, movimientosY + 6, { width: 120 })
-        movimientosY += 20
+    const drawRowCard = (rows = []) => {
+      ensureSpace(80)
+      const cardHeight = 56
+      doc.roundedRect(45, cursorY, pageWidth - 90, cardHeight, 6).fill(PDF_COLORS.card)
+      doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(10)
+      // render three columns evenly
+      const availableWidth = pageWidth - 90
+      const colW = Math.floor(availableWidth / Math.max(rows.length, 1))
+      rows.forEach((item, idx) => {
+        const x = 45 + idx * colW + 12
+        doc.text(item, x, cursorY + 14, { width: colW - 20 })
       })
+      doc.fillColor(PDF_COLORS.ink)
+      cursorY += cardHeight + 12
     }
+
+    const drawSimpleRows = (entries) => {
+      entries.forEach((entry) => {
+        ensureSpace(22)
+        doc.font(entry.bold ? "Helvetica-Bold" : "Helvetica").fontSize(9).fillColor(PDF_COLORS.ink)
+        doc.text(entry.text, 45, cursorY, { width: pageWidth - 90 })
+        cursorY += 18
+      })
+      cursorY += 8
+    }
+
+    const drawTable = ({
+      columns,
+      rows,
+      emptyText,
+      rowHeight = 22,
+    }) => {
+      ensureSpace(30)
+
+      const drawHeader = () => {
+        doc.rect(45, cursorY, pageWidth - 90, 24).fill(PDF_COLORS.navy)
+        doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(9)
+        columns.forEach((col) => {
+          doc.text(col.label, col.x, cursorY + 8, { width: col.width, align: col.align || "left" })
+        })
+        doc.fillColor(PDF_COLORS.ink)
+        cursorY += 24
+      }
+
+      drawHeader()
+
+      if (!rows.length) {
+        ensureSpace(24)
+        doc.font("Helvetica").fontSize(10).text(emptyText, 45, cursorY + 6)
+        cursorY += 26
+        return
+      }
+
+      rows.forEach((row, idx) => {
+        ensureSpace(rowHeight + 6)
+        const fill = idx % 2 === 0 ? PDF_COLORS.light : PDF_COLORS.lightAlt
+        doc.rect(45, cursorY, pageWidth - 90, rowHeight).fill(fill)
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9.2)
+        columns.forEach((col) => {
+          const text = String(row[col.key] ?? "-")
+          doc.text(text, col.x, cursorY + 7, { width: col.width, align: col.align || "left", ellipsis: true })
+        })
+        cursorY += rowHeight
+      })
+
+      cursorY += 12
+    }
+
+    drawSectionTitle("DATOS DEL CLIENTE")
+    drawSimpleRows([
+      { text: `Razón social: ${cliente.razon_social || "-"}`, bold: true },
+      { text: `CUIT: ${cliente.cuit || "-"}` },
+      { text: `Email: ${cliente.email || "-"}` },
+      { text: `Dirección: ${cliente.direccion || "-"}` },
+      { text: `Teléfono: ${cliente.telefono || "-"}` },
+      { text: `IVA: ${cliente.iva || "-"}` },
+    ])
+
+    // Resumen retirado por solicitud — se omite para diseño más compacto
+
+    drawSectionTitle("OBRAS ASOCIADAS")
+    drawTable({
+      columns: [
+        { key: "nombre", label: "NOMBRE", x: 55, width: 250 },
+        { key: "estado", label: "ESTADO", x: 315, width: 90 },
+        { key: "fecha_inicio", label: "FECHA INICIO", x: 410, width: 140 },
+      ],
+      rows: obrasList.map((obra) => ({
+        nombre: obra.nombre || "Sin nombre",
+        estado: normalizeEstado(obra.estado),
+        fecha_inicio: obra.fecha_inicio ? new Date(obra.fecha_inicio).toLocaleDateString("es-AR") : "-",
+      })),
+      emptyText: "No hay obras asociadas a este cliente.",
+    })
+
+    drawSectionTitle("PRESUPUESTOS")
+    drawTable({
+      columns: [
+        { key: "numero", label: "NUMERO", x: 55, width: 70 },
+        { key: "obra", label: "OBRA", x: 130, width: 190 },
+        { key: "estado", label: "ESTADO", x: 325, width: 85 },
+        { key: "fecha", label: "FECHA", x: 415, width: 70 },
+        { key: "total", label: "TOTAL", x: 490, width: 60, align: "right" },
+      ],
+      rows: presupuestosList.map((p) => ({
+        numero: `#${p.numero || "-"}`,
+        obra: obraNombrePorId.get(Number(p.obra_id)) || "Sin obra",
+        estado: String(p.estado || "-").toUpperCase(),
+        fecha: p.fecha ? new Date(p.fecha).toLocaleDateString("es-AR") : "-",
+        total: Number(p.total || 0).toLocaleString("es-AR", { minimumFractionDigits: 2 }),
+      })),
+      emptyText: "No hay presupuestos asociados a este cliente.",
+    })
+
+    drawSectionTitle("MOVIMIENTOS DE CAJA (INGRESOS)")
+    // Columns: Fecha | Detalle |       Monto |    Observaciones
+    drawTable({
+      columns: [
+        { key: "fecha", label: "FECHA", x: 55, width: 80 },
+        { key: "detalle", label: "DETALLE", x: 140, width: 260 },
+        // move MONTO further left and give it more width
+        { key: "monto", label: "MONTO", x: 300, width: 130, align: "right" },
+        // start OBSERVACIONES further right and increase width
+        { key: "observaciones", label: "OBSERVACIONES", x: 460, width: pageWidth - 460 - 45 },
+      ],
+      rows: movimientosList.map((mov) => ({
+        fecha: mov.fecha ? new Date(mov.fecha).toLocaleDateString("es-AR") : "-",
+        detalle: mov.detalle || "-",
+        monto: Number(mov.monto_total || 0).toLocaleString("es-AR", { minimumFractionDigits: 2 }),
+        observaciones: mov.observaciones || "-",
+      })),
+      emptyText: "No hay movimientos de caja asociados a este cliente.",
+      rowHeight: 22,
+    })
 
     doc.end()
   } catch (err) {

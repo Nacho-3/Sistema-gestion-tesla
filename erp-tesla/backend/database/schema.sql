@@ -12,6 +12,10 @@ ALTER TABLE IF EXISTS liquidaciones ADD COLUMN IF NOT EXISTS reajuste_porcentaje
 -- MIGRACIÓN SEGURA: dias_enfermedad en liquidaciones
 ALTER TABLE IF EXISTS liquidaciones ADD COLUMN IF NOT EXISTS dias_enfermedad NUMERIC(12,2) DEFAULT 0;
 ALTER TABLE IF EXISTS liquidaciones ADD COLUMN IF NOT EXISTS importe_enfermedad NUMERIC(12,2) DEFAULT 0;
+
+-- MIGRACIÓN SEGURA: permitir presupuestos sin obra (obra_id nullable)
+ALTER TABLE IF EXISTS presupuestos 
+  ALTER COLUMN obra_id DROP NOT NULL;
 -- ERP Tesla - Schema PostgreSQL local
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -554,7 +558,7 @@ CREATE TABLE IF NOT EXISTS presupuestos (
   id SERIAL PRIMARY KEY,
   numero INTEGER NOT NULL UNIQUE,
   cliente_id INTEGER NOT NULL REFERENCES clientes(id),
-  obra_id INTEGER NOT NULL REFERENCES obras(id),
+  obra_id INTEGER REFERENCES obras(id),
   proyecto TEXT DEFAULT '',
   fecha DATE NOT NULL DEFAULT CURRENT_DATE,
   validez_dias INTEGER NOT NULL DEFAULT 15,

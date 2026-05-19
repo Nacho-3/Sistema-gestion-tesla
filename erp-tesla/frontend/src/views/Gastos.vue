@@ -260,7 +260,7 @@ onMounted(cargarGastos)
 			</div>
 		</section>
 
-		<div v-if="showForm" class="modal-overlay" @click.self="cerrarForm">
+		<div v-if="showForm" class="modal-overlay">
             <div class="modal">
                 <h3>{{ editandoID ? "Editar gasto" : "Nuevo gasto" }}</h3>
 

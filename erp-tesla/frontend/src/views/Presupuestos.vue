@@ -33,9 +33,10 @@ const ESTADOS_PRESUPUESTO = [
 ]
 
 const newMaterialItem = (etapaUid = null) => ({ uid: Date.now() + Math.random(), etapa_uid: etapaUid, descripcion: "", cantidad: 1, precio_unitario: 0, ganancia_porcentaje: 0 })
-const newManoObraItem = (etapaUid = null) => ({ uid: Date.now() + Math.random(), etapa_uid: etapaUid, descripcion: "" })
+const newManoObraItem = (etapaUid = null, bloqueUid = null) => ({ uid: Date.now() + Math.random(), etapa_uid: etapaUid, bloque_uid: bloqueUid, descripcion: "", cantidad: 1, precio_unitario: 0 })
 const newEtapa = (titulo = "") => ({ uid: Date.now() + Math.random(), titulo })
 const newInfoInternaItem = () => ({ uid: Date.now() + Math.random(), descripcion: "", mostrar_en_pdf: false })
+const newManoObraCantidadBloque = () => ({ uid: Date.now() + Math.random(), subtotal: 0 })
 
 const createEmptyForm = () => {
   return {
@@ -47,6 +48,7 @@ const createEmptyForm = () => {
     forma_pago: "Contado",
     aplica_iva: true,
     aplica_iva_mano_obra: false,
+    modo_mano_obra: "subtotal",
     iva_porcentaje: 21,
     subtotal_general_mano_obra: 0,
     observaciones: "",
@@ -56,6 +58,7 @@ const createEmptyForm = () => {
     etapas_mano_obra: [],
     items_materiales: [newMaterialItem(null)],
     items_mano_obra: [newManoObraItem(null)],
+    mano_obra_bloques_cantidad: [newManoObraCantidadBloque()],
     info_interna_quien_hizo: "",
     info_interna_quien_hizo_pdf: false,
     info_interna_quien_aprobo: "",
@@ -98,7 +101,28 @@ const materialRowsValidas = computed(() =>
 )
 
 const manoObraRowsValidas = computed(() =>
-  form.value.items_mano_obra.filter((item) => item.descripcion)
+  form.value.items_mano_obra.filter((item) => item.descripcion && Number(item.cantidad) > 0)
+)
+
+const manoObraBloquesCantidadValidos = computed(() =>
+  (form.value.mano_obra_bloques_cantidad || []).filter((bloque) => Number(bloque.subtotal) > 0)
+)
+
+const subtotalManoObraCalculado = computed(() =>
+  form.value.modo_mano_obra === "subtotal"
+    ? 0
+    : form.value.modo_mano_obra === "cantidad"
+      ? manoObraBloquesCantidadValidos.value.reduce((acc, bloque) => {
+          const subtotal = Number(bloque.subtotal) || 0
+          if (subtotal <= 0) return acc
+          return acc + subtotal
+        }, 0)
+      : manoObraRowsValidas.value.reduce((acc, item) => {
+        const precioUnitario = Number(item.precio_unitario) || 0
+        if (precioUnitario <= 0) return acc
+        const cantidad = 1
+        return acc + (cantidad * precioUnitario)
+      }, 0)
 )
 
 const subtotalMateriales = computed(() =>
@@ -112,7 +136,9 @@ const subtotalMateriales = computed(() =>
 )
 
 const subtotalManoObra = computed(() =>
-  Number(form.value.subtotal_general_mano_obra) || 0
+  subtotalManoObraCalculado.value > 0
+    ? subtotalManoObraCalculado.value
+    : Number(form.value.subtotal_general_mano_obra) || 0
 )
 
 const ivaMonto = computed(() => {
@@ -265,14 +291,57 @@ const removeMaterialRow = (uid) => {
   form.value.items_materiales = form.value.items_materiales.filter((item) => item.uid !== uid)
 }
 
-const addManoObraRow = (etapaUid = null) => {
+const addManoObraRow = (etapaUid = null, bloqueUid = null) => {
   const etapaObjetivo = etapaUid || form.value.etapas_mano_obra[form.value.etapas_mano_obra.length - 1]?.uid || null
-  form.value.items_mano_obra.push(newManoObraItem(etapaObjetivo))
+  const bloqueObjetivo = form.value.modo_mano_obra === "cantidad"
+    ? (bloqueUid || form.value.mano_obra_bloques_cantidad[form.value.mano_obra_bloques_cantidad.length - 1]?.uid || null)
+    : null
+  form.value.items_mano_obra.push(newManoObraItem(etapaObjetivo, bloqueObjetivo))
 }
 
 const removeManoObraRow = (uid) => {
   if (form.value.items_mano_obra.length === 1) return
   form.value.items_mano_obra = form.value.items_mano_obra.filter((item) => item.uid !== uid)
+}
+
+const addManoObraCantidadBloque = () => {
+  const bloque = newManoObraCantidadBloque()
+  form.value.mano_obra_bloques_cantidad.push(bloque)
+  return bloque
+}
+
+const removeManoObraCantidadBloque = (uid) => {
+  if (form.value.mano_obra_bloques_cantidad.length === 1) return
+  const fallbackBloqueUid = form.value.mano_obra_bloques_cantidad.find((bloque) => bloque.uid !== uid)?.uid || null
+  form.value.items_mano_obra = form.value.items_mano_obra.map((item) => (
+    item.bloque_uid === uid ? { ...item, bloque_uid: fallbackBloqueUid } : item
+  ))
+  form.value.mano_obra_bloques_cantidad = form.value.mano_obra_bloques_cantidad.filter((bloque) => bloque.uid !== uid)
+}
+
+const getItemsManoObraPorBloque = (bloqueUid) => {
+  return form.value.items_mano_obra.filter((item) => item.bloque_uid === bloqueUid)
+}
+
+const setModoManoObra = (modo) => {
+  form.value.modo_mano_obra = modo
+
+  if (modo === "cantidad") {
+    if (!form.value.mano_obra_bloques_cantidad.length) {
+      form.value.mano_obra_bloques_cantidad = [newManoObraCantidadBloque()]
+    }
+    const bloqueInicialUid = form.value.mano_obra_bloques_cantidad[0]?.uid || null
+    form.value.items_mano_obra = form.value.items_mano_obra.map((item) => ({
+      ...item,
+      bloque_uid: item.bloque_uid || bloqueInicialUid,
+    }))
+    return
+  }
+
+  form.value.items_mano_obra = form.value.items_mano_obra.map((item) => ({
+    ...item,
+    bloque_uid: null,
+  }))
 }
 
 const addEtapaMaterial = () => {
@@ -405,6 +474,14 @@ const editPresupuesto = async (id) => {
     const manoObra = (data?.items || []).filter((item) => item.tipo === "mano_obra")
     const { grupos: etapasMateriales, mapa: mapaEtapasMateriales } = buildEtapasDesdeItems(materiales)
     const { grupos: etapasManoObra, mapa: mapaEtapasManoObra } = buildEtapasDesdeItems(manoObra)
+    const manoObraTienePrecio = manoObra.some((item) => Number(item.precio_unitario || 0) > 0)
+    const manoObraTieneCantidad = manoObra.some((item) => Number(item.cantidad || 0) > 1)
+    const modoManoObra = !manoObraTienePrecio && Number(data.subtotal_mano_obra || 0) > 0
+      ? "subtotal"
+      : (manoObraTieneCantidad ? "cantidad" : "item")
+    const bloquesCantidadReconstruidos = []
+    let bloqueActualUid = null
+    let itemsRestantesBloque = 0
 
     editingId.value = data.id
     editingNumero.value = data.numero
@@ -417,6 +494,7 @@ const editPresupuesto = async (id) => {
       forma_pago: data.forma_pago || "Contado",
       aplica_iva: Boolean(data.aplica_iva_materiales ?? (Number(data.iva_monto || 0) > 0 && Number(data.subtotal_materiales || 0) > 0)),
       aplica_iva_mano_obra: Boolean(data.aplica_iva_mano_obra),
+      modo_mano_obra: modoManoObra,
       iva_porcentaje: Number(data.iva_porcentaje) || 21,
       subtotal_general_mano_obra: Number(data.subtotal_mano_obra) || 0,
       observaciones: data.observaciones || "",
@@ -439,11 +517,42 @@ const editPresupuesto = async (id) => {
         : [newMaterialItem(null)],
       items_mano_obra: manoObra.length
         ? manoObra.map((item) => ({
-            uid: Date.now() + Math.random(),
-            etapa_uid: (mapaEtapasManoObra.get(String(item.etapa || "").trim()) || null)?.uid || null,
-            descripcion: item.descripcion || "",
+            ...(() => {
+              if (modoManoObra !== "cantidad") {
+                return {
+                  uid: Date.now() + Math.random(),
+                  etapa_uid: (mapaEtapasManoObra.get(String(item.etapa || "").trim()) || null)?.uid || null,
+                  bloque_uid: null,
+                  descripcion: item.descripcion || "",
+                  cantidad: Number(item.cantidad) || 1,
+                  precio_unitario: Number(item.precio_unitario) || 0,
+                }
+              }
+
+              if (itemsRestantesBloque <= 0) {
+                const cantidadBloque = Math.max(1, Number(item.cantidad) || 1)
+                const subtotalBloque = cantidadBloque * (Number(item.precio_unitario) || 0)
+                const bloque = { uid: Date.now() + Math.random(), subtotal: subtotalBloque }
+                bloquesCantidadReconstruidos.push(bloque)
+                bloqueActualUid = bloque.uid
+                itemsRestantesBloque = cantidadBloque
+              }
+
+              itemsRestantesBloque -= 1
+              return {
+                uid: Date.now() + Math.random(),
+                etapa_uid: (mapaEtapasManoObra.get(String(item.etapa || "").trim()) || null)?.uid || null,
+                bloque_uid: bloqueActualUid,
+                descripcion: item.descripcion || "",
+                cantidad: Number(item.cantidad) || 1,
+                precio_unitario: Number(item.precio_unitario) || 0,
+              }
+            })(),
           }))
         : [newManoObraItem(null)],
+      mano_obra_bloques_cantidad: modoManoObra === "cantidad"
+        ? (bloquesCantidadReconstruidos.length ? bloquesCantidadReconstruidos : [newManoObraCantidadBloque()])
+        : [newManoObraCantidadBloque()],
       info_interna_quien_hizo: data.info_interna_quien_hizo || "",
       info_interna_quien_hizo_pdf: Boolean(data.info_interna_quien_hizo_pdf),
       info_interna_quien_aprobo: data.info_interna_quien_aprobo || "",
@@ -486,20 +595,81 @@ const savePresupuesto = async () => {
   ok.value = ""
   error.value = ""
 
-  if (!form.value.cliente_id || !form.value.obra_id) {
-    error.value = "Cliente y obra son obligatorios"
+  if (!form.value.cliente_id) {
+    error.value = "Cliente es obligatorio"
     return
+  }
+
+  const construirItemsManoObraPayload = () => {
+    const rows = form.value.items_mano_obra.map((item) => ({
+      etapa: getEtapaLabelByUid(item.etapa_uid, form.value.etapas_mano_obra),
+      descripcion: String(item.descripcion || "").trim(),
+      cantidad: 1,
+      precio_unitario: 0,
+    }))
+
+    if (form.value.modo_mano_obra === "subtotal") {
+      return rows
+    }
+
+    if (form.value.modo_mano_obra === "item") {
+      return rows.map((row, idx) => ({
+        ...row,
+        precio_unitario: Number(form.value.items_mano_obra[idx]?.precio_unitario) || 0,
+      }))
+    }
+
+    const conteoPorBloque = {}
+    const subtotalPorBloque = {}
+    for (const bloque of form.value.mano_obra_bloques_cantidad || []) {
+      subtotalPorBloque[bloque.uid] = Math.max(0, Number(bloque.subtotal) || 0)
+    }
+    for (const item of form.value.items_mano_obra) {
+      const bloqueUid = item.bloque_uid
+      if (!bloqueUid) continue
+      const descripcion = String(item.descripcion || "").trim()
+      if (!descripcion) continue
+      conteoPorBloque[bloqueUid] = (conteoPorBloque[bloqueUid] || 0) + 1
+    }
+
+    const primerItemPorBloque = {}
+    return rows.map((row, idx) => {
+      const item = form.value.items_mano_obra[idx] || {}
+      const bloqueUid = item.bloque_uid
+      if (!bloqueUid) {
+        return row
+      }
+
+      if (!primerItemPorBloque[bloqueUid]) {
+        primerItemPorBloque[bloqueUid] = true
+        const cantidad = Math.max(1, Number(conteoPorBloque[bloqueUid]) || 1)
+        const subtotal = Math.max(0, Number(subtotalPorBloque[bloqueUid]) || 0)
+        const precioUnitario = cantidad > 0 ? (subtotal / cantidad) : 0
+        return {
+          ...row,
+          cantidad,
+          precio_unitario: precioUnitario,
+        }
+      }
+
+      return {
+        ...row,
+        cantidad: 1,
+        precio_unitario: 0,
+      }
+    })
   }
 
   const payload = {
     cliente_id: Number(form.value.cliente_id),
-    obra_id: Number(form.value.obra_id),
+    obra_id: form.value.obra_id ? Number(form.value.obra_id) : null,
     proyecto: String(form.value.proyecto || "").trim(),
     fecha: form.value.fecha,
     validez_dias: Number(form.value.validez_dias) || 15,
     forma_pago: form.value.forma_pago,
     aplica_iva: Boolean(form.value.aplica_iva),
     aplica_iva_mano_obra: Boolean(form.value.aplica_iva_mano_obra),
+    modo_mano_obra: String(form.value.modo_mano_obra || "subtotal"),
     iva_porcentaje: Number(form.value.iva_porcentaje) || 0,
     subtotal_general_mano_obra: Number(form.value.subtotal_general_mano_obra) || 0,
     observaciones: form.value.observaciones,
@@ -512,12 +682,7 @@ const savePresupuesto = async () => {
       ganancia_porcentaje: Math.max(0, Number(item.ganancia_porcentaje) || 0),
       precio_unitario: Number(item.precio_unitario) || 0,
     })),
-    items_mano_obra: form.value.items_mano_obra.map((item) => ({
-      etapa: getEtapaLabelByUid(item.etapa_uid, form.value.etapas_mano_obra),
-      descripcion: String(item.descripcion || "").trim(),
-      cantidad: 1,
-      precio_unitario: 0,
-    })),
+    items_mano_obra: construirItemsManoObraPayload(),
     info_interna_quien_hizo: String(form.value.info_interna_quien_hizo || "").trim(),
     info_interna_quien_hizo_pdf: Boolean(form.value.info_interna_quien_hizo_pdf),
     info_interna_quien_aprobo: String(form.value.info_interna_quien_aprobo || "").trim(),
@@ -847,7 +1012,7 @@ onUnmounted(() => {
         </article>
       </section>
 
-      <div v-if="showForm" class="modal-overlay" @click.self="closeForm">
+      <div v-if="showForm" class="modal-overlay">
         <div class="modal modal-presupuesto">
           <div class="modal-header">
             <div class="modal-header-copy">
@@ -943,24 +1108,67 @@ onUnmounted(() => {
                     <h4>Mano de obra</h4>
                   </div>
                   <div class="section-head-actions">
+                    <select :value="form.modo_mano_obra" class="mano-obra-modo-select" @change="(e) => setModoManoObra(e.target.value)">
+                      <option value="item">Precio por item</option>
+                      <option value="cantidad">Precio por cantidad de items</option>
+                      <option value="subtotal">Subtotal manual</option>
+                    </select>
                     <label class="section-pdf-check">
                       <input v-model="form.mostrar_mano_obra_pdf" type="checkbox" />
                       <span>Mostrar en PDF</span>
                     </label>
-                    <button type="button" class="btn-secondary" @click="addEtapaManoObra">+ Agregar etapa</button>
-                    <button type="button" class="btn-secondary" @click="addManoObraRow()">+ Item</button>
+                    <button v-if="form.modo_mano_obra !== 'cantidad'" type="button" class="btn-secondary" @click="addEtapaManoObra">+ Agregar etapa</button>
+                    <button v-if="form.modo_mano_obra !== 'cantidad'" type="button" class="btn-secondary" @click="addManoObraRow()">+ Item</button>
+                    <button v-if="form.modo_mano_obra === 'cantidad'" type="button" class="btn-secondary" @click="addManoObraCantidadBloque()">+ Comenzar bloque</button>
                   </div>
                 </div>
+                <div v-if="form.modo_mano_obra === 'cantidad'" class="bloques-cantidad-list">
+                  <div v-for="(bloque, index) in form.mano_obra_bloques_cantidad" :key="bloque.uid" class="bloque-cantidad-card">
+                    <div class="bloque-cantidad-header">
+                      <strong>Bloque {{ index + 1 }}</strong>
+                      <div class="bloque-cantidad-actions">
+                        <button type="button" class="btn-secondary btn-secondary-sm" @click="addManoObraRow(null, bloque.uid)">+ Item bloque</button>
+                        <button type="button" class="btn-link danger" @click="removeManoObraCantidadBloque(bloque.uid)">Quitar bloque</button>
+                      </div>
+                    </div>
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Descripcion</th>
+                          <th></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="row in getItemsManoObraPorBloque(bloque.uid)" :key="row.uid">
+                          <td><input v-model="row.descripcion" type="text" placeholder="Detalle de tarea" /></td>
+                          <td><button type="button" class="btn-link danger" @click="removeManoObraRow(row.uid)">Quitar</button></td>
+                        </tr>
+                        <tr v-if="getItemsManoObraPorBloque(bloque.uid).length === 0">
+                          <td colspan="2" class="sin-datos">Sin items en este bloque</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                    <div class="subtotal-general-box subtotal-bloque-box">
+                      <label>Subtotal bloque</label>
+                      <input v-model.number="bloque.subtotal" type="number" min="0" step="0.01" placeholder="Subtotal del bloque" />
+                    </div>
+                  </div>
+                </div>
+                <template v-else>
                 <table v-if="getItemsManoObraPorEtapa(null).length > 0 || form.etapas_mano_obra.length === 0">
                   <thead>
                     <tr>
                       <th>Descripcion</th>
+                      <th v-if="form.modo_mano_obra === 'item'">Precio unitario</th>
+                      <th v-if="form.modo_mano_obra === 'item'">Subtotal</th>
                       <th></th>
                     </tr>
                   </thead>
                   <tbody>
                     <tr v-for="row in getItemsManoObraPorEtapa(null)" :key="row.uid">
                       <td><input v-model="row.descripcion" type="text" placeholder="Detalle de tarea" /></td>
+                      <td v-if="form.modo_mano_obra === 'item'"><input v-model.number="row.precio_unitario" type="number" min="0" step="0.01" /></td>
+                      <td v-if="form.modo_mano_obra === 'item'">{{ formatMoney(Number(row.precio_unitario) || 0) }}</td>
                       <td><button type="button" class="btn-link danger" @click="removeManoObraRow(row.uid)">Quitar</button></td>
                     </tr>
                   </tbody>
@@ -978,20 +1186,37 @@ onUnmounted(() => {
                     <thead>
                       <tr>
                         <th>Descripcion</th>
+                        <th v-if="form.modo_mano_obra === 'item'">Precio unitario</th>
+                        <th v-if="form.modo_mano_obra === 'item'">Subtotal</th>
                         <th></th>
                       </tr>
                     </thead>
                     <tbody>
                       <tr v-for="row in getItemsManoObraPorEtapa(etapa.uid)" :key="row.uid">
                         <td><input v-model="row.descripcion" type="text" placeholder="Detalle de tarea" /></td>
+                        <td v-if="form.modo_mano_obra === 'item'"><input v-model.number="row.precio_unitario" type="number" min="0" step="0.01" /></td>
+                        <td v-if="form.modo_mano_obra === 'item'">{{ formatMoney(Number(row.precio_unitario) || 0) }}</td>
                         <td><button type="button" class="btn-link danger" @click="removeManoObraRow(row.uid)">Quitar</button></td>
                       </tr>
                     </tbody>
                   </table>
                 </div>
-                <div class="subtotal-general-box">
+                </template>
+                <div v-if="form.modo_mano_obra === 'cantidad'" class="subtotal-general-box">
+                  <label>Subtotal mano de obra (suma de bloques)</label>
+                  <div class="subtotal-general-display">{{ formatMoney(subtotalManoObra) }}</div>
+                  <small>Cada bloque tiene su propio subtotal. Podés crear bloques nuevos para continuar.</small>
+                </div>
+                <div v-if="form.modo_mano_obra === 'subtotal'" class="subtotal-general-box">
                   <label>Subtotal general mano de obra</label>
-                  <input v-model.number="form.subtotal_general_mano_obra" type="number" min="0" step="0.01" />
+                  <input
+                    v-model.number="form.subtotal_general_mano_obra"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="Se usa si no asignas precio a los items"
+                  />
+                  <small>Si cargás precio en uno o más items, el subtotal se calcula automáticamente por fila.</small>
                 </div>
               </section>
 
@@ -1917,7 +2142,7 @@ textarea:focus {
 
 .items-grid {
   display: grid;
-  grid-template-columns: minmax(320px, 0.85fr) minmax(620px, 1.4fr);
+  grid-template-columns: 1fr;
   gap: 14px;
   align-items: start;
 }
@@ -1952,6 +2177,47 @@ textarea:focus {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.bloques-cantidad-list {
+  display: grid;
+  gap: 10px;
+}
+
+.bloque-cantidad-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.22);
+}
+
+.bloque-cantidad-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.bloque-cantidad-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.subtotal-bloque-box {
+  margin-top: 2px;
+}
+
+.subtotal-general-display {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+  background: rgba(15, 23, 42, 0.5);
+  color: #e2e8f0;
+  font-weight: 700;
 }
 
 .etapa-block {

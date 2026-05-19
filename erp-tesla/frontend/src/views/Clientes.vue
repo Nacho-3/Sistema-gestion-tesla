@@ -13,6 +13,7 @@ const clientes = ref([])
 const loading = ref(false)
 const error = ref("")
 const showForm = ref(false)
+// Modal now only closes via the close button. Clicks outside no longer close it.
 const editingId = ref(null)
 const vistaActual = ref("lista") // "lista" o "ficha"
 const clienteSeleccionado = ref(null)
@@ -123,6 +124,8 @@ const verFicha = async (cliente) => {
       api.getMovimientosCaja(null, null, "ingreso", null, null)
     ])
     obrasCliente.value = resObras.data?.filter(o => o.cliente_id === cliente.id) || []
+
+    await cargarPresupuestosCliente(cliente.id)
 
     // Filtrar movimientos de caja por cliente_id
     movimientosCajaCliente.value = (resMovimientos.data.movimientos || []).filter(m => Number(m.cliente_id) === Number(cliente.id))
@@ -570,7 +573,7 @@ onUnmounted(() => {
       </div>
 
       <!-- Modal formulario -->
-      <div v-if="showForm" class="modal-overlay" @click.self="closeForm">
+      <div v-if="showForm" class="modal-overlay">
         <div class="modal">
           <div class="modal-header">
             <div class="modal-header-copy">

@@ -1,5 +1,5 @@
 <template>
-  <div class="modal-overlay" @click.self="$emit('close')">
+  <div class="modal-overlay">
     <div class="modal" :style="modalStyle">
       <div class="modal-header">
         <slot name="header"></slot>
