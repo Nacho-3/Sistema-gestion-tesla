@@ -80,7 +80,68 @@ const normalizeInfoInternaItems = (items = []) => {
 		.filter((item) => item.descripcion)
 }
 
-const calcularTotales = ({ materiales, manoObra, aplicaIvaMateriales, aplicaIvaManoObra, ivaPorcentaje, subtotalGeneralManoObra = 0 }) => {
+const normalizeDescuentoTipo = (value = "") => String(value || "").toLowerCase().trim() === "porcentaje" ? "porcentaje" : "monto"
+const normalizeDescuentoModo = (value = "") => String(value || "").toLowerCase().trim() === "manual" ? "manual" : "auto"
+
+const calcularDescuento = ({
+	descuentoActivo,
+	descuentoTipo,
+	descuentoModo,
+	descuentoValor,
+	descuentoMontoManual,
+	baseDescuento,
+}) => {
+	if (!descuentoActivo || baseDescuento <= 0) {
+		return {
+			descuentoTipo: normalizeDescuentoTipo(descuentoTipo),
+			descuentoModo: normalizeDescuentoModo(descuentoModo),
+			descuentoValorFinal: 0,
+			descuentoMontoFinal: 0,
+		}
+	}
+
+	const tipo = normalizeDescuentoTipo(descuentoTipo)
+	const modo = normalizeDescuentoModo(descuentoModo)
+	const valorNumerico = Math.max(0, toNumber(descuentoValor, 0))
+	const montoManual = Math.max(0, toNumber(descuentoMontoManual, 0))
+
+	if (tipo === "porcentaje") {
+		const porcentaje = Math.max(0, Math.min(100, valorNumerico))
+		const montoAuto = baseDescuento * (porcentaje / 100)
+		const montoFinal = Math.min(baseDescuento, modo === "manual" ? montoManual : montoAuto)
+		const valorFinal = baseDescuento > 0 ? (montoFinal / baseDescuento) * 100 : 0
+		return {
+			descuentoTipo: tipo,
+			descuentoModo: modo,
+			descuentoValorFinal: valorFinal,
+			descuentoMontoFinal: montoFinal,
+		}
+	}
+
+	const montoAuto = valorNumerico
+	const montoFinal = Math.min(baseDescuento, modo === "manual" ? montoManual : montoAuto)
+	const valorFinal = montoFinal
+	return {
+		descuentoTipo: tipo,
+		descuentoModo: modo,
+		descuentoValorFinal: valorFinal,
+		descuentoMontoFinal: montoFinal,
+	}
+}
+
+const calcularTotales = ({
+	materiales,
+	manoObra,
+	aplicaIvaMateriales,
+	aplicaIvaManoObra,
+	ivaPorcentaje,
+	subtotalGeneralManoObra = 0,
+	descuentoActivo = false,
+	descuentoTipo = "monto",
+	descuentoModo = "auto",
+	descuentoValor = 0,
+	descuentoMontoManual = 0,
+}) => {
 	const subtotalMateriales = materiales.reduce((acc, item) => acc + item.subtotal, 0)
 	const subtotalManoObraCalculado = manoObra.reduce((acc, item) => {
 		const precioUnitario = Math.max(0, toNumber(item.precio_unitario, 0))
@@ -90,12 +151,30 @@ const calcularTotales = ({ materiales, manoObra, aplicaIvaMateriales, aplicaIvaM
 	const subtotalManoObra = subtotalManoObraCalculado > 0 ? subtotalManoObraCalculado : subtotalGeneralManoObra
 	const baseIva = (aplicaIvaMateriales ? subtotalMateriales : 0) + (aplicaIvaManoObra ? subtotalManoObra : 0)
 	const ivaMonto = baseIva > 0 ? baseIva * (ivaPorcentaje / 100) : 0
-	const total = subtotalMateriales + subtotalManoObra + ivaMonto
+	const baseConIva = subtotalMateriales + subtotalManoObra + ivaMonto
+	const {
+		descuentoTipo: descuentoTipoFinal,
+		descuentoModo: descuentoModoFinal,
+		descuentoValorFinal,
+		descuentoMontoFinal,
+	} = calcularDescuento({
+		descuentoActivo: Boolean(descuentoActivo),
+		descuentoTipo,
+		descuentoModo,
+		descuentoValor,
+		descuentoMontoManual,
+		baseDescuento: baseConIva,
+	})
+	const total = Math.max(0, baseConIva - descuentoMontoFinal)
 
 	return {
 		subtotalMateriales,
 		subtotalManoObra,
 		ivaMonto,
+		descuentoTipo: descuentoTipoFinal,
+		descuentoModo: descuentoModoFinal,
+		descuentoValor: descuentoValorFinal,
+		descuentoMonto: descuentoMontoFinal,
 		total,
 	}
 }
@@ -691,10 +770,95 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 			}
 
 			const ivaMonto = Number(presupuesto.iva_monto || 0)
+			const descuentoMontoPdf = Math.max(0, Number(presupuesto.descuento_monto || 0))
+			const descuentoMotivoPdf = sanitizeDescripcion(presupuesto.descuento_motivo) || "Descuento aplicado"
 			const totalGeneral = Number(presupuesto.total || 0)
-			const summaryBoxH = 84
-			const summaryLeftW = width - 182
+			const summaryLeftW = width - 210
+			const summaryRightW = width - summaryLeftW
+			const valueW = 80
+			const labelW = Math.max(40, summaryRightW - valueW - 26)
+			const rowGap = 4
+			const rowTopPad = 8
+			const rowBottomPad = 8
+			const totalGap = 6
+			const totalBandH = 21
 			const observacionesTexto = sanitizeDescripcion(presupuesto.observaciones)
+
+			const aplicaIvaMaterialesPdf = Boolean(presupuesto.aplica_iva_materiales)
+			const aplicaIvaManoObraPdf = Boolean(presupuesto.aplica_iva_mano_obra)
+			let labelIva = `IVA ${Number(presupuesto.iva_porcentaje || 21)}%`
+			if (aplicaIvaMaterialesPdf && aplicaIvaManoObraPdf) labelIva += " (Mat. + M.O.)"
+			else if (aplicaIvaMaterialesPdf) labelIva += " (Mat.)"
+			else if (aplicaIvaManoObraPdf) labelIva += " (M.O.)"
+			else labelIva += " (No aplica)"
+
+			const summaryRowsBase = [
+				{ label: "Subtotal mano de obra", value: formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)), wrap: false },
+				{ label: "Subtotal materiales", value: formatoMoneda(Number(presupuesto.subtotal_materiales || 0)), wrap: false },
+				{ label: labelIva, value: formatoMoneda(ivaMonto), wrap: false },
+			]
+
+			if (descuentoMontoPdf > 0) {
+				summaryRowsBase.push({
+					label: descuentoMotivoPdf,
+					value: `-${formatoMoneda(descuentoMontoPdf)}`,
+					wrap: true,
+				})
+			}
+
+			doc.font("Helvetica").fontSize(8.5)
+			const lineHeight = doc.currentLineHeight()
+			const fitLine = (text = "") => {
+				const source = String(text || "")
+				if (!source) return ""
+				if (doc.widthOfString(source) <= labelW) return source
+				let trimmed = source
+				while (trimmed.length > 1 && doc.widthOfString(`${trimmed}...`) > labelW) {
+					trimmed = trimmed.slice(0, -1)
+				}
+				return `${trimmed}...`
+			}
+			const fitToTwoLines = (text = "") => {
+				const source = String(text || "").trim()
+				if (!source) return { labelText: "", rowH: lineHeight }
+				if (doc.widthOfString(source) <= labelW) return { labelText: source, rowH: lineHeight }
+
+				const words = source.split(/\s+/).filter(Boolean)
+				if (words.length <= 1) {
+					const midpoint = Math.max(1, Math.floor(source.length / 2))
+					const first = fitLine(source.slice(0, midpoint))
+					const second = fitLine(source.slice(midpoint))
+					const labelText = `${first}\n${second}`
+					const rowH = Math.max(lineHeight, doc.heightOfString(labelText, { width: labelW, lineBreak: true }))
+					return { labelText, rowH }
+				}
+
+				let line1 = ""
+				let i = 0
+				for (; i < words.length; i += 1) {
+					const candidate = line1 ? `${line1} ${words[i]}` : words[i]
+					if (doc.widthOfString(candidate) <= labelW) {
+						line1 = candidate
+						continue
+					}
+					if (!line1) line1 = fitLine(words[i])
+					break
+				}
+
+				const remaining = words.slice(i).join(" ")
+				const line2 = fitLine(remaining)
+				const labelText = line2 ? `${line1}\n${line2}` : line1
+				const rowH = Math.max(lineHeight, doc.heightOfString(labelText, { width: labelW, lineBreak: true }))
+				return { labelText, rowH }
+			}
+			const summaryRows = summaryRowsBase.map((row) => {
+				if (!row.wrap) return { ...row, rowH: lineHeight }
+				const wrapped = fitToTwoLines(row.label)
+				return { ...row, labelText: wrapped.labelText, rowH: wrapped.rowH }
+			})
+
+			const rowsContentH = summaryRows.reduce((acc, row) => acc + row.rowH, 0) + (Math.max(0, summaryRows.length - 1) * rowGap)
+			const summaryBoxH = Math.max(84, rowTopPad + rowsContentH + totalGap + totalBandH + rowBottomPad)
 
 			if (!isMaterialesMode && infoInternaVisible.length > 0) {
 				const infoHeaderH = 22
@@ -738,26 +902,30 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 				})
 
 				const sumX = left + summaryLeftW
-				doc.rect(sumX, ySummary, width - summaryLeftW, summaryBoxH).lineWidth(0.8).strokeColor(lineColor).stroke()
+				doc.rect(sumX, ySummary, summaryRightW, summaryBoxH).lineWidth(0.8).strokeColor(lineColor).stroke()
 				doc.font("Helvetica").fontSize(8.5).fillColor("#111")
-				doc.text("Subtotal mano de obra", sumX + 8, ySummary + 8)
-				doc.text(formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)), right - 8 - 80, ySummary + 8, { width: 80, align: "right" })
-				doc.text("Subtotal materiales", sumX + 8, ySummary + 24)
-				doc.text(formatoMoneda(Number(presupuesto.subtotal_materiales || 0)), right - 8 - 80, ySummary + 24, { width: 80, align: "right" })
-				const aplicaIvaMaterialesPdf = Boolean(presupuesto.aplica_iva_materiales)
-				const aplicaIvaManoObraPdf = Boolean(presupuesto.aplica_iva_mano_obra)
-				let labelIva = `IVA ${Number(presupuesto.iva_porcentaje || 21)}%`
-				if (aplicaIvaMaterialesPdf && aplicaIvaManoObraPdf) labelIva += " (Mat. + M.O.)"
-				else if (aplicaIvaMaterialesPdf) labelIva += " (Mat.)"
-				else if (aplicaIvaManoObraPdf) labelIva += " (M.O.)"
-				else labelIva += " (No aplica)"
-				doc.text(labelIva, sumX + 8, ySummary + 40)
-				doc.text(formatoMoneda(ivaMonto), right - 8 - 80, ySummary + 40, { width: 80, align: "right" })
+				const labelX = sumX + 8
+				const valueX = right - 8 - valueW
 
-				doc.rect(sumX + 6, ySummary + 57, width - summaryLeftW - 12, 21).fillAndStroke("#1f1f1f", lineColor)
+				let summaryY = ySummary + rowTopPad
+				summaryRows.forEach((row) => {
+					doc.text(
+						String(row.labelText || row.label || ""),
+						labelX,
+						summaryY,
+						row.wrap
+							? { width: labelW, lineBreak: true }
+							: { width: labelW, lineBreak: false },
+					)
+					doc.text(String(row.value || ""), valueX, summaryY, { width: valueW, align: "right", lineBreak: false })
+					summaryY += row.rowH + rowGap
+				})
+
+				const totalBandY = summaryY + totalGap - rowGap
+				doc.rect(sumX + 6, totalBandY, summaryRightW - 12, 21).fillAndStroke("#1f1f1f", lineColor)
 				doc.font("Helvetica-Bold").fontSize(9.8).fillColor("#ffffff")
-				doc.text("TOTAL", sumX + 12, ySummary + 64)
-				doc.text(formatoMoneda(totalGeneral), right - 8 - 80, ySummary + 64, { width: 80, align: "right" })
+				doc.text("TOTAL", sumX + 12, totalBandY + 7)
+				doc.text(formatoMoneda(totalGeneral), valueX, totalBandY + 7, { width: valueW, align: "right", lineBreak: false })
 				y = ySummary + summaryBoxH + 10
 			}
 
@@ -992,6 +1160,12 @@ router.post("/", async (req, res) => {
 			aplica_iva_mano_obra,
 			modo_mano_obra,
 			iva_porcentaje,
+			descuento_activo,
+			descuento_tipo,
+			descuento_modo,
+			descuento_valor,
+			descuento_monto,
+			descuento_motivo,
 			subtotal_general_mano_obra,
 			items_materiales,
 			items_mano_obra,
@@ -1020,6 +1194,7 @@ router.post("/", async (req, res) => {
 		const infoInternaItems = normalizeInfoInternaItems(items_info_interna)
 		const infoInternaQuienHizo = sanitizeDescripcion(info_interna_quien_hizo)
 		const infoInternaQuienAprobo = sanitizeDescripcion(info_interna_quien_aprobo)
+		const descuentoMotivo = sanitizeDescripcion(descuento_motivo)
 		const proyectoPresupuesto = sanitizeDescripcion(proyecto)
 		const indiceCacBaseId = indice_cac_base_id ? Number(indice_cac_base_id) : null
 
@@ -1030,13 +1205,18 @@ router.post("/", async (req, res) => {
 		const ivaPorcentaje = toNumber(iva_porcentaje, 21)
 		const aplicaIvaMateriales = Boolean(aplica_iva)
 		const aplicaIvaManoObra = Boolean(aplica_iva_mano_obra)
-		const { subtotalMateriales, subtotalManoObra, ivaMonto, total } = calcularTotales({
+		const { subtotalMateriales, subtotalManoObra, ivaMonto, descuentoTipo, descuentoModo, descuentoValor, descuentoMonto, total } = calcularTotales({
 			materiales,
 			manoObra,
 			aplicaIvaMateriales,
 			aplicaIvaManoObra,
 			ivaPorcentaje,
 			subtotalGeneralManoObra,
+			descuentoActivo: Boolean(descuento_activo),
+			descuentoTipo: descuento_tipo,
+			descuentoModo: descuento_modo,
+			descuentoValor: descuento_valor,
+			descuentoMontoManual: descuento_monto,
 		})
 
 		await client.query("BEGIN")
@@ -1047,11 +1227,12 @@ router.post("/", async (req, res) => {
 			`
 				INSERT INTO presupuestos (
 					numero, cliente_id, obra_id, fecha, validez_dias, forma_pago, observaciones,
-					subtotal_materiales, subtotal_mano_obra, aplica_iva_materiales, aplica_iva_mano_obra, iva_porcentaje, iva_monto, total,
+					subtotal_materiales, subtotal_mano_obra, aplica_iva_materiales, aplica_iva_mano_obra, iva_porcentaje, iva_monto,
+					descuento_activo, descuento_tipo, descuento_modo, descuento_valor, descuento_monto, descuento_motivo, total,
 					mostrar_mano_obra_pdf, mostrar_materiales_pdf,
 					proyecto, info_interna_quien_hizo, info_interna_quien_hizo_pdf,
 					info_interna_quien_aprobo, info_interna_quien_aprobo_pdf, indice_cac_base_id
-				) VALUES ($1,$2,$3,COALESCE($4::date, CURRENT_DATE),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+				) VALUES ($1,$2,$3,COALESCE($4::date, CURRENT_DATE),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
 				RETURNING *
 			`,
 			[
@@ -1068,6 +1249,12 @@ router.post("/", async (req, res) => {
 				aplicaIvaManoObra,
 				ivaPorcentaje,
 				ivaMonto,
+				Boolean(descuento_activo),
+				descuentoTipo,
+				descuentoModo,
+				descuentoValor,
+				descuentoMonto,
+				descuentoMotivo,
 				total,
 				Boolean(mostrar_mano_obra_pdf ?? true),
 				Boolean(mostrar_materiales_pdf ?? true),
@@ -1162,6 +1349,12 @@ router.put("/:id", async (req, res) => {
 			aplica_iva_mano_obra,
 			modo_mano_obra,
 			iva_porcentaje,
+			descuento_activo,
+			descuento_tipo,
+			descuento_modo,
+			descuento_valor,
+			descuento_monto,
+			descuento_motivo,
 			subtotal_general_mano_obra,
 			items_materiales,
 			items_mano_obra,
@@ -1190,6 +1383,7 @@ router.put("/:id", async (req, res) => {
 		const infoInternaItems = normalizeInfoInternaItems(items_info_interna)
 		const infoInternaQuienHizo = sanitizeDescripcion(info_interna_quien_hizo)
 		const infoInternaQuienAprobo = sanitizeDescripcion(info_interna_quien_aprobo)
+		const descuentoMotivo = sanitizeDescripcion(descuento_motivo)
 		const proyectoPresupuesto = sanitizeDescripcion(proyecto)
 		const indiceCacBaseId = indice_cac_base_id ? Number(indice_cac_base_id) : null
 
@@ -1200,13 +1394,18 @@ router.put("/:id", async (req, res) => {
 		const ivaPorcentaje = toNumber(iva_porcentaje, 21)
 		const aplicaIvaMateriales = Boolean(aplica_iva)
 		const aplicaIvaManoObra = Boolean(aplica_iva_mano_obra)
-		const { subtotalMateriales, subtotalManoObra, ivaMonto, total } = calcularTotales({
+		const { subtotalMateriales, subtotalManoObra, ivaMonto, descuentoTipo, descuentoModo, descuentoValor, descuentoMonto, total } = calcularTotales({
 			materiales,
 			manoObra,
 			aplicaIvaMateriales,
 			aplicaIvaManoObra,
 			ivaPorcentaje,
 			subtotalGeneralManoObra,
+			descuentoActivo: Boolean(descuento_activo),
+			descuentoTipo: descuento_tipo,
+			descuentoModo: descuento_modo,
+			descuentoValor: descuento_valor,
+			descuentoMontoManual: descuento_monto,
 		})
 
 		await client.query("BEGIN")
@@ -1237,16 +1436,22 @@ router.put("/:id", async (req, res) => {
 					aplica_iva_mano_obra = $10,
 					iva_porcentaje = $11,
 					iva_monto = $12,
-					total = $13,
-					mostrar_mano_obra_pdf = $14,
-					mostrar_materiales_pdf = $15,
-					info_interna_quien_hizo = $16,
-					info_interna_quien_hizo_pdf = $17,
-					info_interna_quien_aprobo = $18,
-					info_interna_quien_aprobo_pdf = $19,
-					proyecto = $20,
-					indice_cac_base_id = $21
-				WHERE id = $22
+					descuento_activo = $13,
+					descuento_tipo = $14,
+					descuento_modo = $15,
+					descuento_valor = $16,
+					descuento_monto = $17,
+					descuento_motivo = $18,
+					total = $19,
+					mostrar_mano_obra_pdf = $20,
+					mostrar_materiales_pdf = $21,
+					info_interna_quien_hizo = $22,
+					info_interna_quien_hizo_pdf = $23,
+					info_interna_quien_aprobo = $24,
+					info_interna_quien_aprobo_pdf = $25,
+					proyecto = $26,
+					indice_cac_base_id = $27
+				WHERE id = $28
 			`,
 			[
 				validacionRelacion.clienteId,
@@ -1261,6 +1466,12 @@ router.put("/:id", async (req, res) => {
 				aplicaIvaManoObra,
 				ivaPorcentaje,
 				ivaMonto,
+				Boolean(descuento_activo),
+				descuentoTipo,
+				descuentoModo,
+				descuentoValor,
+				descuentoMonto,
+				descuentoMotivo,
 				total,
 				Boolean(mostrar_mano_obra_pdf ?? true),
 				Boolean(mostrar_materiales_pdf ?? true),

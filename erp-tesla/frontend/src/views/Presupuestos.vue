@@ -16,6 +16,7 @@ const error = ref("")
 const ok = ref("")
 
 const showForm = ref(false)
+const showDiscountModal = ref(false)
 const showDeleteConfirm = ref(false)
 const presupuestoAEliminar = ref(null)
 const numeroSiguiente = ref(1)
@@ -50,6 +51,12 @@ const createEmptyForm = () => {
     aplica_iva_mano_obra: false,
     modo_mano_obra: "subtotal",
     iva_porcentaje: 21,
+    descuento_activo: false,
+    descuento_tipo: "monto",
+    descuento_modo: "auto",
+    descuento_valor: 0,
+    descuento_monto: 0,
+    descuento_motivo: "",
     subtotal_general_mano_obra: 0,
     observaciones: "",
     mostrar_mano_obra_pdf: true,
@@ -149,7 +156,105 @@ const ivaMonto = computed(() => {
   return baseIva * ((Number(form.value.iva_porcentaje) || 0) / 100)
 })
 
-const total = computed(() => subtotalMateriales.value + subtotalManoObra.value + ivaMonto.value)
+const subtotalConIva = computed(() => subtotalMateriales.value + subtotalManoObra.value + ivaMonto.value)
+
+const descuentoMontoAplicado = computed(() => {
+  if (!form.value.descuento_activo) return 0
+
+  const base = subtotalConIva.value
+  if (!(base > 0)) return 0
+
+  const tipo = String(form.value.descuento_tipo || "monto")
+  const modo = String(form.value.descuento_modo || "auto")
+  const valor = Math.max(0, Number(form.value.descuento_valor) || 0)
+  const montoManual = Math.max(0, Number(form.value.descuento_monto) || 0)
+
+  if (tipo === "porcentaje") {
+    const porcentaje = Math.max(0, Math.min(100, valor))
+    const montoAuto = base * (porcentaje / 100)
+    return Math.min(base, modo === "manual" ? montoManual : montoAuto)
+  }
+
+  const montoAuto = valor
+  return Math.min(base, modo === "manual" ? montoManual : montoAuto)
+})
+
+const total = computed(() => Math.max(0, subtotalConIva.value - descuentoMontoAplicado.value))
+
+const syncDescuentoMontoDesdeValor = () => {
+  const base = subtotalConIva.value
+  const tipo = String(form.value.descuento_tipo || "monto")
+  const valor = Math.max(0, Number(form.value.descuento_valor) || 0)
+
+  if (!(base > 0)) {
+    form.value.descuento_monto = 0
+    return
+  }
+
+  if (tipo === "porcentaje") {
+    const porcentaje = Math.max(0, Math.min(100, valor))
+    form.value.descuento_valor = porcentaje
+    form.value.descuento_monto = base * (porcentaje / 100)
+    return
+  }
+
+  form.value.descuento_monto = valor
+}
+
+const syncDescuentoValorDesdeMonto = () => {
+  const base = subtotalConIva.value
+  const tipo = String(form.value.descuento_tipo || "monto")
+  const monto = Math.max(0, Number(form.value.descuento_monto) || 0)
+
+  if (!(base > 0)) {
+    form.value.descuento_valor = 0
+    return
+  }
+
+  if (tipo === "porcentaje") {
+    form.value.descuento_valor = Math.max(0, Math.min(100, (monto / base) * 100))
+    return
+  }
+
+  form.value.descuento_valor = monto
+}
+
+const onChangeDescuentoTipo = () => {
+  if (String(form.value.descuento_modo || "auto") === "auto") {
+    syncDescuentoMontoDesdeValor()
+    return
+  }
+  syncDescuentoValorDesdeMonto()
+}
+
+const onChangeDescuentoModo = () => {
+  if (String(form.value.descuento_modo || "auto") === "auto") {
+    syncDescuentoMontoDesdeValor()
+    return
+  }
+  syncDescuentoValorDesdeMonto()
+}
+
+const onInputDescuentoValor = () => {
+  form.value.descuento_valor = Math.max(0, Number(form.value.descuento_valor) || 0)
+  syncDescuentoMontoDesdeValor()
+}
+
+const onInputDescuentoMonto = () => {
+  form.value.descuento_monto = Math.max(0, Number(form.value.descuento_monto) || 0)
+  syncDescuentoValorDesdeMonto()
+}
+
+watch(subtotalConIva, () => {
+  if (!form.value.descuento_activo) return
+  if (String(form.value.descuento_modo || "auto") === "auto") {
+    syncDescuentoMontoDesdeValor()
+    return
+  }
+  if (String(form.value.descuento_tipo || "monto") === "porcentaje") {
+    syncDescuentoMontoDesdeValor()
+  }
+})
 
 const totalPresupuestado = computed(() =>
   presupuestos.value.reduce((acc, p) => acc + (Number(p.total) || 0), 0)
@@ -428,6 +533,7 @@ const removeInfoInternaRow = (uid) => {
 const resetForm = () => {
   editingId.value = null
   editingNumero.value = null
+  showDiscountModal.value = false
   form.value = createEmptyForm()
 }
 
@@ -496,6 +602,12 @@ const editPresupuesto = async (id) => {
       aplica_iva_mano_obra: Boolean(data.aplica_iva_mano_obra),
       modo_mano_obra: modoManoObra,
       iva_porcentaje: Number(data.iva_porcentaje) || 21,
+      descuento_activo: Boolean(data.descuento_activo),
+      descuento_tipo: String(data.descuento_tipo || "monto") === "porcentaje" ? "porcentaje" : "monto",
+      descuento_modo: String(data.descuento_modo || "auto") === "manual" ? "manual" : "auto",
+      descuento_valor: Math.max(0, Number(data.descuento_valor) || 0),
+      descuento_monto: Math.max(0, Number(data.descuento_monto) || 0),
+      descuento_motivo: String(data.descuento_motivo || ""),
       subtotal_general_mano_obra: Number(data.subtotal_mano_obra) || 0,
       observaciones: data.observaciones || "",
       mostrar_mano_obra_pdf: Boolean(data.mostrar_mano_obra_pdf ?? true),
@@ -671,6 +783,12 @@ const savePresupuesto = async () => {
     aplica_iva_mano_obra: Boolean(form.value.aplica_iva_mano_obra),
     modo_mano_obra: String(form.value.modo_mano_obra || "subtotal"),
     iva_porcentaje: Number(form.value.iva_porcentaje) || 0,
+    descuento_activo: Boolean(form.value.descuento_activo),
+    descuento_tipo: String(form.value.descuento_tipo || "monto"),
+    descuento_modo: String(form.value.descuento_modo || "auto"),
+    descuento_valor: Math.max(0, Number(form.value.descuento_valor) || 0),
+    descuento_monto: Math.max(0, Number(form.value.descuento_monto) || 0),
+    descuento_motivo: String(form.value.descuento_motivo || "").trim(),
     subtotal_general_mano_obra: Number(form.value.subtotal_general_mano_obra) || 0,
     observaciones: form.value.observaciones,
     mostrar_mano_obra_pdf: Boolean(form.value.mostrar_mano_obra_pdf),
@@ -1300,10 +1418,17 @@ onUnmounted(() => {
               </section>
             </div>
 
+            <div class="descuento-actions-row">
+              <button type="button" class="btn-secondary" @click="showDiscountModal = true">Aplicar descuento</button>
+              <small v-if="form.descuento_activo">Descuento activo: {{ formatMoney(descuentoMontoAplicado) }}</small>
+              <small v-else>Sin descuento aplicado</small>
+            </div>
+
             <div class="resumen-card">
               <div class="resumen-line"><span>Subtotal mano de obra</span><strong>{{ formatMoney(subtotalManoObra) }}</strong></div>
               <div class="resumen-line"><span>Subtotal materiales</span><strong>{{ formatMoney(subtotalMateriales) }}</strong></div>
               <div class="resumen-line"><span>IVA</span><strong>{{ formatMoney(ivaMonto) }}</strong></div>
+              <div class="resumen-line" v-if="form.descuento_activo"><span>Descuento</span><strong>-{{ formatMoney(descuentoMontoAplicado) }}</strong></div>
               <div class="total">TOTAL: {{ formatMoney(total) }}</div>
             </div>
 
@@ -1381,6 +1506,94 @@ onUnmounted(() => {
               </button>
             </div>
           </form>
+        </div>
+      </div>
+
+      <div v-if="showDiscountModal && showForm" class="modal-overlay" @click.self="showDiscountModal = false">
+        <div class="modal modal-descuento">
+          <div class="modal-header">
+            <div class="modal-header-copy">
+              <span class="section-kicker">Ajuste comercial</span>
+              <h3>Aplicar descuento</h3>
+              <p>Podés descontar por porcentaje o por monto, en modo automático o manual.</p>
+            </div>
+            <button type="button" class="btn-close" aria-label="Cerrar modal" @click="showDiscountModal = false">×</button>
+          </div>
+
+          <div class="modal-form modal-form-descuento">
+            <label class="section-pdf-check descuento-toggle">
+              <input v-model="form.descuento_activo" type="checkbox" @change="onChangeDescuentoModo" />
+              <span>Activar descuento</span>
+            </label>
+
+            <div class="grid-form grid-form-top">
+              <div class="field-card">
+                <label>Tipo de descuento</label>
+                <select v-model="form.descuento_tipo" :disabled="!form.descuento_activo" @change="onChangeDescuentoTipo">
+                  <option value="monto">Por monto</option>
+                  <option value="porcentaje">Por porcentaje</option>
+                </select>
+              </div>
+
+              <div class="field-card">
+                <label>Modo de cálculo</label>
+                <select v-model="form.descuento_modo" :disabled="!form.descuento_activo" @change="onChangeDescuentoModo">
+                  <option value="auto">Automático</option>
+                  <option value="manual">Manual</option>
+                </select>
+              </div>
+
+              <div class="field-card">
+                <label>Valor</label>
+                <input
+                  v-model.number="form.descuento_valor"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  :disabled="!form.descuento_activo"
+                  @input="onInputDescuentoValor"
+                />
+                <small v-if="form.descuento_tipo === 'porcentaje'">Porcentaje %</small>
+                <small v-else>Monto $</small>
+              </div>
+
+              <div class="field-card">
+                <label>Monto del descuento</label>
+                <input
+                  v-model.number="form.descuento_monto"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  :disabled="!form.descuento_activo || form.descuento_modo === 'auto'"
+                  @input="onInputDescuentoMonto"
+                />
+                <small v-if="form.descuento_modo === 'auto'">Se calcula automáticamente</small>
+                <small v-else>Podés fijarlo manualmente</small>
+              </div>
+
+              <div class="field-card">
+                <label>Motivo del descuento (PDF)</label>
+                <input
+                  v-model="form.descuento_motivo"
+                  type="text"
+                  maxlength="120"
+                  :disabled="!form.descuento_activo"
+                  placeholder="Ej: Bonificación especial"
+                />
+                <small>Si lo dejás vacío, en PDF aparece: Descuento aplicado</small>
+              </div>
+            </div>
+
+            <div class="resumen-card descuento-preview">
+              <div class="resumen-line"><span>Base con IVA</span><strong>{{ formatMoney(subtotalConIva) }}</strong></div>
+              <div class="resumen-line"><span>Descuento aplicado</span><strong>-{{ formatMoney(descuentoMontoAplicado) }}</strong></div>
+              <div class="total">Total final: {{ formatMoney(total) }}</div>
+            </div>
+
+            <div class="actions modal-actions">
+              <button type="button" class="btn-secondary" @click="showDiscountModal = false">Listo</button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -2329,6 +2542,18 @@ th {
   border-top: 1px dashed var(--line-strong);
 }
 
+.descuento-actions-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.descuento-actions-row small {
+  color: var(--muted);
+}
+
 .resumen-card {
   display: grid;
   gap: 6px;
@@ -2360,6 +2585,24 @@ th {
   border-radius: 14px;
   padding: 14px 16px;
   background: rgba(216, 162, 90, 0.04);
+}
+
+.modal-descuento {
+  width: min(760px, 96vw);
+}
+
+.modal-form-descuento {
+  display: grid;
+  gap: 12px;
+}
+
+.descuento-toggle {
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+}
+
+.descuento-preview {
+  margin-top: 4px;
 }
 
 .interna-cabecera-grid {

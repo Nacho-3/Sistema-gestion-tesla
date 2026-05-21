@@ -32,7 +32,7 @@ const saveResumenHorasMes = async (mes, anio) => {
     const emp = empleados?.find((e) => e.id === h.empleado_id);
     const nombreEmp = emp ? `${emp.nombre} ${emp.apellido}` : `Empleado ${h.empleado_id}`;
     if (!resumenPorEmpleado[nombreEmp]) resumenPorEmpleado[nombreEmp] = 0;
-    resumenPorEmpleado[nombreEmp] += getCantidadHoras(h);
+    resumenPorEmpleado[nombreEmp] = addHourValues(resumenPorEmpleado[nombreEmp], getCantidadHoras(h));
   });
   // Generar resumen por obra
   const resumenPorObra = {};
@@ -40,7 +40,7 @@ const saveResumenHorasMes = async (mes, anio) => {
     const obra = obras?.find((o) => o.id === h.obra_id);
     const nombreObra = obra ? obra.nombre : `Obra ${h.obra_id}`;
     if (!resumenPorObra[nombreObra]) resumenPorObra[nombreObra] = 0;
-    resumenPorObra[nombreObra] += getCantidadHoras(h);
+    resumenPorObra[nombreObra] = addHourValues(resumenPorObra[nombreObra], getCantidadHoras(h));
   });
   // Contenido del archivo
   let content = `Resumen mensual de horas\nMes: ${mes}/${anio}\n\n`;
@@ -84,6 +84,23 @@ const getCantidadHoras = (registro = {}) => {
 
   const numero = Number(valor)
   return Number.isFinite(numero) ? numero : 0
+}
+
+const getCantidadMinutos = (registro = {}) => Math.round(getCantidadHoras(registro) * 60)
+
+const minutesToHourValue = (minutes = 0) => {
+  const safeMinutes = Number.isFinite(Number(minutes)) ? Number(minutes) : 0
+  return Math.round((safeMinutes / 60) * 100) / 100
+}
+
+const addHourValues = (current = 0, value = 0) => {
+  const totalMinutes = Math.round(Number(current || 0) * 60) + Math.round(Number(value || 0) * 60)
+  return minutesToHourValue(totalMinutes)
+}
+
+const sumHourValues = (values = []) => {
+  const totalMinutes = (values || []).reduce((acc, value) => acc + Math.round(Number(value || 0) * 60), 0)
+  return minutesToHourValue(totalMinutes)
 }
 
 const normalizeTipoHoraExtra = (tipoHoraExtra) => {
@@ -419,7 +436,7 @@ router.get("/resumen/pdf", async (req, res) => {
               horas: 0,
             }
           }
-          prestamosEntreGrupos[key].horas += hs
+          prestamosEntreGrupos[key].horas = addHourValues(prestamosEntreGrupos[key].horas, hs)
         }
       }
 
@@ -438,7 +455,7 @@ router.get("/resumen/pdf", async (req, res) => {
             grupoDuenio: grupoObraNombre,
           }
         }
-        obrasOtrosGrupos[otherKey].value += hs
+        obrasOtrosGrupos[otherKey].value = addHourValues(obrasOtrosGrupos[otherKey].value, hs)
         horasFiltradas.push(h)
         return
       }
@@ -453,9 +470,9 @@ router.get("/resumen/pdf", async (req, res) => {
       }
       if (!resumenGrupo[grupoLabel]) resumenGrupo[grupoLabel] = 0
 
-      resumenEmpleado[empLabel] += hs
-      resumenObra[obraKey].value += hs
-      resumenGrupo[grupoLabel] += hs
+      resumenEmpleado[empLabel] = addHourValues(resumenEmpleado[empLabel], hs)
+      resumenObra[obraKey].value = addHourValues(resumenObra[obraKey].value, hs)
+      resumenGrupo[grupoLabel] = addHourValues(resumenGrupo[grupoLabel], hs)
 
       horasFiltradas.push(h)
     })
@@ -769,9 +786,9 @@ router.get("/resumen/pdf", async (req, res) => {
     doc.y = headerBottom + 15
 
     const baseHorasResumen = grupoSolicitado ? horasFiltradas : horas
-    const totalHorasMes = baseHorasResumen.reduce((sum, h) => sum + getCantidadHoras(h), 0)
+    const totalHorasMes = minutesToHourValue(baseHorasResumen.reduce((sum, h) => sum + getCantidadMinutos(h), 0))
     const totalRegistros = baseHorasResumen.length
-    const totalPrestadas = Object.values(prestamosEntreGrupos).reduce((sum, item) => sum + Number(item.horas || 0), 0)
+    const totalPrestadas = sumHourValues(Object.values(prestamosEntreGrupos).map((item) => item.horas || 0))
 
     const resumenY = doc.y
     doc.roundedRect(45, resumenY, pageWidth - 90, 66, 6).fill(PDF_COLORS.card)
@@ -1309,9 +1326,14 @@ router.get("/resumen/empleado", async (req, res) => {
       if (!resumen[h.empleado_id]) {
         const emp = empleadosData?.find((e) => e.id === h.empleado_id)
         const nombreCompleto = emp ? `${emp.nombre} ${emp.apellido}` : `Empleado ${h.empleado_id}`
-        resumen[h.empleado_id] = { empleado: nombreCompleto, total_horas: 0 }
+        resumen[h.empleado_id] = { empleado: nombreCompleto, total_minutos: 0, total_horas: 0 }
       }
-      resumen[h.empleado_id].total_horas += getCantidadHoras(h)
+      resumen[h.empleado_id].total_minutos += getCantidadMinutos(h)
+    })
+
+    Object.values(resumen).forEach((item) => {
+      item.total_horas = minutesToHourValue(item.total_minutos)
+      delete item.total_minutos
     })
 
     const resultado = Object.values(resumen).sort((a, b) => b.total_horas - a.total_horas)
@@ -1377,10 +1399,16 @@ router.get("/resumen/obra", async (req, res) => {
             : (h.obra_id
               ? (obrasData.find((o) => o.id === h.obra_id)?.nombre || "Sin obra")
               : (h.cliente_id ? clienteNombre : "Sin obra")),
+          total_minutos: 0,
           total_horas: 0
         }
       }
-      resumen[claveResumen].total_horas += getCantidadHoras(h)
+      resumen[claveResumen].total_minutos += getCantidadMinutos(h)
+    })
+
+    Object.values(resumen).forEach((item) => {
+      item.total_horas = minutesToHourValue(item.total_minutos)
+      delete item.total_minutos
     })
 
     const resultado = Object.values(resumen).sort((a, b) => Number(b.total_horas || 0) - Number(a.total_horas || 0))
@@ -1431,13 +1459,13 @@ router.get("/resumen/grupo", async (req, res) => {
         if (!resumen[grupoId]) {
           resumen[grupoId] = 0
         }
-        resumen[grupoId] += getCantidadHoras(h)
+        resumen[grupoId] += getCantidadMinutos(h)
       }
     })
 
     const resultado = Object.entries(resumen).map(([grupoId, totalHoras]) => ({
       grupo_id: Number(grupoId),
-      total_horas: totalHoras
+      total_horas: minutesToHourValue(totalHoras)
     })).sort((a, b) => Number(b.total_horas || 0) - Number(a.total_horas || 0))
 
     res.json(resultado)
@@ -1506,13 +1534,13 @@ router.get("/resumen/prestadas/pdf", async (req, res) => {
       }
 
       const empleadoGrupo = grupo.empleados.get(empLabel)
-      grupo.total += hs
-      empleadoGrupo.total += hs
+      grupo.total = addHourValues(grupo.total, hs)
+      empleadoGrupo.total = addHourValues(empleadoGrupo.total, hs)
       if (!empleadoGrupo.destinos.has(grupoDestino)) {
         empleadoGrupo.destinos.set(grupoDestino, { grupoDestino, total: 0, registros: [] })
       }
       const destinoEmpleado = empleadoGrupo.destinos.get(grupoDestino)
-      destinoEmpleado.total += hs
+      destinoEmpleado.total = addHourValues(destinoEmpleado.total, hs)
       destinoEmpleado.registros.push({ fecha, obra, hs })
       empleadoGrupo.registros.push({ fecha, grupoDestino, obra, hs })
     }

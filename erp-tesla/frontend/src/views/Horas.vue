@@ -1777,6 +1777,12 @@ const getCantidadHoras = (hora) => {
   return Number.isFinite(numero) ? numero : 0
 }
 
+const addHourValues = (current, value) => {
+  const currentMinutes = Math.round(Number(current || 0) * 60)
+  const valueMinutes = Math.round(Number(value || 0) * 60)
+  return Math.round(((currentMinutes + valueMinutes) / 60) * 100) / 100
+}
+
 const horasFiltradas = computed(() => {
   return (horas.value || []).filter((hora) => {
     if (!filtroCliente.value) return true
@@ -1800,7 +1806,7 @@ const horasAgrupadasPorEmpleado = computed(() => {
 
     const grupo = grupos.get(empId)
     grupo.registros.push(hora)
-    grupo.totalHoras += getCantidadHoras(hora)
+    grupo.totalHoras = addHourValues(grupo.totalHoras, getCantidadHoras(hora))
   }
 
   return Array.from(grupos.values())
@@ -1845,7 +1851,7 @@ const prestadasAgrupadasEmpleado = computed(() => {
 
     const grupo = byEmpleado.get(key)
     const hs = Number(item.cantidad_horas || 0)
-    grupo.totalHoras += Number.isFinite(hs) ? hs : 0
+    grupo.totalHoras = addHourValues(grupo.totalHoras, Number.isFinite(hs) ? hs : 0)
     grupo.registros.push(item)
   }
 
