@@ -541,7 +541,47 @@ CREATE TABLE IF NOT EXISTS detalles_medio_pago (
 ALTER TABLE IF EXISTS detalles_medio_pago
   ADD COLUMN IF NOT EXISTS identificador TEXT,
   ADD COLUMN IF NOT EXISTS banco TEXT,
-  ADD COLUMN IF NOT EXISTS fecha_cobro DATE;
+  ADD COLUMN IF NOT EXISTS fecha_cobro DATE,
+  ADD COLUMN IF NOT EXISTS librador_endosante TEXT,
+  ADD COLUMN IF NOT EXISTS numero_cheque TEXT,
+  ADD COLUMN IF NOT EXISTS fecha_cheque DATE,
+  ADD COLUMN IF NOT EXISTS fecha_entrada DATE,
+  ADD COLUMN IF NOT EXISTS endosado_a TEXT,
+  ADD COLUMN IF NOT EXISTS libro_cheque_id INTEGER;
+
+CREATE TABLE IF NOT EXISTS libro_cheques_caja (
+  id SERIAL PRIMARY KEY,
+  caja_codigo VARCHAR(20) NOT NULL CHECK (caja_codigo IN ('tesla', 'teslita', 'juani')),
+  medio_pago VARCHAR(20) NOT NULL CHECK (medio_pago IN ('cheque', 'echeq')),
+  movimiento_entrada_id INTEGER NOT NULL REFERENCES movimientos_caja(id),
+  movimiento_salida_id INTEGER REFERENCES movimientos_caja(id),
+  detalle_medio_pago_entrada_id INTEGER REFERENCES detalles_medio_pago(id) ON DELETE SET NULL,
+  fecha_entrada DATE NOT NULL,
+  librador_endosante TEXT NOT NULL,
+  banco TEXT NOT NULL,
+  numero_cheque TEXT NOT NULL,
+  importe NUMERIC(12,2) NOT NULL CHECK (importe > 0),
+  fecha_cheque DATE NOT NULL,
+  fecha_salida DATE,
+  endosado_a TEXT,
+  estado VARCHAR(20) NOT NULL DEFAULT 'disponible' CHECK (estado IN ('disponible', 'salido', 'anulado')),
+  observaciones TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'fk_detalles_libro_cheque'
+      AND conrelid = 'detalles_medio_pago'::regclass
+  ) THEN
+    ALTER TABLE detalles_medio_pago
+      ADD CONSTRAINT fk_detalles_libro_cheque
+      FOREIGN KEY (libro_cheque_id) REFERENCES libro_cheques_caja(id) ON DELETE SET NULL;
+  END IF;
+END $$;
 
 -- =========================
 -- PRESUPUESTOS
@@ -809,6 +849,9 @@ CREATE INDEX IF NOT EXISTS idx_movimientos_caja_codigo ON movimientos_caja(caja_
 CREATE INDEX IF NOT EXISTS idx_movimientos_caja_semanal ON movimientos_caja(caja_semanal_id);
 CREATE INDEX IF NOT EXISTS idx_movimientos_caja_fecha_tipo ON movimientos_caja(caja_codigo, fecha, tipo);
 CREATE INDEX IF NOT EXISTS idx_cajas_semanales_codigo_inicio ON cajas_semanales(caja_codigo, fecha_inicio);
+CREATE INDEX IF NOT EXISTS idx_libro_cheques_estado ON libro_cheques_caja(estado);
+CREATE INDEX IF NOT EXISTS idx_libro_cheques_caja_estado ON libro_cheques_caja(caja_codigo, estado);
+CREATE INDEX IF NOT EXISTS idx_libro_cheques_numero ON libro_cheques_caja(numero_cheque);
 CREATE INDEX IF NOT EXISTS idx_movimientos_cliente ON movimientos_caja(cliente_id);
 CREATE INDEX IF NOT EXISTS idx_movimientos_presupuesto ON movimientos_caja(presupuesto_id);
 CREATE INDEX IF NOT EXISTS idx_detalles_movimiento ON detalles_medio_pago(movimiento_id);

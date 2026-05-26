@@ -23,6 +23,7 @@ const LABEL_MEDIO = {
   echeq: "Echeq",
   retencion: "Retencion",
 }
+const ESTADOS_LIBRO_CHEQUES = ["disponible", "salido", "anulado"]
 const LABEL_CATEGORIA = {
   mano_obra: "Mano de obra",
   materiales: "Materiales",
@@ -33,8 +34,227 @@ const LOGO_PATH = path.join(__dirname, "..", "assets", "logo_presupuesto.png")
 
 let detalleColumnCache = null
 let detallesSchemaCache = null
+let libroChequesSchemaReady = false
 
 const roundMoney = (valor) => Math.round((Number(valor) || 0) * 100) / 100
+
+async function ensureLibroChequesSchema() {
+  if (libroChequesSchemaReady) return
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS libro_cheques_caja (
+      id SERIAL PRIMARY KEY,
+      caja_codigo VARCHAR(20) NOT NULL CHECK (caja_codigo IN ('tesla', 'teslita', 'juani')),
+      medio_pago VARCHAR(20) NOT NULL CHECK (medio_pago IN ('cheque', 'echeq')),
+      movimiento_entrada_id INTEGER NOT NULL REFERENCES movimientos_caja(id),
+      movimiento_salida_id INTEGER REFERENCES movimientos_caja(id),
+      detalle_medio_pago_entrada_id INTEGER REFERENCES detalles_medio_pago(id) ON DELETE SET NULL,
+      fecha_entrada DATE NOT NULL,
+      librador_endosante TEXT NOT NULL,
+      banco TEXT NOT NULL,
+      numero_cheque TEXT NOT NULL,
+      importe NUMERIC(12,2) NOT NULL CHECK (importe > 0),
+      fecha_cheque DATE NOT NULL,
+      fecha_salida DATE,
+      endosado_a TEXT,
+      estado VARCHAR(20) NOT NULL DEFAULT 'disponible' CHECK (estado IN ('disponible', 'salido', 'anulado')),
+      observaciones TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `)
+
+  await pool.query(`
+    ALTER TABLE IF EXISTS detalles_medio_pago
+      ADD COLUMN IF NOT EXISTS librador_endosante TEXT,
+      ADD COLUMN IF NOT EXISTS numero_cheque TEXT,
+      ADD COLUMN IF NOT EXISTS fecha_cheque DATE,
+      ADD COLUMN IF NOT EXISTS fecha_entrada DATE,
+      ADD COLUMN IF NOT EXISTS endosado_a TEXT,
+      ADD COLUMN IF NOT EXISTS libro_cheque_id INTEGER;
+  `)
+
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'fk_detalles_libro_cheque'
+          AND conrelid = 'detalles_medio_pago'::regclass
+      ) THEN
+        ALTER TABLE detalles_medio_pago
+          ADD CONSTRAINT fk_detalles_libro_cheque
+          FOREIGN KEY (libro_cheque_id) REFERENCES libro_cheques_caja(id) ON DELETE SET NULL;
+      END IF;
+    END $$;
+  `)
+
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_libro_cheques_estado ON libro_cheques_caja(estado);")
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_libro_cheques_caja_estado ON libro_cheques_caja(caja_codigo, estado);")
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_libro_cheques_numero ON libro_cheques_caja(numero_cheque);")
+
+  libroChequesSchemaReady = true
+}
+
+const normalizeChequeDate = (value, fallback = null) => {
+  const normalized = normalizarFechaISO(value)
+  return normalized || fallback
+}
+
+const sanitizeChequeText = (value) => String(value || "").trim()
+
+const isChequePayment = (medioPago) => ["cheque", "echeq"].includes(String(medioPago || "").toLowerCase())
+
+const validarCamposChequeIngreso = (item = {}) => {
+  const libradorEndosante = sanitizeChequeText(item.librador_endosante)
+  const banco = sanitizeChequeText(item.banco)
+  const numeroCheque = sanitizeChequeText(item.numero_cheque || item.identificador)
+  const fechaCheque = normalizeChequeDate(item.fecha_cheque)
+  const fechaEntrada = normalizeChequeDate(item.fecha_entrada, normalizeChequeDate(item.fecha_cobro))
+
+  if (!libradorEndosante) throw new Error("Cada cheque de ingreso debe informar librador o endosante")
+  if (!banco) throw new Error("Cada cheque de ingreso debe informar banco")
+  if (!numeroCheque) throw new Error("Cada cheque de ingreso debe informar numero de cheque")
+  if (!fechaCheque) throw new Error("Cada cheque de ingreso debe informar fecha de cheque")
+  if (!fechaEntrada) throw new Error("Cada cheque de ingreso debe informar fecha de entrada")
+
+  return {
+    librador_endosante: libradorEndosante,
+    banco,
+    numero_cheque: numeroCheque,
+    fecha_cheque: fechaCheque,
+    fecha_entrada: fechaEntrada,
+  }
+}
+
+async function crearChequesLibroDesdeIngreso({ client, movimientoId, cajaCodigo, fechaMovimiento, detallesPago = [] }) {
+  const chequesIngreso = detallesPago.filter((item) => isChequePayment(item?.medio_pago))
+  if (!chequesIngreso.length) return
+
+  const fechaDefault = normalizeChequeDate(fechaMovimiento)
+  const filas = chequesIngreso.map((item) => {
+    const camposCheque = validarCamposChequeIngreso(item)
+    return {
+      caja_codigo: cajaCodigo,
+      medio_pago: String(item.medio_pago).toLowerCase(),
+      movimiento_entrada_id: movimientoId,
+      fecha_entrada: camposCheque.fecha_entrada || fechaDefault,
+      librador_endosante: camposCheque.librador_endosante,
+      banco: camposCheque.banco,
+      numero_cheque: camposCheque.numero_cheque,
+      importe: roundMoney(Number(item.monto || 0)),
+      fecha_cheque: camposCheque.fecha_cheque,
+      observaciones: sanitizeChequeText(item.observaciones) || null,
+    }
+  })
+
+  for (const fila of filas) {
+    const values = [
+      fila.caja_codigo,
+      fila.medio_pago,
+      fila.movimiento_entrada_id,
+      fila.fecha_entrada,
+      fila.librador_endosante,
+      fila.banco,
+      fila.numero_cheque,
+      fila.importe,
+      fila.fecha_cheque,
+      fila.observaciones,
+    ]
+
+    await client.query(
+      `
+      INSERT INTO libro_cheques_caja (
+        caja_codigo, medio_pago, movimiento_entrada_id, fecha_entrada,
+        librador_endosante, banco, numero_cheque, importe, fecha_cheque, observaciones
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      `,
+      values
+    )
+  }
+}
+
+async function registrarSalidaCheques({ client, movimientoId, cajaCodigo, fechaSalida, endosadoA, chequesSalida = [] }) {
+  if (!Array.isArray(chequesSalida) || !chequesSalida.length) return []
+
+  const ids = chequesSalida
+    .map((item) => Number(item?.libro_cheque_id || item?.id || 0))
+    .filter((id) => Number.isInteger(id) && id > 0)
+
+  if (!ids.length) throw new Error("Debe seleccionar al menos un cheque disponible para el egreso")
+
+  const fechaSalidaNorm = normalizeChequeDate(fechaSalida)
+  if (!fechaSalidaNorm) throw new Error("La fecha de salida de cheque es obligatoria")
+
+  const endosadoTexto = sanitizeChequeText(endosadoA)
+  if (!endosadoTexto) throw new Error("Debe indicar a quien se endosa el cheque")
+
+  const placeholders = ids.map((_, i) => `$${i + 1}`).join(",")
+  const placeholdersUpdate = ids.map((_, i) => `$${i + 4}`).join(",")
+  const consulta = await client.query(
+    `
+      SELECT id, caja_codigo, estado, importe
+      FROM libro_cheques_caja
+      WHERE id IN (${placeholders})
+      FOR UPDATE
+    `,
+    ids
+  )
+
+  if (consulta.rowCount !== ids.length) {
+    throw new Error("Uno o mas cheques seleccionados no existen en el libro")
+  }
+
+  const invalidos = consulta.rows.filter((row) => row.estado !== "disponible" || row.caja_codigo !== cajaCodigo)
+  if (invalidos.length) {
+    throw new Error("Hay cheques seleccionados que no estan disponibles para salida")
+  }
+
+  await client.query(
+    `
+      UPDATE libro_cheques_caja
+      SET estado = 'salido',
+          movimiento_salida_id = $1,
+          fecha_salida = $2,
+          endosado_a = $3,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id IN (${placeholdersUpdate})
+    `,
+    [movimientoId, fechaSalidaNorm, endosadoTexto, ...ids]
+  )
+
+  return consulta.rows
+}
+
+async function revertirSalidaChequesPorMovimiento({ client, movimientoId }) {
+  await client.query(
+    `
+      UPDATE libro_cheques_caja
+      SET estado = 'disponible',
+          movimiento_salida_id = NULL,
+          fecha_salida = NULL,
+          endosado_a = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE movimiento_salida_id = $1
+    `,
+    [movimientoId]
+  )
+}
+
+async function validarIngresoEliminable({ client, movimientoId }) {
+  const res = await client.query(
+    `
+      SELECT COUNT(*)::int AS total
+      FROM libro_cheques_caja
+      WHERE movimiento_entrada_id = $1
+        AND estado = 'salido'
+    `,
+    [movimientoId]
+  )
+  if (Number(res.rows?.[0]?.total || 0) > 0) {
+    throw new Error("No se puede eliminar/modificar este ingreso porque ya tiene cheques dados de salida")
+  }
+}
 
 const normalizarFechaISO = (valor) => {
   if (!valor) return null
@@ -556,6 +776,12 @@ function construirDetallesPago({ desglose = {}, detalles_medio_pago = [] } = {})
         identificador: String(item?.identificador || "").trim() || null,
         banco: String(item?.banco || "").trim() || null,
         fecha_cobro: item?.fecha_cobro || null,
+        librador_endosante: String(item?.librador_endosante || "").trim() || null,
+        numero_cheque: String(item?.numero_cheque || "").trim() || String(item?.identificador || "").trim() || null,
+        fecha_cheque: item?.fecha_cheque || null,
+        fecha_entrada: item?.fecha_entrada || null,
+        endosado_a: String(item?.endosado_a || "").trim() || null,
+        libro_cheque_id: Number(item?.libro_cheque_id || 0) || null,
       })
     })
   }
@@ -563,7 +789,7 @@ function construirDetallesPago({ desglose = {}, detalles_medio_pago = [] } = {})
   return detalles
 }
 
-function validarDetallesPago(detalles = []) {
+function validarDetallesPago(detalles = [], tipoMovimiento = "ingreso") {
   if (!Array.isArray(detalles) || detalles.length === 0) {
     throw new Error("Debe incluir al menos un medio de pago")
   }
@@ -579,6 +805,14 @@ function validarDetallesPago(detalles = []) {
     }
     if (MEDIOS_MULTIPLES.includes(medio) && !String(item?.identificador || "").trim()) {
       throw new Error(`Cada ${medio === "echeq" ? "eCheq" : "cheque"} debe tener un identificador`)
+    }
+
+    if (MEDIOS_MULTIPLES.includes(medio) && Number(item?.libro_cheque_id || 0) > 0) {
+      continue
+    }
+
+    if (MEDIOS_MULTIPLES.includes(medio) && String(tipoMovimiento || "").toLowerCase() === "ingreso") {
+      validarCamposChequeIngreso(item)
     }
   }
 }
@@ -711,6 +945,379 @@ router.get("/", async (req, res) => {
     })
   } catch (err) {
     res.status(400).json({ error: err.message })
+  }
+})
+
+router.get("/libro-cheques", async (req, res) => {
+  try {
+    await ensureLibroChequesSchema()
+
+    const cajaCodigo = String(req.query.caja_codigo || "tesla").toLowerCase()
+    const estado = String(req.query.estado || "").toLowerCase().trim()
+    const busqueda = String(req.query.busqueda || "").trim().toLowerCase()
+
+    if (!CAJAS_DISPONIBLES.includes(cajaCodigo)) {
+      return res.status(400).json({ error: "Caja inválida" })
+    }
+
+    const params = [cajaCodigo]
+    const where = ["l.caja_codigo = $1"]
+
+    if (estado) {
+      if (!ESTADOS_LIBRO_CHEQUES.includes(estado)) {
+        return res.status(400).json({ error: "Estado de cheque inválido" })
+      }
+      params.push(estado)
+      where.push(`l.estado = $${params.length}`)
+    }
+
+    if (busqueda) {
+      params.push(`%${busqueda}%`)
+      const idx = params.length
+      where.push(`(
+        LOWER(COALESCE(l.numero_cheque, '')) LIKE $${idx}
+        OR LOWER(COALESCE(l.banco, '')) LIKE $${idx}
+        OR LOWER(COALESCE(l.librador_endosante, '')) LIKE $${idx}
+        OR LOWER(COALESCE(l.endosado_a, '')) LIKE $${idx}
+      )`)
+    }
+
+    const query = `
+      SELECT
+        l.*,
+        mi.fecha AS movimiento_entrada_fecha,
+        ms.fecha AS movimiento_salida_fecha
+      FROM libro_cheques_caja l
+      LEFT JOIN movimientos_caja mi ON mi.id = l.movimiento_entrada_id
+      LEFT JOIN movimientos_caja ms ON ms.id = l.movimiento_salida_id
+      WHERE ${where.join(" AND ")}
+      ORDER BY l.estado ASC, l.fecha_entrada DESC, l.id DESC
+    `
+
+    const result = await pool.query(query, params)
+    res.json(result.rows || [])
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get("/libro-cheques/disponibles", async (req, res) => {
+  try {
+    await ensureLibroChequesSchema()
+    const cajaCodigo = String(req.query.caja_codigo || "tesla").toLowerCase()
+
+    if (!CAJAS_DISPONIBLES.includes(cajaCodigo)) {
+      return res.status(400).json({ error: "Caja inválida" })
+    }
+
+    const result = await pool.query(
+      `
+      SELECT *
+      FROM libro_cheques_caja
+      WHERE caja_codigo = $1
+        AND estado = 'disponible'
+      ORDER BY fecha_cheque DESC, id ASC
+      `,
+      [cajaCodigo]
+    )
+
+    res.json(result.rows || [])
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get("/libro-cheques/pdf", async (req, res) => {
+  try {
+    await ensureLibroChequesSchema()
+
+    const cajaCodigo = String(req.query.caja_codigo || "tesla").toLowerCase()
+    const listado = String(req.query.listado || "ambos").toLowerCase().trim()
+    const busqueda = String(req.query.busqueda || "").trim().toLowerCase()
+
+    if (!CAJAS_DISPONIBLES.includes(cajaCodigo)) {
+      return res.status(400).json({ error: "Caja inválida" })
+    }
+
+    const listadoValido = ["disponibles", "no_disponibles", "ambos"]
+    if (!listadoValido.includes(listado)) {
+      return res.status(400).json({ error: "Listado inválido" })
+    }
+
+    const params = [cajaCodigo]
+    const where = ["l.caja_codigo = $1"]
+
+    if (busqueda) {
+      params.push(`%${busqueda}%`)
+      const idx = params.length
+      where.push(`(
+        LOWER(COALESCE(l.numero_cheque, '')) LIKE $${idx}
+        OR LOWER(COALESCE(l.banco, '')) LIKE $${idx}
+        OR LOWER(COALESCE(l.librador_endosante, '')) LIKE $${idx}
+        OR LOWER(COALESCE(l.endosado_a, '')) LIKE $${idx}
+      )`)
+    }
+
+    const result = await pool.query(
+      `
+      SELECT l.*
+      FROM libro_cheques_caja l
+      WHERE ${where.join(" AND ")}
+      `,
+      params
+    )
+
+    const rows = result.rows || []
+    const disponibles = rows
+      .filter((row) => String(row.estado || "").toLowerCase() === "disponible")
+      .sort((a, b) => {
+        const fechaA = normalizarFechaISO(a.fecha_cheque) || ""
+        const fechaB = normalizarFechaISO(b.fecha_cheque) || ""
+        if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
+        return String(a.numero_cheque || "").localeCompare(String(b.numero_cheque || ""))
+      })
+
+    const noDisponibles = rows
+      .filter((row) => String(row.estado || "").toLowerCase() !== "disponible")
+      .sort((a, b) => {
+        const fechaA = normalizarFechaISO(a.fecha_salida || a.fecha_cheque) || ""
+        const fechaB = normalizarFechaISO(b.fecha_salida || b.fecha_cheque) || ""
+        if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
+        return String(a.numero_cheque || "").localeCompare(String(b.numero_cheque || ""))
+      })
+
+    const totalImporte = (listado === "disponibles" ? disponibles : listado === "no_disponibles" ? noDisponibles : rows)
+      .reduce((acc, row) => acc + Number(row.importe || 0), 0)
+
+    const doc = new PDFDocument({ size: "A4", margin: 45 })
+    const chunks = []
+    const pageWidth = doc.page.width
+    const fechaArchivo = new Date().toISOString().slice(0, 10)
+    const nombreArchivo = `Libro cheques ${LABEL_CAJA[cajaCodigo]} ${listado} ${fechaArchivo}.pdf`
+
+    doc.on("data", (chunk) => chunks.push(chunk))
+    doc.on("end", () => {
+      const pdfBuffer = Buffer.concat(chunks)
+      res.setHeader("Content-Type", "application/pdf")
+      res.setHeader("Content-Disposition", `attachment; filename="${sanitizeFileText(nombreArchivo)}"`)
+      res.send(pdfBuffer)
+    })
+
+    setupPremiumFooter(doc, { leftText: "Tesla Montajes Electricos - Libro de cheques" })
+
+    const etiquetaListado = listado === "disponibles"
+      ? "Cheques disponibles"
+      : listado === "no_disponibles"
+        ? "Cheques no disponibles"
+        : "Cheques disponibles y no disponibles"
+
+    const headerBottom = drawPremiumHeader(doc, {
+      title: "TESLA MONTAJES ELECTRICOS",
+      subtitle: `Libro de cheques - ${LABEL_CAJA[cajaCodigo]}`,
+      accentText: etiquetaListado,
+      logoPath: LOGO_PATH,
+    })
+
+    doc.fillColor(PDF_COLORS.ink)
+    const resumenY = headerBottom + 14
+    const resumenH = 56
+    const resumenLeft = 45
+    const resumenW = pageWidth - 90
+
+    doc.roundedRect(resumenLeft, resumenY, resumenW, resumenH, 6).fill(PDF_COLORS.card)
+    doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(10)
+    doc.text("Resumen", resumenLeft + 13, resumenY + 8, { width: 120 })
+    doc.fillColor(PDF_COLORS.ink).font("Helvetica-Bold").fontSize(10.4)
+    const cantidadTotal = listado === "disponibles" ? disponibles.length : listado === "no_disponibles" ? noDisponibles.length : rows.length
+    doc.text(`Cantidad de cheques: ${cantidadTotal}`, resumenLeft + 13, resumenY + 26, { width: 250 })
+    doc.text(`Importe total: ${formatoMoneda(totalImporte)}`, resumenLeft + 260, resumenY + 26, { width: resumenW - 273, align: "right" })
+    doc.y = resumenY + resumenH + 14
+
+    const ensureRowSpace = (alturaRequerida = 50, onNewPage = null) => {
+      if (doc.y + alturaRequerida > doc.page.height - 72) {
+        doc.addPage()
+        const continuedBottom = drawPremiumHeader(doc, {
+          title: "TESLA MONTAJES ELECTRICOS",
+          subtitle: `Libro de cheques - ${LABEL_CAJA[cajaCodigo]}`,
+          accentText: etiquetaListado,
+          logoPath: LOGO_PATH,
+        })
+        doc.fillColor(PDF_COLORS.ink)
+        doc.y = continuedBottom + 14
+        if (typeof onNewPage === "function") onNewPage()
+        return true
+      }
+      return false
+    }
+
+    const truncateText = (value, maxLen) => {
+      const txt = String(value || "-")
+      if (txt.length <= maxLen) return txt
+      return `${txt.slice(0, Math.max(0, maxLen - 1))}…`
+    }
+
+    const drawSectionTitleCentered = (title) => {
+      if (doc.y > doc.page.height - 90) doc.addPage()
+      doc.moveDown(0.6)
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(11.5)
+        .fillColor(PDF_COLORS.ink)
+        .text(title, 45, doc.y, { width: pageWidth - 90, align: "center" })
+      const y = doc.y + 2
+      doc.strokeColor(PDF_COLORS.line).lineWidth(0.8).moveTo(45, y).lineTo(pageWidth - 45, y).stroke()
+      doc.y = y + 6
+    }
+
+    const drawSection = (title, sectionRows, { showSalida = false } = {}) => {
+      drawSectionTitleCentered(title)
+
+      if (!sectionRows.length) {
+        ensureRowSpace(30)
+        doc.font("Helvetica").fontSize(9).fillColor(PDF_COLORS.slate)
+        doc.text("Sin cheques para este criterio.", 58, doc.y + 2, { width: pageWidth - 116 })
+        doc.fillColor(PDF_COLORS.ink)
+        doc.y += 20
+        return
+      }
+
+      const tableLeft = 45
+      const tableWidth = pageWidth - 90
+      const colDefs = [
+        { key: "idx", label: "#", w: 22, align: "left" },
+        { key: "numero", label: "Numero", w: 70, align: "left" },
+        { key: "banco", label: "Banco", w: 90, align: "left" },
+        { key: "librador", label: "Librador/Endosante", w: 118, align: "left" },
+        { key: "fcheque", label: "F. cheque", w: 60, align: "left" },
+        { key: "fentrada", label: "F. entrada", w: 60, align: "left" },
+        { key: "importe", label: "Importe", w: 85, align: "right" },
+      ]
+
+      const headerH = 22
+      const rowH = 20
+      const detailH = 15
+
+      const drawGridHeader = () => {
+        ensureRowSpace(headerH + rowH + (showSalida ? detailH : 0) + 12)
+
+        const headerY = doc.y
+        doc.rect(tableLeft, headerY, tableWidth, headerH).fill(PDF_COLORS.card)
+
+        let colX = tableLeft
+        doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(8)
+        colDefs.forEach((col) => {
+          doc.text(col.label, colX + 4, headerY + 7, {
+            width: col.w - 8,
+            align: col.align === "right" ? "right" : "left",
+            lineBreak: false,
+          })
+          colX += col.w
+        })
+
+        doc
+          .strokeColor(PDF_COLORS.border)
+          .lineWidth(0.8)
+          .rect(tableLeft, headerY, tableWidth, headerH)
+          .stroke()
+
+        colX = tableLeft
+        for (let i = 0; i < colDefs.length - 1; i += 1) {
+          colX += colDefs[i].w
+          doc
+            .strokeColor(PDF_COLORS.border)
+            .lineWidth(0.5)
+            .moveTo(colX, headerY)
+            .lineTo(colX, headerY + headerH)
+            .stroke()
+        }
+
+        doc.y = headerY + headerH
+      }
+
+      const writeCellText = (text, x, y, w, align = "left") => {
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(8)
+        doc.text(text, x + 4, y + 6, {
+          width: w - 8,
+          align,
+          lineBreak: false,
+        })
+      }
+
+      drawGridHeader()
+
+      sectionRows.forEach((row, idx) => {
+        const currentRowH = showSalida ? rowH + detailH : rowH
+        ensureRowSpace(currentRowH + 6, () => {
+          drawSectionTitleCentered(title)
+          drawGridHeader()
+        })
+
+        const rowY = doc.y
+        const data = {
+          idx: String(idx + 1),
+          numero: truncateText(row.numero_cheque, 12),
+          banco: truncateText(row.banco, 16),
+          librador: truncateText(row.librador_endosante, 19),
+          fcheque: formatoFecha(row.fecha_cheque),
+          fentrada: formatoFecha(row.fecha_entrada),
+          importe: formatoMoneda(row.importe || 0),
+        }
+
+        if (idx % 2 === 0) {
+          doc.rect(tableLeft, rowY, tableWidth, currentRowH).fill(PDF_COLORS.light)
+        }
+
+        let colX = tableLeft
+        colDefs.forEach((col) => {
+          writeCellText(data[col.key] || "-", colX, rowY, col.w, col.align === "right" ? "right" : "left")
+          colX += col.w
+        })
+
+        if (showSalida) {
+          const fechaSalida = formatoFecha(row.fecha_salida)
+          const endosadoA = truncateText(row.endosado_a, 54)
+          const estadoTexto = String(row.estado || "").toLowerCase() === "disponible" ? "Disponible" : "No disponible"
+          doc.fillColor(PDF_COLORS.slate).font("Helvetica").fontSize(7.5)
+          doc.text(`Estado: ${estadoTexto} | Salida: ${fechaSalida} | Endosado a: ${endosadoA}`, tableLeft + 26, rowY + rowH + 4, {
+            width: tableWidth - 34,
+            lineBreak: false,
+          })
+        }
+
+        doc
+          .strokeColor(PDF_COLORS.border)
+          .lineWidth(0.6)
+          .rect(tableLeft, rowY, tableWidth, currentRowH)
+          .stroke()
+
+        colX = tableLeft
+        for (let i = 0; i < colDefs.length - 1; i += 1) {
+          colX += colDefs[i].w
+          doc
+            .strokeColor(PDF_COLORS.border)
+            .lineWidth(0.4)
+            .moveTo(colX, rowY)
+            .lineTo(colX, rowY + rowH)
+            .stroke()
+        }
+
+        doc.y = rowY + currentRowH
+      })
+
+      doc.fillColor(PDF_COLORS.ink)
+    }
+
+    if (listado === "disponibles" || listado === "ambos") {
+      drawSection("Cheques disponibles", disponibles, { showSalida: false })
+    }
+
+    if (listado === "no_disponibles" || listado === "ambos") {
+      drawSection("Cheques no disponibles", noDisponibles, { showSalida: true })
+    }
+
+    doc.end()
+  } catch (err) {
+    res.status(500).json({ error: err.message })
   }
 })
 
@@ -1547,9 +2154,27 @@ router.get("/:id", async (req, res) => {
 // Crear movimiento de caja
 router.post("/", async (req, res) => {
   try {
-    const { fecha, caja_codigo, tipo, detalle, observaciones, monto_total, desglose, detalles_medio_pago, categoria, con_iva, cliente_id, presupuesto_id, destinatario } = req.body
+    const {
+      fecha,
+      caja_codigo,
+      tipo,
+      detalle,
+      observaciones,
+      monto_total,
+      desglose,
+      detalles_medio_pago,
+      categoria,
+      con_iva,
+      cliente_id,
+      presupuesto_id,
+      destinatario,
+      cheques_salida,
+      fecha_salida_cheques,
+      endosado_a_cheques,
+    } = req.body
     const detalleColumn = await getDetalleColumn()
     const detallesSchema = await getDetallesSchema()
+    await ensureLibroChequesSchema()
     const cajaCodigoNormalizada = String(caja_codigo || "").toLowerCase()
     const tipoNormalizado = String(tipo || "").toLowerCase()
     const destinatarioNormalizado = String(destinatario || "").trim()
@@ -1585,7 +2210,15 @@ router.post("/", async (req, res) => {
     }
 
     const detallesPago = construirDetallesPago({ desglose, detalles_medio_pago })
-    validarDetallesPago(detallesPago)
+    validarDetallesPago(detallesPago, tipoNormalizado)
+
+    const chequesSalidaLista = Array.isArray(cheques_salida) ? cheques_salida : []
+    if (tipoNormalizado === "egreso" && chequesSalidaLista.length > 0) {
+      const endosadoTexto = sanitizeChequeText(endosado_a_cheques || destinatarioNormalizado)
+      if (!endosadoTexto) {
+        return res.status(400).json({ error: "Debe indicar a quien se endosa el cheque" })
+      }
+    }
 
     const sumaDesglose = totalDetallesPago(detallesPago)
     if (Math.abs(sumaDesglose - monto_total) > 0.01) { // Tolerancia de 0.01
@@ -1633,6 +2266,12 @@ router.post("/", async (req, res) => {
         identificador: item.identificador,
         banco: item.banco,
         fecha_cobro: item.fecha_cobro,
+        librador_endosante: item.librador_endosante,
+        numero_cheque: item.numero_cheque,
+        fecha_cheque: item.fecha_cheque,
+        fecha_entrada: item.fecha_entrada,
+        endosado_a: item.endosado_a,
+        libro_cheque_id: item.libro_cheque_id,
       }))
 
       if (detalles.length > 0) {
@@ -1656,6 +2295,38 @@ router.post("/", async (req, res) => {
       console.error("Error al insertar detalles:", errorDetalles)
       await db.from("movimientos_caja").delete().eq("id", movimientoId)
       return res.status(400).json({ error: "Error al registrar detalles de pago: " + errorDetalles.message })
+    }
+
+    try {
+      const client = await pool.connect()
+      try {
+        if (tipoNormalizado === "ingreso") {
+          await crearChequesLibroDesdeIngreso({
+            client,
+            movimientoId,
+            cajaCodigo: cajaCodigoNormalizada,
+            fechaMovimiento: fecha,
+            detallesPago,
+          })
+        }
+
+        if (tipoNormalizado === "egreso" && chequesSalidaLista.length > 0) {
+          await registrarSalidaCheques({
+            client,
+            movimientoId,
+            cajaCodigo: cajaCodigoNormalizada,
+            fechaSalida: fecha_salida_cheques || fecha,
+            endosadoA: endosado_a_cheques || destinatarioNormalizado,
+            chequesSalida: chequesSalidaLista,
+          })
+        }
+      } finally {
+        client.release()
+      }
+    } catch (bookError) {
+      await db.from("detalles_medio_pago").delete().eq("movimiento_id", movimientoId)
+      await db.from("movimientos_caja").delete().eq("id", movimientoId)
+      return res.status(400).json({ error: bookError.message })
     }
 
     await asignarCajaSemanalAMovimiento({
@@ -1686,9 +2357,27 @@ router.post("/", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const { id } = req.params
-    const { fecha, caja_codigo, tipo, detalle, observaciones, monto_total, desglose, detalles_medio_pago, categoria, con_iva, cliente_id, presupuesto_id, destinatario } = req.body
+    const {
+      fecha,
+      caja_codigo,
+      tipo,
+      detalle,
+      observaciones,
+      monto_total,
+      desglose,
+      detalles_medio_pago,
+      categoria,
+      con_iva,
+      cliente_id,
+      presupuesto_id,
+      destinatario,
+      cheques_salida,
+      fecha_salida_cheques,
+      endosado_a_cheques,
+    } = req.body
     const detalleColumn = await getDetalleColumn()
     const detallesSchema = await getDetallesSchema()
+    await ensureLibroChequesSchema()
     const cajaCodigoNormalizada = caja_codigo !== undefined ? String(caja_codigo || "").toLowerCase() : undefined
     const tipoNormalizado = tipo !== undefined ? String(tipo || "").toLowerCase() : undefined
     const destinatarioNormalizado = destinatario !== undefined ? String(destinatario || "").trim() : undefined
@@ -1775,7 +2464,7 @@ router.put("/:id", async (req, res) => {
     // Actualizar detalles si se proporciona desglose o detalles de pago
     if (desglose || detalles_medio_pago) {
       const detallesPago = construirDetallesPago({ desglose, detalles_medio_pago })
-      validarDetallesPago(detallesPago)
+      validarDetallesPago(detallesPago, tipoFinal)
       const montoBaseValidacion = monto_total ?? movimientoActualizado[0]?.monto_total ?? movimientoActual.monto_total ?? 0
       const montoTotalValidacion = parseFloat(montoBaseValidacion || 0)
       const sumaDesglose = totalDetallesPago(detallesPago)
@@ -1796,6 +2485,12 @@ router.put("/:id", async (req, res) => {
           identificador: item.identificador,
           banco: item.banco,
           fecha_cobro: item.fecha_cobro,
+          librador_endosante: item.librador_endosante,
+          numero_cheque: item.numero_cheque,
+          fecha_cheque: item.fecha_cheque,
+          fecha_entrada: item.fecha_entrada,
+          endosado_a: item.endosado_a,
+          libro_cheque_id: item.libro_cheque_id,
         }))
 
         if (detalles.length > 0) {
@@ -1814,6 +2509,39 @@ router.put("/:id", async (req, res) => {
 
         const { error: errorDetalles } = await db.from("detalles_medio_pago").insert([detalleFila])
         if (errorDetalles) return res.status(400).json({ error: errorDetalles.message })
+      }
+
+      const client = await pool.connect()
+      try {
+        const chequesSalidaLista = Array.isArray(cheques_salida) ? cheques_salida : []
+
+        if (tipoFinal === "ingreso") {
+          await validarIngresoEliminable({ client, movimientoId: id })
+          await client.query("DELETE FROM libro_cheques_caja WHERE movimiento_entrada_id = $1", [id])
+          await crearChequesLibroDesdeIngreso({
+            client,
+            movimientoId: id,
+            cajaCodigo: cajaFinalMovimiento,
+            fechaMovimiento: fechaFinalMovimiento,
+            detallesPago,
+          })
+        }
+
+        if (tipoFinal === "egreso" && cheques_salida !== undefined) {
+          await revertirSalidaChequesPorMovimiento({ client, movimientoId: id })
+          if (chequesSalidaLista.length > 0) {
+            await registrarSalidaCheques({
+              client,
+              movimientoId: id,
+              cajaCodigo: cajaFinalMovimiento,
+              fechaSalida: fecha_salida_cheques || fechaFinalMovimiento,
+              endosadoA: endosado_a_cheques || destinatarioNormalizado || movimientoActual.destinatario,
+              chequesSalida: chequesSalidaLista,
+            })
+          }
+        }
+      } finally {
+        client.release()
       }
     }
 
@@ -1848,15 +2576,28 @@ router.put("/:id", async (req, res) => {
 router.delete("/:id", async (req, res) => {
   try {
     const { id } = req.params
+    await ensureLibroChequesSchema()
 
     const { data: movimientoActual, error: errorMovimientoActual } = await db
       .from("movimientos_caja")
-      .select("id, caja_semanal_id")
+      .select("id, caja_semanal_id, tipo")
       .eq("id", id)
       .single()
 
     if (errorMovimientoActual || !movimientoActual) {
       return res.status(404).json({ error: "Movimiento no encontrado" })
+    }
+
+    const client = await pool.connect()
+    try {
+      if (String(movimientoActual.tipo || "") === "ingreso") {
+        await validarIngresoEliminable({ client, movimientoId: id })
+        await client.query("DELETE FROM libro_cheques_caja WHERE movimiento_entrada_id = $1", [id])
+      } else {
+        await revertirSalidaChequesPorMovimiento({ client, movimientoId: id })
+      }
+    } finally {
+      client.release()
     }
 
     // Eliminar detalles primero

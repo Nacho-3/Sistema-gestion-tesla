@@ -23,6 +23,9 @@ const movimientoAEliminar = ref(null)
 const editandoMovimientoId = ref(null)
 const generandoPdf = ref(false)
 const generandoPdfDetalle = ref(false)
+const generandoPdfCheques = ref(false)
+const mostrarModalPdfCheques = ref(false)
+const opcionPdfCheques = ref("disponibles")
 const filtroCaja = ref("tesla")
 const filtroBusqueda = ref("")
 const semanasCaja = ref([])
@@ -42,6 +45,12 @@ const saldoChequesEditable = ref("")
 const guardandoSaldosSemana = ref(false)
 const proximaSemanaInfo = ref(null)
 const confirmandoCierre = ref(false)
+const libroCheques = ref([])
+const chequesDisponibles = ref([])
+const loadingLibroCheques = ref(false)
+const filtroBusquedaLibroCheques = ref("")
+const libroChequesExpandido = ref(true)
+const movimientosExpandido = ref(true)
 
 // Filtros
 const filtroFechaInicio = ref("")
@@ -66,7 +75,11 @@ const form = ref({
     transferencia: 0,
     retencion: 0
   },
-  cheques: []
+  cheques: [],
+  usar_cheques_libro: false,
+  cheques_salida: [],
+  fecha_salida_cheques: new Date().toISOString().split('T')[0],
+  endosado_a_cheques: ""
 })
 
 const mediosDePago = [
@@ -97,6 +110,12 @@ const crearChequeVacio = (medio = "cheque") => ({
   medio_pago: medio,
   monto: 0,
   identificador: "",
+  numero_cheque: "",
+  librador_endosante: "",
+  banco: "",
+  fecha_cheque: "",
+  fecha_entrada: new Date().toISOString().split('T')[0],
+  fecha_cobro: "",
 })
 
 const parseFechaLocal = (valor) => {
@@ -316,12 +335,65 @@ const subtitleCaja = computed(() => {
 
 const esIngreso = computed(() => form.value.tipo === "ingreso")
 const esEgreso = computed(() => form.value.tipo === "egreso")
+const chequesBloqueadosPorLibro = computed(() => esEgreso.value && Boolean(form.value.usar_cheques_libro))
 
 const chequesCargados = computed(() => {
   return (form.value.cheques || []).filter((item) => {
     const monto = parseFloat(item?.monto || 0)
-    const identificador = String(item?.identificador || "").trim()
+    const identificador = String(item?.identificador || item?.numero_cheque || "").trim()
     return monto > 0 || identificador.length > 0
+  })
+})
+
+const libroChequesFiltrado = computed(() => {
+  const termino = String(filtroBusquedaLibroCheques.value || "").trim().toLowerCase()
+
+  return (libroCheques.value || []).filter((item) => {
+    if (!termino) return true
+    return [item.numero_cheque, item.banco, item.librador_endosante, item.endosado_a]
+      .some((v) => String(v || "").toLowerCase().includes(termino))
+  })
+})
+
+const libroChequesDisponibles = computed(() => {
+  return libroChequesFiltrado.value
+    .filter((item) => String(item.estado || "").toLowerCase() === "disponible")
+    .sort((a, b) => {
+      const fechaA = String(a?.fecha_cheque || "")
+      const fechaB = String(b?.fecha_cheque || "")
+      if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
+      return String(a?.numero_cheque || "").localeCompare(String(b?.numero_cheque || ""))
+    })
+})
+
+const libroChequesNoDisponibles = computed(() => {
+  return libroChequesFiltrado.value
+    .filter((item) => String(item.estado || "").toLowerCase() !== "disponible")
+    .sort((a, b) => {
+      const fechaA = String(a?.fecha_salida || a?.fecha_cheque || "")
+      const fechaB = String(b?.fecha_salida || b?.fecha_cheque || "")
+      if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
+      return String(a?.numero_cheque || "").localeCompare(String(b?.numero_cheque || ""))
+    })
+})
+
+const capitalizarInicial = (value) => {
+  const texto = String(value || "").trim()
+  if (!texto) return ""
+  return texto.charAt(0).toUpperCase() + texto.slice(1)
+}
+
+const chequesDisponiblesOrdenados = computed(() => {
+  return [...(chequesDisponibles.value || [])].sort((a, b) => {
+    const fechaA = String(a?.fecha_cheque || "")
+    const fechaB = String(b?.fecha_cheque || "")
+    if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
+
+    const bancoA = String(a?.banco || "")
+    const bancoB = String(b?.banco || "")
+    if (bancoA !== bancoB) return bancoA.localeCompare(bancoB)
+
+    return String(a?.numero_cheque || "").localeCompare(String(b?.numero_cheque || ""))
   })
 })
 
@@ -334,16 +406,38 @@ const esFormularioValido = computed(() => {
     return false
   }
 
-  if (form.value.tipo === "egreso" && !String(form.value.destinatario || "").trim()) {
+  if (
+    form.value.tipo === "egreso"
+    && !String(form.value.destinatario || form.value.endosado_a_cheques || "").trim()
+  ) {
     return false
   }
 
   const sumaDesglose = sumaMediosPago.value
   const chequesValidos = chequesCargados.value.every((item) => {
     if (!(parseFloat(item?.monto || 0) > 0)) return false
-    return String(item?.identificador || "").trim().length > 0
+    const identificadorValido = String(item?.identificador || item?.numero_cheque || "").trim().length > 0
+    if (!identificadorValido) return false
+
+    if (form.value.tipo === "ingreso" && ["cheque", "echeq"].includes(String(item?.medio_pago || ""))) {
+      return Boolean(
+        String(item?.librador_endosante || "").trim() &&
+        String(item?.banco || "").trim() &&
+        String(item?.numero_cheque || item?.identificador || "").trim() &&
+        String(item?.fecha_cheque || "").trim() &&
+        String(item?.fecha_entrada || item?.fecha_cobro || "").trim()
+      )
+    }
+
+    return true
   })
   if (!chequesValidos) return false
+
+  if (form.value.tipo === "egreso" && form.value.usar_cheques_libro) {
+    if (!Array.isArray(form.value.cheques_salida) || form.value.cheques_salida.length === 0) return false
+    if (!String(form.value.endosado_a_cheques || "").trim()) return false
+  }
+
   return Math.abs(sumaDesglose - form.value.monto_total) < 0.01
 })
 
@@ -565,6 +659,8 @@ const cargarSemanasCaja = async (mantenerSeleccion = true) => {
 const refrescarCaja = async ({ mantenerSeleccion = true } = {}) => {
   await cargarDatos()
   await cargarSemanasCaja(mantenerSeleccion)
+  await cargarLibroCheques()
+  await cargarChequesDisponibles()
 }
 
 const aplicarFiltros = () => {
@@ -808,6 +904,36 @@ const descargarMovimientoPdf = async () => {
   }
 }
 
+const abrirModalPdfCheques = () => {
+  opcionPdfCheques.value = "disponibles"
+  mostrarModalPdfCheques.value = true
+}
+
+const descargarLibroChequesPdf = async () => {
+  const listado = String(opcionPdfCheques.value || "disponibles")
+
+  try {
+    generandoPdfCheques.value = true
+    const res = await api.getLibroChequesPdf(filtroCaja.value, listado, filtroBusquedaLibroCheques.value)
+    const blob = new Blob([res.data], { type: "application/pdf" })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement("a")
+    link.href = url
+
+    const hoy = new Date()
+    const fecha = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, "0")}-${String(hoy.getDate()).padStart(2, "0")}`
+    link.download = `Libro cheques ${textoCajaFiltro()} ${listado} ${fecha}.pdf`
+
+    link.click()
+    window.URL.revokeObjectURL(url)
+  } catch (err) {
+    error.value = `Error al generar PDF de cheques: ${err.response?.data?.error || err.message}`
+  } finally {
+    generandoPdfCheques.value = false
+    mostrarModalPdfCheques.value = false
+  }
+}
+
 const crearFormularioVacio = () => ({
   fecha: new Date().toISOString().split('T')[0],
   caja_codigo: filtroCaja.value || "tesla",
@@ -825,7 +951,11 @@ const crearFormularioVacio = () => ({
     transferencia: 0,
     retencion: 0
   },
-  cheques: []
+  cheques: [],
+  usar_cheques_libro: false,
+  cheques_salida: [],
+  fecha_salida_cheques: new Date().toISOString().split('T')[0],
+  endosado_a_cheques: ""
 })
 
 const normalizarDesglose = (detalles = []) => {
@@ -852,6 +982,12 @@ const normalizarCheques = (detalles = []) => {
       medio_pago: String(item?.medio_pago || "").toLowerCase(),
       monto: parseFloat(item?.monto || 0) || 0,
       identificador: String(item?.identificador || "").trim(),
+      numero_cheque: String(item?.numero_cheque || item?.identificador || "").trim(),
+      librador_endosante: String(item?.librador_endosante || "").trim(),
+      banco: String(item?.banco || "").trim(),
+      fecha_cheque: String(item?.fecha_cheque || "").split("T")[0],
+      fecha_entrada: String(item?.fecha_entrada || item?.fecha_cobro || "").split("T")[0],
+      libro_cheque_id: Number(item?.libro_cheque_id || 0) || null,
     }))
 }
 
@@ -882,6 +1018,11 @@ const eliminarCheque = (index) => {
 }
 
 const abrirEdicion = (movimiento) => {
+  const chequesMovimiento = normalizarCheques(movimiento.detalles_medio_pago || [])
+  const chequesSalidaIds = chequesMovimiento
+    .map((item) => Number(item.libro_cheque_id || 0))
+    .filter((id) => Number.isInteger(id) && id > 0)
+
   form.value = {
     fecha: String(movimiento.fecha || "").split("T")[0],
     caja_codigo: movimiento.caja_codigo || filtroCaja.value || "tesla",
@@ -895,7 +1036,11 @@ const abrirEdicion = (movimiento) => {
     observaciones: movimiento.observaciones || "",
     monto_total: parseFloat(movimiento.monto_total) || 0,
     desglose: normalizarDesglose(movimiento.detalles_medio_pago || []),
-    cheques: normalizarCheques(movimiento.detalles_medio_pago || [])
+    cheques: chequesMovimiento,
+    usar_cheques_libro: movimiento.tipo === "egreso" && chequesSalidaIds.length > 0,
+    cheques_salida: chequesSalidaIds,
+    fecha_salida_cheques: String(movimiento.fecha || "").split("T")[0] || new Date().toISOString().split('T')[0],
+    endosado_a_cheques: String(movimiento.destinatario || "").trim(),
   }
   editandoMovimientoId.value = movimiento.id
   error.value = ""
@@ -908,7 +1053,9 @@ const payloadMovimiento = () => ({
   tipo: form.value.tipo,
   categoria: form.value.tipo === "ingreso" ? form.value.categoria : null,
   con_iva: form.value.con_iva,
-  destinatario: form.value.tipo === "egreso" ? String(form.value.destinatario || "").trim() : null,
+  destinatario: form.value.tipo === "egreso"
+    ? String(form.value.destinatario || form.value.endosado_a_cheques || "").trim()
+    : null,
   cliente_id: form.value.tipo === "ingreso" ? (form.value.cliente_id || null) : null,
   presupuesto_id: form.value.tipo === "ingreso" ? (form.value.presupuesto_id || null) : null,
   detalle: form.value.detalle,
@@ -920,13 +1067,75 @@ const payloadMovimiento = () => ({
     retencion: parseFloat(form.value.desglose.retencion) || 0
   },
   detalles_medio_pago: chequesCargados.value
-    .filter((item) => parseFloat(item?.monto || 0) > 0 && String(item?.identificador || "").trim())
+    .filter((item) => parseFloat(item?.monto || 0) > 0 && String(item?.identificador || item?.numero_cheque || "").trim())
     .map((item) => ({
       medio_pago: item.medio_pago,
       monto: parseFloat(item.monto) || 0,
-      identificador: String(item.identificador || "").trim(),
-    }))
+      identificador: String(item.identificador || item.numero_cheque || "").trim(),
+      numero_cheque: String(item.numero_cheque || item.identificador || "").trim(),
+      librador_endosante: String(item.librador_endosante || "").trim(),
+      banco: String(item.banco || "").trim(),
+      fecha_cheque: item.fecha_cheque || null,
+      fecha_entrada: item.fecha_entrada || null,
+      libro_cheque_id: Number(item.libro_cheque_id || 0) || null,
+      endosado_a: form.value.tipo === "egreso" ? String(form.value.endosado_a_cheques || form.value.destinatario || "").trim() : null,
+    })),
+  cheques_salida: form.value.tipo === "egreso" && form.value.usar_cheques_libro
+    ? (form.value.cheques_salida || []).map((id) => ({ libro_cheque_id: Number(id) }))
+    : [],
+  fecha_salida_cheques: form.value.tipo === "egreso" && form.value.usar_cheques_libro
+    ? (form.value.fecha_salida_cheques || form.value.fecha)
+    : null,
+  endosado_a_cheques: form.value.tipo === "egreso" && form.value.usar_cheques_libro
+    ? String(form.value.endosado_a_cheques || form.value.destinatario || "").trim()
+    : null,
 })
+
+const cargarLibroCheques = async () => {
+  try {
+    loadingLibroCheques.value = true
+    const res = await api.getLibroChequesCaja(filtroCaja.value, "", filtroBusquedaLibroCheques.value)
+    libroCheques.value = res.data || []
+  } catch (err) {
+    console.error("Error al cargar libro de cheques:", err)
+  } finally {
+    loadingLibroCheques.value = false
+  }
+}
+
+const cargarChequesDisponibles = async () => {
+  try {
+    const res = await api.getChequesDisponiblesCaja(filtroCaja.value)
+    chequesDisponibles.value = (res.data || []).map((item) => ({
+      ...item,
+      librador_endosante: capitalizarInicial(item.librador_endosante),
+      banco: capitalizarInicial(item.banco),
+    }))
+  } catch (err) {
+    console.error("Error al cargar cheques disponibles:", err)
+    chequesDisponibles.value = []
+  }
+}
+
+const sincronizarChequesSalidaSeleccionados = () => {
+  if (!(form.value.tipo === "egreso" && form.value.usar_cheques_libro)) return
+
+  const seleccionados = (form.value.cheques_salida || [])
+    .map((id) => chequesDisponibles.value.find((item) => Number(item.id) === Number(id)))
+    .filter(Boolean)
+
+  form.value.cheques = seleccionados.map((item) => ({
+    medio_pago: String(item.medio_pago || "cheque").toLowerCase(),
+    monto: Number(item.importe || 0),
+    identificador: String(item.numero_cheque || ""),
+    numero_cheque: String(item.numero_cheque || ""),
+    librador_endosante: String(item.librador_endosante || ""),
+    banco: String(item.banco || ""),
+    fecha_cheque: String(item.fecha_cheque || "").split("T")[0],
+    fecha_entrada: String(item.fecha_entrada || "").split("T")[0],
+    libro_cheque_id: Number(item.id),
+  }))
+}
 
 const guardarMovimiento = async () => {
   if (!esFormularioValido.value) {
@@ -1055,6 +1264,22 @@ const formatoMoneda = (valor) => {
   }).format(valor)
 }
 
+const formatearFechaLibro = (valor) => {
+  const texto = String(valor || "").trim()
+  if (!texto) return "-"
+
+  const base = texto.includes("T") ? texto.split("T")[0] : texto
+  const matchIso = base.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (matchIso) {
+    const [, anio, mes, dia] = matchIso
+    return `${dia}/${mes}/${anio}`
+  }
+
+  const fecha = new Date(texto)
+  if (Number.isNaN(fecha.getTime())) return texto
+  return fecha.toLocaleDateString("es-AR", { timeZone: "UTC" })
+}
+
 watch(filtroCaja, () => {
   semanaSeleccionadaId.value = ""
   semanasCaja.value = []
@@ -1079,9 +1304,32 @@ watch(() => form.value.tipo, (tipo) => {
   }
 
   form.value.destinatario = ""
+  form.value.usar_cheques_libro = false
+  form.value.cheques_salida = []
+  form.value.endosado_a_cheques = ""
   if (!form.value.categoria) {
     form.value.categoria = "mano_obra"
   }
+})
+
+watch(() => form.value.usar_cheques_libro, (usar) => {
+  if (form.value.tipo !== "egreso") return
+  if (usar) {
+    form.value.cheques = []
+    sincronizarChequesSalidaSeleccionados()
+  } else {
+    form.value.cheques_salida = []
+    form.value.endosado_a_cheques = ""
+    form.value.fecha_salida_cheques = form.value.fecha
+  }
+})
+
+watch(() => form.value.cheques_salida, () => {
+  sincronizarChequesSalidaSeleccionados()
+}, { deep: true })
+
+watch(() => filtroBusquedaLibroCheques.value, () => {
+  cargarLibroCheques()
 })
 
 watch(() => form.value.cliente_id, (clienteId) => {
@@ -1348,22 +1596,148 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <section class="caja-list-shell">
-        <div class="section-heading section-heading-inline">
+      <section class="caja-list-shell caja-list-shell-compact">
+        <div class="section-heading section-heading-inline section-heading-libro">
+          <div class="section-heading-libro-main">
+            <span class="section-kicker">Libro</span>
+            <h3>Libro de cheques</h3>
+          </div>
+          <div class="libro-cheques-header-actions">
+            <p class="libro-cheques-counter">{{ libroChequesFiltrado.length }} cheque(s) para {{ cajaActiva.label.toLowerCase() }}.</p>
+            <div class="section-actions-group">
+              <button type="button" class="btn btn-ghost btn-collapse-toggle" @click="libroChequesExpandido = !libroChequesExpandido">
+                {{ libroChequesExpandido ? "Contraer" : "Expandir" }}
+              </button>
+              <button class="btn btn-pdf libro-cheques-pdf-btn" :disabled="generandoPdfCheques" @click="abrirModalPdfCheques">
+                {{ generandoPdfCheques ? "Generando PDF..." : "PDF cheques" }}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div v-show="libroChequesExpandido" class="section-content-collapsible">
+          <div class="toolbar toolbar-caja toolbar-libro-cheques">
+            <label class="toolbar-search-label toolbar-search">
+              <span>Buscar cheque</span>
+              <input v-model="filtroBusquedaLibroCheques" type="text" class="input-sm input-search" placeholder="Numero, banco, librador, endosado..." />
+            </label>
+          </div>
+
+          <div v-if="loadingLibroCheques" class="spinner">Cargando libro de cheques...</div>
+          <div v-else-if="!libroChequesFiltrado.length" class="empty">
+            <strong>Sin cheques en el libro</strong>
+            <span>Los cheques ingresados desde movimientos se verán acá.</span>
+          </div>
+          <div v-else class="libro-cheques-split">
+          <div>
+            <div class="section-heading section-heading-inline section-heading-libro-sublist">
+              <div>
+                <span class="section-kicker">Disponibles</span>
+                <h3>Cheques disponibles</h3>
+              </div>
+              <p class="section-heading-count">{{ libroChequesDisponibles.length }} cheque(s).</p>
+            </div>
+            <div v-if="!libroChequesDisponibles.length" class="empty">
+              <strong>Sin cheques disponibles</strong>
+              <span>No hay cheques en estado disponible para este filtro.</span>
+            </div>
+            <div v-else class="tabla-shell">
+              <table class="tabla tabla-libro-cheques">
+                <thead>
+                  <tr>
+                    <th>Fecha entrada</th>
+                    <th>Numero</th>
+                    <th>Librador / Endosante</th>
+                    <th>Banco</th>
+                    <th>Importe</th>
+                    <th>Fecha cheque</th>
+                    <th>Estado</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="item in libroChequesDisponibles" :key="`disp-${item.id}`">
+                    <td>{{ formatearFechaLibro(item.fecha_entrada) }}</td>
+                    <td>{{ item.numero_cheque || '-' }}</td>
+                    <td>{{ item.librador_endosante || '-' }}</td>
+                    <td>{{ item.banco || '-' }}</td>
+                    <td>{{ formatoMoneda(item.importe || 0) }}</td>
+                    <td>{{ formatearFechaLibro(item.fecha_cheque) }}</td>
+                    <td><span class="badge badge-ingreso">Disponible</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div>
+            <div class="section-heading section-heading-inline section-heading-libro-sublist">
+              <div>
+                <span class="section-kicker">No disponibles</span>
+                <h3>Cheques no disponibles</h3>
+              </div>
+              <p class="section-heading-count">{{ libroChequesNoDisponibles.length }} cheque(s).</p>
+            </div>
+            <div v-if="!libroChequesNoDisponibles.length" class="empty">
+              <strong>Sin cheques no disponibles</strong>
+              <span>No hay cheques egresados o anulados para este filtro.</span>
+            </div>
+            <div v-else class="tabla-shell">
+              <table class="tabla tabla-libro-cheques tabla-libro-cheques-no-disponibles">
+                <thead>
+                  <tr>
+                    <th>Fecha entrada</th>
+                    <th>Numero</th>
+                    <th>Librador / Endosante</th>
+                    <th>Banco</th>
+                    <th>Importe</th>
+                    <th>Fecha cheque</th>
+                    <th>Estado</th>
+                    <th>Fecha salida</th>
+                    <th>Endosado a</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="item in libroChequesNoDisponibles" :key="`nodisp-${item.id}`">
+                    <td>{{ formatearFechaLibro(item.fecha_entrada) }}</td>
+                    <td>{{ item.numero_cheque || '-' }}</td>
+                    <td>{{ item.librador_endosante || '-' }}</td>
+                    <td>{{ item.banco || '-' }}</td>
+                    <td>{{ formatoMoneda(item.importe || 0) }}</td>
+                    <td>{{ formatearFechaLibro(item.fecha_cheque) }}</td>
+                    <td><span class="badge badge-egreso">No disponible</span></td>
+                    <td>{{ formatearFechaLibro(item.fecha_salida) }}</td>
+                    <td>{{ item.endosado_a || '-' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        </div>
+      </section>
+
+      <section class="caja-list-shell caja-list-shell-compact">
+        <div class="section-heading section-heading-inline section-heading-movimientos">
           <div>
             <span class="section-kicker">Listado</span>
             <h3>Movimientos de caja</h3>
           </div>
-          <p>{{ movimientosFiltrados.length }} registros visibles para {{ cajaActiva.label.toLowerCase() }}.</p>
+          <div class="section-header-actions">
+            <p class="section-heading-count section-heading-count-movimientos">{{ movimientosFiltrados.length }} registros visibles para {{ cajaActiva.label.toLowerCase() }}.</p>
+            <button type="button" class="btn btn-ghost btn-collapse-toggle" @click="movimientosExpandido = !movimientosExpandido">
+              {{ movimientosExpandido ? "Contraer" : "Expandir" }}
+            </button>
+          </div>
         </div>
 
-      <div v-if="loading" class="spinner">Cargando...</div>
-      <div v-else-if="movimientosFiltrados.length === 0" class="empty">
-        <strong>No hay movimientos registrados</strong>
-        <span>Probá ajustando el rango, el tipo o la búsqueda para encontrar movimientos cargados.</span>
-      </div>
-      <div v-else class="tabla-shell">
-      <table class="tabla">
+      <div v-show="movimientosExpandido" class="section-content-collapsible">
+        <div v-if="loading" class="spinner">Cargando...</div>
+        <div v-else-if="movimientosFiltrados.length === 0" class="empty">
+          <strong>No hay movimientos registrados</strong>
+          <span>Probá ajustando el rango, el tipo o la búsqueda para encontrar movimientos cargados.</span>
+        </div>
+        <div v-else class="tabla-shell">
+        <table class="tabla">
         <thead>
           <tr>
             <th>Fecha</th>
@@ -1391,30 +1765,35 @@ onUnmounted(() => {
             <td>
               <div class="tabla-referencia">
                 <strong>{{ mov.tipo === 'egreso' ? (mov.destinatario || '-') : (getNumeroPresupuesto(mov.presupuesto_id) !== '-' ? getNumeroPresupuesto(mov.presupuesto_id) : getNombreCliente(mov.cliente_id)) }}</strong>
-                <small v-if="getIdentificadoresCheque(mov)">Cheque(s): {{ getIdentificadoresCheque(mov) }}</small>
+                <small v-if="getIdentificadoresCheque(mov)" class="referencia-cheques" :title="`Cheque(s): ${getIdentificadoresCheque(mov)}`">Cheque(s): {{ getIdentificadoresCheque(mov) }}</small>
               </div>
             </td>
             <td>{{ mov.detalle }}</td>
-            <td>{{ mov.observaciones || '-' }}</td>
+            <td class="td-observaciones">
+              <span class="observacion-completa">{{ mov.observaciones || '-' }}</span>
+            </td>
             <td class="td-cheques">
-              <span v-if="getCantidadCheques(mov)">{{ getResumenCheques(mov) }}</span>
+              <span v-if="getCantidadCheques(mov)" class="cell-clamp" :title="getResumenCheques(mov)">{{ getResumenCheques(mov) }}</span>
               <span v-else>-</span>
             </td>
             <td class="monto-total">{{ formatoMoneda(mov.monto_total) }}</td>
             <td class="acciones">
-              <button class="btn btn-sm btn-info" @click="abrirEdicion(mov)">
-                Editar
-              </button>
-              <button class="btn btn-sm btn-info" @click="verDetalle(mov)">
-                Ver detalle
-              </button>
-              <button class="btn btn-sm btn-danger" @click="confirmarEliminar(mov)">
-                Eliminar
-              </button>
+              <div class="acciones-grid">
+                <button class="btn btn-sm btn-info" @click="abrirEdicion(mov)">
+                  Editar
+                </button>
+                <button class="btn btn-sm btn-info" @click="verDetalle(mov)">
+                  Ver detalle
+                </button>
+                <button class="btn btn-sm btn-danger" @click="confirmarEliminar(mov)">
+                  Eliminar
+                </button>
+              </div>
             </td>
           </tr>
         </tbody>
       </table>
+      </div>
       </div>
       </section>
     </div>
@@ -1518,6 +1897,54 @@ onUnmounted(() => {
     </div>
 
   </LayoutShell>
+
+  <div v-if="mostrarModalPdfCheques" class="modal-overlay" @click.self="mostrarModalPdfCheques = false">
+    <div class="modal modal-confirmacion modal-pdf-cheques">
+      <div class="modal-header modal-header-confirmacion">
+        <div class="modal-header-copy">
+          <span class="section-kicker">Libro de cheques</span>
+          <h3>Generar PDF de cheques</h3>
+          <p>Elegí qué listado querés incluir en el PDF.</p>
+        </div>
+        <button type="button" class="btn-close" aria-label="Cerrar modal" @click="mostrarModalPdfCheques = false">×</button>
+      </div>
+
+      <div class="modal-form modal-form-pdf-cheques">
+        <label class="pdf-cheques-option">
+          <input v-model="opcionPdfCheques" type="radio" value="disponibles" />
+          <div>
+            <strong>Cheques disponibles</strong>
+            <small>Incluye solo cheques en estado disponible.</small>
+          </div>
+        </label>
+
+        <label class="pdf-cheques-option">
+          <input v-model="opcionPdfCheques" type="radio" value="no_disponibles" />
+          <div>
+            <strong>Cheques no disponibles</strong>
+            <small>Incluye cheques salidos o anulados.</small>
+          </div>
+        </label>
+
+        <label class="pdf-cheques-option">
+          <input v-model="opcionPdfCheques" type="radio" value="ambos" />
+          <div>
+            <strong>Ambos listados</strong>
+            <small>Incluye disponibles y no disponibles.</small>
+          </div>
+        </label>
+
+        <div class="modal-actions">
+          <button type="button" class="btn-primary" :disabled="generandoPdfCheques" @click="descargarLibroChequesPdf">
+            {{ generandoPdfCheques ? "Generando..." : "Generar PDF" }}
+          </button>
+          <button type="button" class="btn-secondary" :disabled="generandoPdfCheques" @click="mostrarModalPdfCheques = false">
+            Cancelar
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Modal para crear movimiento -->
   <div v-if="showForm" class="modal-overlay" @click.self="cerrarFormulario">
@@ -1699,12 +2126,50 @@ onUnmounted(() => {
                 <small>Agregá solo si el movimiento incluye cheques.</small>
               </div>
 
-              <div class="cheques-intro">
-                <div class="cheques-intro-copy">
+              <div class="cheques-intro" :class="{ 'cheques-intro-egreso': esEgreso }">
+                <div v-if="esEgreso" class="cheques-libro-egreso">
+                  <label class="check-inline">
+                    <input v-model="form.usar_cheques_libro" type="checkbox" />
+                    <span>Usar cheques disponibles del libro</span>
+                  </label>
+
+                  <div v-if="form.usar_cheques_libro" class="cheques-libro-egreso-grid">
+                    <label class="form-group form-card-field">
+                      <span>Fecha salida *</span>
+                      <input v-model="form.fecha_salida_cheques" type="date" required />
+                    </label>
+                    <label class="form-group form-card-field">
+                      <span>A quién se le endosa *</span>
+                      <input v-model="form.endosado_a_cheques" type="text" placeholder="Persona o empresa" required />
+                    </label>
+                  </div>
+
+                  <div v-if="form.usar_cheques_libro" class="cheques-libro-lista">
+                    <label
+                      v-for="item in chequesDisponiblesOrdenados"
+                      :key="item.id"
+                      class="cheque-disponible-item"
+                    >
+                      <input v-model="form.cheques_salida" :value="item.id" type="checkbox" class="cheque-disponible-check" />
+                      <span class="cheque-disponible-main">
+                        <strong>#{{ item.numero_cheque || '-' }}</strong>
+                        <em>{{ formatoMoneda(item.importe || 0) }}</em>
+                      </span>
+                      <span class="cheque-disponible-meta">
+                        {{ capitalizarInicial(item.banco) || '-' }} · {{ capitalizarInicial(item.librador_endosante) || '-' }} · F. cheque {{ formatearFechaLibro(item.fecha_cheque) }}
+                      </span>
+                    </label>
+                    <p v-if="!chequesDisponibles.length" class="cheques-libro-empty">
+                      No hay cheques disponibles para esta caja.
+                    </p>
+                  </div>
+                </div>
+
+                <div v-if="esIngreso" class="cheques-intro-copy">
                   <strong>Identifica cada cheque por separado.</strong>
                   <p>Podes cargar uno o varios, y a cada uno asignarle su identificador alfanumerico.</p>
                 </div>
-                <div class="cheques-actions cheques-actions-prominent">
+                <div v-if="esIngreso" class="cheques-actions cheques-actions-prominent">
 
                   <button type="button" class="btn btn-cheque-add" @click="agregarCheque">Agregar cheque</button>
                   <button type="button" class="btn btn-cheque-add btn-cheque-add-alt" @click="agregarEcheq">Agregar eCheq</button>
@@ -1721,7 +2186,7 @@ onUnmounted(() => {
                   <div class="cheque-card-row cheque-card-row-main">
                     <label class="form-group form-card-field">
                       <span>Tipo</span>
-                      <select v-model="cheque.medio_pago">
+                      <select v-model="cheque.medio_pago" :disabled="chequesBloqueadosPorLibro">
                         <option v-for="tipoCheque in tiposCheque" :key="tipoCheque.id" :value="tipoCheque.id">
                           {{ tipoCheque.label }}
                         </option>
@@ -1729,14 +2194,34 @@ onUnmounted(() => {
                     </label>
                     <label class="form-group form-card-field">
                       <span>Monto</span>
-                      <input v-model.number="cheque.monto" type="number" @wheel.prevent min="0" step="0.01" placeholder="0.00" />
+                      <input v-model.number="cheque.monto" :readonly="chequesBloqueadosPorLibro" :disabled="chequesBloqueadosPorLibro" type="number" @wheel.prevent min="0" step="0.01" placeholder="0.00" />
                     </label>
                     <label class="form-group form-card-field">
                       <span>Identificador *</span>
-                      <input v-model="cheque.identificador" type="text" placeholder="Ej: CHQ-A12345" />
+                      <input v-model="cheque.identificador" :readonly="chequesBloqueadosPorLibro" :disabled="chequesBloqueadosPorLibro" type="text" placeholder="Ej: CHQ-A12345" />
+                    </label>
+                    <label v-if="esIngreso" class="form-group form-card-field">
+                      <span>Numero cheque *</span>
+                      <input v-model="cheque.numero_cheque" type="text" placeholder="Numero de cheque" />
+                    </label>
+                    <label v-if="esIngreso" class="form-group form-card-field">
+                      <span>Librador o endosante *</span>
+                      <input v-model="cheque.librador_endosante" type="text" placeholder="Nombre" />
+                    </label>
+                    <label v-if="esIngreso" class="form-group form-card-field">
+                      <span>Banco *</span>
+                      <input v-model="cheque.banco" type="text" placeholder="Banco emisor" />
+                    </label>
+                    <label v-if="esIngreso" class="form-group form-card-field">
+                      <span>Fecha cheque *</span>
+                      <input v-model="cheque.fecha_cheque" type="date" />
+                    </label>
+                    <label v-if="esIngreso" class="form-group form-card-field">
+                      <span>Fecha entrada *</span>
+                      <input v-model="cheque.fecha_entrada" type="date" />
                     </label>
                     <div class="cheque-card-remove">
-                      <button type="button" class="btn btn-cheque-remove" @click="eliminarCheque(index)">Quitar cheque</button>
+                      <button type="button" class="btn btn-cheque-remove" :disabled="chequesBloqueadosPorLibro" @click="eliminarCheque(index)">Quitar cheque</button>
                     </div>
                   </div>
                 </div>
@@ -2327,6 +2812,43 @@ onUnmounted(() => {
   background: linear-gradient(180deg, rgba(15, 23, 42, 0.72), rgba(15, 23, 42, 0.92));
 }
 
+.caja-list-shell-compact {
+  padding: 0.95rem 1rem;
+}
+
+.section-content-collapsible {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: 0.45rem;
+}
+
+.section-header-actions,
+.section-actions-group {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.section-header-actions {
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.btn-collapse-toggle {
+  min-height: 2.45rem;
+  padding: 0.58rem 0.95rem;
+  border-radius: 0.68rem;
+  border-color: rgba(148, 163, 184, 0.25);
+  color: #dbeafe;
+  background: rgba(30, 41, 59, 0.5);
+}
+
+.btn-collapse-toggle:hover {
+  border-color: rgba(96, 165, 250, 0.45);
+  background: rgba(30, 41, 59, 0.82);
+}
+
 .toolbar-search {
   flex: 1 1 260px;
 }
@@ -2359,6 +2881,37 @@ onUnmounted(() => {
   color: #bfdbfe;
   font-size: 0.82rem;
   font-weight: 700;
+}
+
+.td-observaciones {
+  vertical-align: top;
+}
+
+.observacion-completa {
+  white-space: normal;
+  word-break: break-word;
+}
+
+.cell-clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.referencia-cheques {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .tabla-referencia small,
@@ -2605,6 +3158,236 @@ onUnmounted(() => {
   gap: 1rem;
 }
 
+.libro-cheques-split {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.libro-cheques-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.55rem;
+  margin-left: auto;
+  flex-wrap: nowrap;
+}
+
+.libro-cheques-header-actions p {
+  margin: 0;
+}
+
+.section-heading-inline {
+  align-items: center;
+}
+
+.section-heading-libro {
+  gap: 0.9rem;
+  margin-bottom: 0;
+  align-items: center;
+}
+
+.section-heading-libro-main {
+  display: grid;
+  gap: 0.16rem;
+  min-width: 0;
+}
+
+.libro-cheques-counter {
+  color: #cbd5e1;
+  font-size: 0.88rem;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.libro-cheques-header-actions {
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.libro-cheques-header-actions .section-actions-group {
+  flex-wrap: nowrap;
+}
+
+.libro-cheques-pdf-btn {
+  min-width: 170px;
+  justify-content: center;
+  min-height: 2.45rem;
+  padding: 0.58rem 0.9rem;
+}
+
+.tabla-libro-cheques {
+  table-layout: auto;
+}
+
+.tabla-libro-cheques th,
+.tabla-libro-cheques td {
+  padding: 0.48rem 0.62rem;
+  font-size: 0.86rem;
+  white-space: nowrap;
+}
+
+.tabla-libro-cheques th:nth-child(1),
+.tabla-libro-cheques td:nth-child(1) {
+  width: 88px;
+}
+
+.tabla-libro-cheques th:nth-child(2),
+.tabla-libro-cheques td:nth-child(2) {
+  width: 84px;
+}
+
+.tabla-libro-cheques th:nth-child(3),
+.tabla-libro-cheques td:nth-child(3) {
+  width: 120px;
+}
+
+.tabla-libro-cheques th:nth-child(4),
+.tabla-libro-cheques td:nth-child(4) {
+  width: 96px;
+}
+
+.tabla-libro-cheques th:nth-child(5),
+.tabla-libro-cheques td:nth-child(5) {
+  width: 96px;
+  text-align: right;
+}
+
+.tabla-libro-cheques th:nth-child(6),
+.tabla-libro-cheques td:nth-child(6) {
+  width: 92px;
+}
+
+.tabla-libro-cheques th:nth-child(7),
+.tabla-libro-cheques td:nth-child(7) {
+  width: 98px;
+}
+
+.tabla-libro-cheques-no-disponibles th:nth-child(8),
+.tabla-libro-cheques-no-disponibles td:nth-child(8) {
+  width: 92px;
+}
+
+.tabla-libro-cheques-no-disponibles th:nth-child(9),
+.tabla-libro-cheques-no-disponibles td:nth-child(9) {
+  width: 125px;
+  max-width: 125px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toolbar-libro-cheques {
+  grid-template-columns: minmax(280px, 1fr);
+  align-items: stretch;
+  margin-top: 0.3rem;
+}
+
+.tabla.tabla-libro-cheques {
+  width: 100%;
+  min-width: 100%;
+  table-layout: fixed;
+}
+
+.tabla.tabla-libro-cheques th,
+.tabla.tabla-libro-cheques td {
+  padding: 0.56rem 0.65rem;
+  font-size: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tabla.tabla-libro-cheques:not(.tabla-libro-cheques-no-disponibles) th:nth-child(1),
+.tabla.tabla-libro-cheques:not(.tabla-libro-cheques-no-disponibles) td:nth-child(1) {
+  width: 12% !important;
+}
+
+.tabla.tabla-libro-cheques:not(.tabla-libro-cheques-no-disponibles) th:nth-child(2),
+.tabla.tabla-libro-cheques:not(.tabla-libro-cheques-no-disponibles) td:nth-child(2) {
+  width: 10% !important;
+}
+
+.tabla.tabla-libro-cheques:not(.tabla-libro-cheques-no-disponibles) th:nth-child(3),
+.tabla.tabla-libro-cheques:not(.tabla-libro-cheques-no-disponibles) td:nth-child(3) {
+  width: 19% !important;
+}
+
+.tabla.tabla-libro-cheques:not(.tabla-libro-cheques-no-disponibles) th:nth-child(4),
+.tabla.tabla-libro-cheques:not(.tabla-libro-cheques-no-disponibles) td:nth-child(4) {
+  width: 16% !important;
+}
+
+.tabla.tabla-libro-cheques:not(.tabla-libro-cheques-no-disponibles) th:nth-child(5),
+.tabla.tabla-libro-cheques:not(.tabla-libro-cheques-no-disponibles) td:nth-child(5) {
+  width: 16% !important;
+  text-align: right;
+}
+
+.tabla.tabla-libro-cheques:not(.tabla-libro-cheques-no-disponibles) th:nth-child(6),
+.tabla.tabla-libro-cheques:not(.tabla-libro-cheques-no-disponibles) td:nth-child(6) {
+  width: 13% !important;
+}
+
+.tabla.tabla-libro-cheques:not(.tabla-libro-cheques-no-disponibles) th:nth-child(7),
+.tabla.tabla-libro-cheques:not(.tabla-libro-cheques-no-disponibles) td:nth-child(7) {
+  width: 14% !important;
+}
+
+.tabla.tabla-libro-cheques-no-disponibles {
+  min-width: 100%;
+}
+
+.tabla.tabla-libro-cheques-no-disponibles th:nth-child(8),
+.tabla.tabla-libro-cheques-no-disponibles td:nth-child(8) {
+  width: 9% !important;
+}
+
+.tabla.tabla-libro-cheques-no-disponibles th:nth-child(9),
+.tabla.tabla-libro-cheques-no-disponibles td:nth-child(9) {
+  width: 10% !important;
+}
+
+.tabla.tabla-libro-cheques-no-disponibles th:nth-child(1),
+.tabla.tabla-libro-cheques-no-disponibles td:nth-child(1) {
+  width: 10% !important;
+}
+
+.tabla.tabla-libro-cheques-no-disponibles th:nth-child(2),
+.tabla.tabla-libro-cheques-no-disponibles td:nth-child(2) {
+  width: 9% !important;
+}
+
+.tabla.tabla-libro-cheques-no-disponibles th:nth-child(3),
+.tabla.tabla-libro-cheques-no-disponibles td:nth-child(3) {
+  width: 16% !important;
+}
+
+.tabla.tabla-libro-cheques-no-disponibles th:nth-child(4),
+.tabla.tabla-libro-cheques-no-disponibles td:nth-child(4) {
+  width: 13% !important;
+}
+
+.tabla.tabla-libro-cheques-no-disponibles th:nth-child(5),
+.tabla.tabla-libro-cheques-no-disponibles td:nth-child(5) {
+  width: 13% !important;
+  text-align: right;
+}
+
+.tabla.tabla-libro-cheques-no-disponibles th:nth-child(6),
+.tabla.tabla-libro-cheques-no-disponibles td:nth-child(6) {
+  width: 10% !important;
+}
+
+.tabla.tabla-libro-cheques-no-disponibles th:nth-child(7),
+.tabla.tabla-libro-cheques-no-disponibles td:nth-child(7) {
+  width: 10% !important;
+}
+
+.caja-list-shell-compact .btn-sm {
+  padding: 0.3rem 0.58rem;
+  font-size: 0.7rem;
+}
+
 .desglose-medios h3,
 .section-heading h3 {
   color: #d1d5db;
@@ -2682,14 +3465,17 @@ onUnmounted(() => {
 /* Tabla */
 .tabla {
   width: 100%;
+  min-width: 100%;
   border-collapse: collapse;
   background: transparent;
+  table-layout: fixed;
 }
 
-.tabla-shell {
-  border: 1px solid rgba(148, 163, 184, 0.16);
+.tabla-shell{
+  border: 1px solid rgba(148,162,184, 0.16);
   border-radius: 1rem;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   background: rgba(15, 23, 42, 0.55);
 }
 
@@ -2711,6 +3497,63 @@ onUnmounted(() => {
   color: #e5e7eb;
   border-bottom: 1px solid rgba(148, 163, 184, 0.1);
 }
+
+.tabla th:nth-child(1),
+.tabla td:nth-child(1) {
+  width: 95px;
+}
+
+.tabla th:nth-child(2),
+.tabla td:nth-child(2) {
+  width: 92px;
+}
+
+.tabla th:nth-child(3),
+.tabla td:nth-child(3) {
+  width: 110px;
+}
+
+.tabla th:nth-child(4),
+.tabla td:nth-child(4) {
+  width: 24%;
+}
+
+.tabla th:nth-child(5),
+.tabla td:nth-child(5) {
+  width: 18%;
+}
+
+.tabla th:nth-child(6),
+.tabla td:nth-child(6) {
+  width: 15%;
+}
+
+.tabla th:nth-child(7),
+.tabla td:nth-child(7) {
+  width: 13%;
+}
+
+.tabla th:nth-child(8),
+.tabla td:nth-child(8) {
+  min-width: 170px;
+  width: 170px;
+  white-space: nowrap;
+}
+
+.tabla th:nth-child(9),
+.tabla td:nth-child(9) {
+  min-width: 250px;
+  width: 250px;
+  white-space: normal;
+}
+
+.tabla td:nth-child(4),
+.tabla td:nth-child(5),
+.tabla td:nth-child(6),
+.tabla td:nth-child(7) {
+  word-break: break-word;
+}
+
 
 .tabla tbody tr:hover {
   background: rgba(30, 41, 59, 0.5);
@@ -2752,8 +3595,25 @@ onUnmounted(() => {
 }
 
 .acciones {
-  display: flex;
+  vertical-align: top;
+}
+
+.acciones-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(96px, 1fr));
   gap: 0.5rem;
+  white-space: normal;
+  align-items: stretch;
+}
+
+.acciones-grid .btn{
+  width: 100%;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.acciones-grid .btn-danger {
+  grid-column: 1 / -1;
 }
 
 .spinner {
@@ -3206,6 +4066,14 @@ onUnmounted(() => {
   background: linear-gradient(180deg, rgba(30, 41, 59, 0.72), rgba(15, 23, 42, 0.92));
 }
 
+.cheques-intro-egreso {
+  display: block;
+}
+
+.cheques-intro-egreso .cheques-libro-egreso {
+  width: 100%;
+}
+
 .cheques-intro-copy {
   display: grid;
   gap: 0.25rem;
@@ -3282,6 +4150,61 @@ onUnmounted(() => {
 .cheques-list {
   display: grid;
   gap: 0.85rem;
+}
+
+.cheques-libro-lista {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  gap: 0.6rem;
+  margin-top: 0.15rem;
+}
+
+.cheque-disponible-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 0.65rem;
+  row-gap: 0.25rem;
+  align-items: start;
+  padding: 0.72rem 0.8rem;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(15, 23, 42, 0.54);
+}
+
+.cheque-disponible-item:hover {
+  border-color: rgba(125, 211, 252, 0.34);
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.cheque-disponible-check {
+  margin-top: 0.2rem;
+}
+
+.cheque-disponible-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: #e5e7eb;
+}
+
+.cheque-disponible-main strong {
+  color: #f8fafc;
+  font-size: 0.9rem;
+}
+
+.cheque-disponible-main em {
+  font-style: normal;
+  color: #93c5fd;
+  font-weight: 700;
+  font-size: 0.88rem;
+}
+
+.cheque-disponible-meta {
+  grid-column: 2;
+  color: #94a3b8;
+  font-size: 0.8rem;
+  line-height: 1.4;
 }
 
 .cheque-card {
@@ -3515,6 +4438,50 @@ onUnmounted(() => {
   align-items: center;
   padding: 1.25rem 1.45rem 1.45rem;
   gap: 1rem;
+}
+
+.modal-pdf-cheques {
+  border-color: rgba(96, 165, 250, 0.26);
+  background:
+    radial-gradient(circle at top left, rgba(59, 130, 246, 0.14), transparent 34%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(15, 23, 42, 0.94));
+}
+
+.modal-form-pdf-cheques {
+  padding: 1.2rem 1.35rem 1.35rem;
+  gap: 0.7rem;
+}
+
+.pdf-cheques-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.7rem;
+  align-items: start;
+  padding: 0.78rem 0.85rem;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(15, 23, 42, 0.52);
+  cursor: pointer;
+}
+
+.pdf-cheques-option:hover {
+  border-color: rgba(125, 211, 252, 0.4);
+}
+
+.pdf-cheques-option input {
+  margin-top: 0.2rem;
+}
+
+.pdf-cheques-option strong {
+  color: #e2e8f0;
+  font-size: 0.92rem;
+}
+
+.pdf-cheques-option small {
+  display: block;
+  margin-top: 0.2rem;
+  color: #94a3b8;
+  line-height: 1.35;
 }
 
 .confirmacion-icono {
@@ -3836,6 +4803,12 @@ onUnmounted(() => {
   border-color: rgba(148, 163, 184, 0.5);
 }
 
+@media (max-width: 1200px) {
+  .cheques-libro-lista {
+    grid-template-columns: repeat(2, minmax(220px, 1fr));
+  }
+}
+
 @media (max-width: 720px) {
   .caja-topbar,
   .detalle-hero,
@@ -3862,12 +4835,11 @@ onUnmounted(() => {
   }
 
   .tabla {
-    display: block;
-    overflow-x: auto;
+    min-width: 980px;
   }
 
-  .acciones {
-    flex-wrap: wrap;
+  .acciones-grid {
+    grid-template-columns: 1fr;
   }
 
   .modal {
@@ -3875,6 +4847,42 @@ onUnmounted(() => {
   }
 
   .desglose-grid-compact {
+    grid-template-columns: 1fr;
+  }
+
+  .section-heading-libro,
+  .section-heading-libro-sublist,
+  .libro-cheques-header-actions {
+    align-items: stretch;
+  }
+
+  .libro-cheques-header-actions,
+  .libro-cheques-header-actions .section-actions-group {
+    flex-wrap: wrap;
+  }
+
+  .section-header-actions,
+  .section-actions-group {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .btn-collapse-toggle {
+    width: 100%;
+  }
+
+  .libro-cheques-counter,
+  .section-heading-count {
+    white-space: normal;
+    text-align: left;
+  }
+
+  .libro-cheques-pdf-btn {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .toolbar-libro-cheques {
     grid-template-columns: 1fr;
   }
 
@@ -3900,6 +4908,10 @@ onUnmounted(() => {
 
   .cheque-card-remove {
     align-items: stretch;
+  }
+
+  .cheques-libro-lista {
+    grid-template-columns: 1fr;
   }
 
   .desglose-compact-item:last-child {

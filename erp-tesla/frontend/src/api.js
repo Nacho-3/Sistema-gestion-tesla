@@ -376,6 +376,28 @@ export default {
     return api.post(`/caja/semanas/${id}/saldos`, payload)
   },
 
+  getLibroChequesCaja(caja_codigo, estado, busqueda) {
+    const params = new URLSearchParams()
+    if (caja_codigo) params.append("caja_codigo", caja_codigo)
+    if (estado) params.append("estado", estado)
+    if (busqueda) params.append("busqueda", busqueda)
+    return api.get(`/caja/libro-cheques?${params.toString()}`)
+  },
+
+  getChequesDisponiblesCaja(caja_codigo) {
+    const params = new URLSearchParams()
+    if (caja_codigo) params.append("caja_codigo", caja_codigo)
+    return api.get(`/caja/libro-cheques/disponibles?${params.toString()}`)
+  },
+
+  getLibroChequesPdf(caja_codigo, listado = "ambos", busqueda) {
+    const params = new URLSearchParams()
+    if (caja_codigo) params.append("caja_codigo", caja_codigo)
+    if (listado) params.append("listado", listado)
+    if (busqueda) params.append("busqueda", busqueda)
+    return api.get(`/caja/libro-cheques/pdf?${params.toString()}`, { responseType: "blob" })
+  },
+
   // Presupuestos
   getPresupuestos() {
     return api.get("/presupuestos")

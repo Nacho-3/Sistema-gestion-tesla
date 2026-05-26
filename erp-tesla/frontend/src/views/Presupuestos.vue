@@ -846,17 +846,45 @@ const descargarPdfMaterialesBlob = async (id) => {
   return new Blob([res.data], { type: "application/pdf" })
 }
 
+const parseDownloadError = async (err, fallbackMessage) => {
+  try {
+    const data = err?.response?.data
+    if (data instanceof Blob) {
+      const text = await data.text()
+      if (text) {
+        const parsed = JSON.parse(text)
+        return parsed?.error || fallbackMessage
+      }
+    }
+    return err?.response?.data?.error || err?.message || fallbackMessage
+  } catch {
+    return err?.response?.data?.error || err?.message || fallbackMessage
+  }
+}
+
 const triggerBlobDownload = (blob, numero, mode = "presupuesto") => {
+  if (window.navigator?.msSaveOrOpenBlob) {
+    const fileName = mode === "materiales"
+      ? `Listado-Materiales-${numero}.pdf`
+      : `Presupuesto-${numero}.pdf`
+    window.navigator.msSaveOrOpenBlob(blob, fileName)
+    return
+  }
+
   const url = window.URL.createObjectURL(blob)
   const a = document.createElement("a")
   a.href = url
   a.download = mode === "materiales"
     ? `Listado-Materiales-${numero}.pdf`
     : `Presupuesto-${numero}.pdf`
+  a.rel = "noopener"
   document.body.appendChild(a)
   a.click()
   a.remove()
-  window.URL.revokeObjectURL(url)
+  // Some browsers/slow PCs can fail if URL is revoked immediately after click.
+  window.setTimeout(() => {
+    window.URL.revokeObjectURL(url)
+  }, 60_000)
 }
 
 const enviarWhatsapp = async (presupuesto) => {
@@ -899,7 +927,7 @@ const descargarPdf = async (id, numero) => {
     const blob = await descargarPdfBlob(id)
     triggerBlobDownload(blob, numero, "presupuesto")
   } catch (err) {
-    error.value = "No se pudo descargar el PDF"
+    error.value = await parseDownloadError(err, "No se pudo descargar el PDF")
     console.error(err)
   }
 }
@@ -911,7 +939,7 @@ const descargarPdfMateriales = async (id, numero) => {
     const blob = await descargarPdfMaterialesBlob(id)
     triggerBlobDownload(blob, numero, "materiales")
   } catch (err) {
-    error.value = "No se pudo descargar el PDF"
+    error.value = await parseDownloadError(err, "No se pudo descargar el PDF")
     console.error(err)
   }
 }

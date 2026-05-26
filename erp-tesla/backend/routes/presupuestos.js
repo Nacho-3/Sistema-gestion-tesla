@@ -301,11 +301,12 @@ const getPresupuestoCompleto = async (id) => {
 const getPresupuestoPdfFileName = (presupuesto = {}, mode = "presupuesto") => {
 	const numero = sanitizeFileText(String(presupuesto.numero || "SinNumero")) || "SinNumero"
 	const clienteNombre = sanitizeFileText(presupuesto.cliente_empresa || presupuesto.cliente_razon_social || "Cliente") || "Cliente"
-	const obraNombre = sanitizeFileText(presupuesto.obra_nombre || "SinObra")
+	const obraNombre = sanitizeFileText(presupuesto.obra_nombre || "SinProyecto") || "SinProyecto"
+	const baseName = `Presupuesto (${numero}) - ${clienteNombre} - ${obraNombre}`
 	if (mode === "materiales") {
-		return `Listado materiales (${obraNombre}) (${clienteNombre}) (${numero}).pdf`
+		return `${baseName} - Materiales.pdf`
 	}
-	return `Presupuesto-${numero}.pdf`
+	return `${baseName}.pdf`
 }
 
 const getPresupuestoPdfFolderPath = (presupuesto = {}, mode = "presupuesto") => {
@@ -319,6 +320,104 @@ const getPresupuestoPdfFolderPath = (presupuesto = {}, mode = "presupuesto") => 
 
 const getPresupuestoPdfFilePath = (presupuesto = {}, mode = "presupuesto") => {
 	return path.join(getPresupuestoPdfFolderPath(presupuesto, mode), getPresupuestoPdfFileName(presupuesto, mode))
+}
+
+const isRetriableFsError = (error) => {
+	const code = String(error?.code || "").toUpperCase()
+	return code === "EPERM" || code === "EBUSY" || code === "EACCES"
+}
+
+const waitMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const getLockedAlternativePdfPath = (filePath, presupuesto = {}, mode = "presupuesto") => {
+	const parsed = path.parse(filePath)
+	const stamp = new Date()
+		.toISOString()
+		.replace(/[-:]/g, "")
+		.replace("T", "-")
+		.slice(0, 15)
+	const suffix = `bloqueado-${stamp}-p${presupuesto?.id || "na"}-${mode}`
+	return path.join(parsed.dir, `${parsed.name}-${suffix}${parsed.ext || ".pdf"}`)
+}
+
+const writePresupuestoPdfToDisk = async ({ presupuesto = {}, mode = "presupuesto", buffer, context = "unknown" }) => {
+	const folderPath = getPresupuestoPdfFolderPath(presupuesto, mode)
+	const filePath = getPresupuestoPdfFilePath(presupuesto, mode)
+
+	const maxAttempts = 3
+	let lastError = null
+	let alternateError = null
+
+	for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+		try {
+			await fs.mkdir(folderPath, { recursive: true })
+			await fs.writeFile(filePath, buffer)
+			return { filePath, usedFallback: false }
+		} catch (error) {
+			lastError = error
+			if (!isRetriableFsError(error) || attempt === maxAttempts) break
+			await waitMs(150 * attempt)
+		}
+	}
+
+	const alternatePath = getLockedAlternativePdfPath(filePath, presupuesto, mode)
+	try {
+		await fs.mkdir(folderPath, { recursive: true })
+		await fs.writeFile(alternatePath, buffer)
+		console.error("Guardado PDF en ruta alternativa por archivo bloqueado", {
+			context,
+			mode,
+			presupuestoId: presupuesto?.id || null,
+			primaryPath: filePath,
+			primaryErrorCode: lastError?.code,
+			primaryError: lastError?.message,
+			alternatePath,
+		})
+		return { filePath: alternatePath, usedFallback: true }
+	} catch (altError) {
+		alternateError = altError
+		if (!lastError) lastError = altError
+	}
+
+	const fallbackFolder = path.join(__dirname, "..", "tmp", "presupuestos-fallback")
+	const fallbackName = `${Date.now()}-p${presupuesto?.id || "na"}-${mode}.pdf`
+	const fallbackPath = path.join(fallbackFolder, fallbackName)
+
+	try {
+		await fs.mkdir(fallbackFolder, { recursive: true })
+		await fs.writeFile(fallbackPath, buffer)
+	} catch (fallbackError) {
+		console.error("No se pudo guardar PDF en ruta principal ni fallback", {
+			context,
+			mode,
+			presupuestoId: presupuesto?.id || null,
+			primaryPath: filePath,
+			primaryErrorCode: lastError?.code,
+			primaryError: lastError?.message,
+			alternatePath,
+			alternateErrorCode: alternateError?.code,
+			alternateError: alternateError?.message,
+			fallbackPath,
+			fallbackErrorCode: fallbackError?.code,
+			fallbackError: fallbackError?.message,
+		})
+		throw lastError || fallbackError
+	}
+
+	console.error("Guardado PDF con fallback por error en ruta principal", {
+		context,
+		mode,
+		presupuestoId: presupuesto?.id || null,
+		primaryPath: filePath,
+		primaryErrorCode: lastError?.code,
+		primaryError: lastError?.message,
+		alternatePath,
+		alternateErrorCode: alternateError?.code,
+		alternateError: alternateError?.message,
+		fallbackPath,
+	})
+
+	return { filePath: fallbackPath, usedFallback: true }
 }
 
 const removeStoredPresupuestoPdf = async (presupuesto = {}) => {
@@ -413,10 +512,16 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 			const validezTexto = Number.isFinite(validezDiasNumero) && validezDiasNumero > 0 ? `${validezDiasNumero} dias` : "-"
 
 			const sectionHeader = (title, y) => {
+				const minSectionContentHeight = 46
+				let nextY = y
+				if (nextY + 19 + minSectionContentHeight > pageBottomLimit) {
+					doc.addPage()
+					nextY = top + 2
+				}
 				doc.font("Helvetica-Bold").fontSize(9.6).fillColor("#111")
-				doc.text(String(title || "").toUpperCase(), left, y)
-				doc.strokeColor(lineColor).lineWidth(0.8).moveTo(left, y + 12).lineTo(right, y + 12).stroke()
-				return y + 19
+				doc.text(String(title || "").toUpperCase(), left, nextY)
+				doc.strokeColor(lineColor).lineWidth(0.8).moveTo(left, nextY + 12).lineTo(right, nextY + 12).stroke()
+				return nextY + 19
 			}
 
 			const pageBottomLimit = doc.page.height - 98
@@ -583,51 +688,6 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 				const gruposManoObra = agruparPorEtapa(itemsManoObra)
 				const manoObraConEtapas = gruposManoObra.some((grupo) => grupo.etapa !== "General")
 				const modoManoObraPdf = String(presupuesto.modo_mano_obra || "").trim() || (!manoObraTienePrecio ? "subtotal" : (manoObraTieneCantidad ? "cantidad" : "item"))
-
-				const construirBloquesManoObra = (items = []) => {
-					const bloques = []
-					let index = 0
-
-					while (index < items.length) {
-						const actual = items[index]
-						const cantidadBloque = Math.max(1, Number(actual?.cantidad || 1))
-						const itemsBloque = items.slice(index, Math.min(items.length, index + cantidadBloque))
-						const subtotalDirecto = Number(actual?.subtotal || 0)
-						const subtotalBloque = subtotalDirecto > 0
-							? subtotalDirecto
-							: itemsBloque.reduce((acc, item) => acc + Number(item?.subtotal || 0), 0)
-
-						bloques.push({
-							items: itemsBloque,
-							subtotal: subtotalBloque,
-						})
-
-						index += Math.max(1, cantidadBloque)
-					}
-
-					return bloques
-				}
-
-				if (modoManoObraPdf === "cantidad") {
-					const bloques = construirBloquesManoObra(itemsManoObra)
-					bloques.forEach((bloque, idx) => {
-						y = sectionHeader(`Bloque ${idx + 1}`, y)
-						const rowsBloque = bloque.items.map((item, itemIdx) => [`${itemIdx + 1}. ${item.descripcion || "-"}`])
-						y = drawTable({
-							yStart: y,
-							sectionTitle: `Bloque ${idx + 1}`,
-							columns: [{ label: "Descripcion", width }],
-							rows: rowsBloque.length ? rowsBloque : [["Sin items"]],
-							subtotalLabel: "Subtotal bloque",
-							subtotalValue: formatoMoneda(Number(bloque.subtotal || 0)),
-						})
-					})
-					y = drawSubtotalBand({
-						yStart: y,
-						label: "Subtotal mano de obra",
-						value: formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)),
-					})
-				} else {
 				const manoObraDetalle = modoManoObraPdf !== "subtotal" && manoObraTienePrecio
 				const manoObraConCantidad = manoObraDetalle && modoManoObraPdf === "cantidad"
 
@@ -663,6 +723,45 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 					? (manoObraConCantidad ? [["Sin items", "0", formatoMoneda(0), formatoMoneda(0)]] : [["Sin items", formatoMoneda(0)]])
 					: [["Sin items"]]
 
+				const construirBloquesManoObra = (items = []) => {
+					const bloques = []
+					let index = 0
+
+					while (index < items.length) {
+						const actual = items[index]
+						const cantidadBloque = Math.max(1, Number(actual?.cantidad || 1))
+						const itemsBloque = items.slice(index, Math.min(items.length, index + cantidadBloque))
+
+						bloques.push({ items: itemsBloque })
+						index += Math.max(1, cantidadBloque)
+					}
+
+					return bloques
+				}
+
+				if (modoManoObraPdf === "cantidad") {
+					const columnasBloqueCantidad = [{ label: "Descripcion", width }]
+					const bloques = construirBloquesManoObra(itemsManoObra)
+					bloques.forEach((bloque, idx) => {
+						if (idx > 0) {
+							y += 6
+						}
+						const manoRows = bloque.items.map((item, itemIdx) => ([`${itemIdx + 1}. ${item.descripcion || "-"}`]))
+						const subtotalBloque = bloque.items.reduce((acc, item) => acc + Number(item?.subtotal || 0), 0)
+						y = drawTable({
+							yStart: y,
+							columns: columnasBloqueCantidad,
+							rows: manoRows.length ? manoRows : manoObraEmptyRow,
+							subtotalLabel: "Subtotal",
+							subtotalValue: formatoMoneda(subtotalBloque),
+						})
+					})
+					y = drawSubtotalBand({
+						yStart: y,
+						label: "Subtotal mano de obra",
+						value: formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)),
+					})
+				} else {
 				const drawManoObraGrupo = (grupo) => {
 					y = sectionHeader(grupo.etapa, y)
 					const rowsGrupo = manoObraRowsFromItems(grupo.items)
@@ -947,13 +1046,14 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 }
 
 const syncPresupuestoPdfStorage = async (presupuesto, previousPresupuesto = null, mode = "presupuesto") => {
-	const folderPath = getPresupuestoPdfFolderPath(presupuesto, mode)
-	const filePath = getPresupuestoPdfFilePath(presupuesto, mode)
 	const buffer = await renderPresupuestoPdfBuffer(presupuesto, { mode })
+	const { filePath } = await writePresupuestoPdfToDisk({
+		presupuesto,
+		mode,
+		buffer,
+		context: "sync",
+	})
 	const previousPath = previousPresupuesto ? getPresupuestoPdfFilePath(previousPresupuesto, mode) : null
-
-	await fs.mkdir(folderPath, { recursive: true })
-	await fs.writeFile(filePath, buffer)
 
 	if (previousPath && previousPath !== filePath && existsSync(previousPath)) {
 		await fs.unlink(previousPath)
@@ -1622,10 +1722,16 @@ router.get("/:id/pdf", async (req, res) => {
 		}
 
 		const pdfMode = String(req.query?.tipo || "").toLowerCase() === "materiales" ? "materiales" : "presupuesto"
-		const { buffer, filePath } = await syncPresupuestoPdfStorage(presupuesto, null, pdfMode)
+		const buffer = await renderPresupuestoPdfBuffer(presupuesto, { mode: pdfMode })
+		const { filePath, usedFallback } = await writePresupuestoPdfToDisk({
+			presupuesto,
+			mode: pdfMode,
+			buffer,
+			context: "download",
+		})
 		const nombreArchivo = getPresupuestoPdfFileName(presupuesto, pdfMode)
 
-		console.log(`[Presupuestos] PDF ${pdfMode} guardado en: ${filePath}`)
+		console.log(`[Presupuestos] PDF ${pdfMode} guardado en: ${filePath}${usedFallback ? " (fallback)" : ""}`)
 
 		res.setHeader("Content-Type", "application/pdf")
 		res.setHeader("Content-Disposition", `attachment; filename="${nombreArchivo}"`)
@@ -1642,10 +1748,16 @@ router.get("/:id/pdf-materiales", async (req, res) => {
 			return res.status(404).json({ error: "Presupuesto no encontrado" })
 		}
 
-		const { buffer, filePath } = await syncPresupuestoPdfStorage(presupuesto, null, "materiales")
+		const buffer = await renderPresupuestoPdfBuffer(presupuesto, { mode: "materiales" })
+		const { filePath, usedFallback } = await writePresupuestoPdfToDisk({
+			presupuesto,
+			mode: "materiales",
+			buffer,
+			context: "download_materiales",
+		})
 		const nombreArchivo = getPresupuestoPdfFileName(presupuesto, "materiales")
 
-		console.log(`[Presupuestos] PDF materiales guardado en: ${filePath}`)
+		console.log(`[Presupuestos] PDF materiales guardado en: ${filePath}${usedFallback ? " (fallback)" : ""}`)
 
 		res.setHeader("Content-Type", "application/pdf")
 		res.setHeader("Content-Disposition", `attachment; filename="${nombreArchivo}"`)
