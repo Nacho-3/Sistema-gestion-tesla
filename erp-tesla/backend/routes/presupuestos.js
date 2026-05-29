@@ -36,6 +36,22 @@ const toNumber = (value, fallback = 0) => {
 	return Number.isFinite(n) ? n : fallback
 }
 
+const roundMoney = (value) => Math.round((toNumber(value, 0) + Number.EPSILON) * 100) / 100
+const ESTADOS_DEUDA_PRESUPUESTO = new Set(["aceptado", "aprobado"])
+
+const normalizarEstadoPresupuesto = (estado = "") => String(estado || "").toLowerCase().trim()
+const esEstadoConDeuda = (estado) => ESTADOS_DEUDA_PRESUPUESTO.has(normalizarEstadoPresupuesto(estado))
+
+const calcularEstadoCobroPresupuesto = ({ deudaComputable, totalConIva, pagadoCaja }) => {
+	if (!deudaComputable) return "sin_deuda"
+	const total = roundMoney(totalConIva)
+	const pagado = roundMoney(pagadoCaja)
+	if (pagado <= 0) return "pendiente"
+	if (pagado < total) return "parcial"
+	if (pagado === total) return "pagado"
+	return "a_favor"
+}
+
 const sanitizeDescripcion = (value = "") => String(value).trim()
 
 const normalizeItems = (items = [], tipo = "material") => {
@@ -1200,6 +1216,8 @@ router.get("/", async (req, res) => {
 					p.fecha,
 					p.estado,
 					p.total,
+					COALESCE(p.total - p.iva_monto, p.total, 0) AS total_sin_iva,
+					COALESCE(p.iva_monto, 0) AS total_iva,
 					p.indice_cac_base_id,
 					p.forma_pago,
 					COALESCE(cert.cantidad_certificados, 0) AS cantidad_certificados,
@@ -1207,6 +1225,7 @@ router.get("/", async (req, res) => {
 					COALESCE(cert.total_certificado_con_iva, 0) AS total_certificado_con_iva,
 					COALESCE(cert.total_pagado_certificados, 0) AS total_pagado_certificados,
 					COALESCE(cert.tiene_pendientes, false) AS tiene_certificados_pendientes,
+					COALESCE(pc.total_pagado_caja, 0) AS total_pagado_caja,
 					COALESCE(NULLIF(TRIM(c.empresa), ''), c.razon_social) AS cliente,
 					c.telefono AS cliente_telefono,
 					o.nombre AS obra
@@ -1224,11 +1243,45 @@ router.get("/", async (req, res) => {
 					FROM certificados
 					GROUP BY presupuesto_id
 				) cert ON cert.presupuesto_id = p.id
+				LEFT JOIN (
+					SELECT presupuesto_id, SUM(monto_total) AS total_pagado_caja
+					FROM movimientos_caja
+					WHERE tipo = 'ingreso' AND presupuesto_id IS NOT NULL
+					GROUP BY presupuesto_id
+				) pc ON pc.presupuesto_id = p.id
 				ORDER BY p.created_at DESC
 			`
 		)
 
-		res.json(result.rows)
+		const presupuestos = (result.rows || []).map((row) => {
+			const totalConIva = roundMoney(row.total)
+			const totalSinIva = roundMoney(row.total_sin_iva)
+			const totalIva = roundMoney(row.total_iva)
+			const pagadoCaja = roundMoney(row.total_pagado_caja)
+			const deudaComputable = esEstadoConDeuda(row.estado)
+			const saldoRaw = roundMoney(totalConIva - pagadoCaja)
+			const saldoPendiente = deudaComputable ? roundMoney(Math.max(0, saldoRaw)) : 0
+			const saldoAFavor = deudaComputable ? roundMoney(Math.max(0, -saldoRaw)) : 0
+			const estadoCobro = calcularEstadoCobroPresupuesto({
+				deudaComputable,
+				totalConIva,
+				pagadoCaja,
+			})
+
+			return {
+				...row,
+				total: totalConIva,
+				total_sin_iva: totalSinIva,
+				total_iva: totalIva,
+				total_pagado_caja: pagadoCaja,
+				deuda_computable: deudaComputable,
+				saldo_pendiente_cobro: saldoPendiente,
+				saldo_a_favor_cobro: saldoAFavor,
+				estado_cobro: estadoCobro,
+			}
+		})
+
+		res.json(presupuestos)
 	} catch (err) {
 		res.status(500).json({ error: err.message })
 	}

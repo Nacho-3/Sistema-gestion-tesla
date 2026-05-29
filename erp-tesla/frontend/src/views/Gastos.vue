@@ -18,6 +18,7 @@ const loading = ref(false)
 const error = ref("")
 const guardando = ref(false)
 const generandoPdf = ref(false)
+const showResumenModal = ref(false)
 
 const showForm = ref(false)
 const editandoID = ref(null)
@@ -131,20 +132,30 @@ const guardarGasto = async () => {
 
 }
 
-const descargarResumenPdf = async () => {
+const abrirModalResumenPdf = () => {
+    showResumenModal.value = true
+}
+
+const cerrarModalResumenPdf = () => {
+    if (generandoPdf.value) return
+    showResumenModal.value = false
+}
+
+const descargarResumenPdf = async (tiposSeleccionados = tipos.value.map((tipo) => tipo.key), sufijo = "General") => {
     generandoPdf.value = true
     error.value = ""
     try {
-        const res = await api.getGastosResumenPdf(mes.value, anio.value, tipos.value.map((tipo) => tipo.key))
+        const res = await api.getGastosResumenPdf(mes.value, anio.value, tiposSeleccionados)
         const blob = new Blob([res.data], { type: "application/pdf" })
         const url = window.URL.createObjectURL(blob)
         const link = document.createElement("a")
         link.href = url
-        link.download = `Resumen Gastos ${String(mes.value).padStart(2, "0")}-${anio.value}.pdf`
+        link.download = `Resumen Gastos ${sufijo} ${String(mes.value).padStart(2, "0")}-${anio.value}.pdf`
         document.body.appendChild(link)
         link.click()
         link.remove()
         window.URL.revokeObjectURL(url)
+        showResumenModal.value = false
     } catch (err) {
         error.value = "Error al generar PDF de gastos: " + (err?.response?.data?.error || err.message)
     } finally {
@@ -199,7 +210,7 @@ onMounted(cargarGastos)
                     </div>
                 </div>
 
-                <button class="btn-imprimir-resumen" :disabled="generandoPdf || loading" @click="descargarResumenPdf">
+                <button class="btn-imprimir-resumen" :disabled="generandoPdf || loading" @click="abrirModalResumenPdf">
                     {{ generandoPdf ? "Generando..." : "Imprimir resumen" }}
                 </button>
 
@@ -284,6 +295,24 @@ onMounted(cargarGastos)
                     {{ guardando ? "Guardando..." : "Guardar" }}
                 </button>
                 <button @click="cerrarForm" type="button">Cancelar</button>
+                </div>
+            </div>
+        </div>
+
+        <div v-if="showResumenModal" class="modal-overlay" @click.self="cerrarModalResumenPdf">
+            <div class="modal modal-resumen-opciones">
+                <h3>Descargar resumen de gastos</h3>
+                <p class="modal-resumen-texto">Elegí qué resumen querés descargar para {{ String(mes).padStart(2, "0") }}/{{ anio }}.</p>
+
+                <div class="modal-resumen-botones">
+                    <button type="button" :disabled="generandoPdf" @click="descargarResumenPdf(['tesla'], 'Tesla')">Gastos Tesla</button>
+                    <button type="button" :disabled="generandoPdf" @click="descargarResumenPdf(['facu'], 'Facu')">Gastos Facu</button>
+                    <button type="button" :disabled="generandoPdf" @click="descargarResumenPdf(['juani'], 'Juani')">Gastos Juani</button>
+                    <button type="button" class="btn-resumen-general" :disabled="generandoPdf" @click="descargarResumenPdf(['tesla', 'facu', 'juani'], 'General')">Resumen General (los 3)</button>
+                </div>
+
+                <div class="modal-actions">
+                    <button type="button" @click="cerrarModalResumenPdf" :disabled="generandoPdf">Cerrar</button>
                 </div>
             </div>
         </div>
@@ -599,5 +628,51 @@ onMounted(cargarGastos)
 	text-align: center;
 	color: #64748b;
 	padding: 1rem 0 !important;
+}
+
+.modal-resumen-opciones {
+    width: min(92vw, 520px);
+}
+
+.modal-resumen-texto {
+    margin: 0;
+    color: #cbd5e1;
+    font-size: 0.9rem;
+}
+
+.modal-resumen-botones {
+    display: grid;
+    gap: 0.55rem;
+    margin-top: 0.45rem;
+}
+
+.modal-resumen-botones button {
+    width: 100%;
+    padding: 0.62rem 0.8rem;
+    border-radius: 8px;
+    border: 1px solid rgba(59, 130, 246, 0.35);
+    background: rgba(59, 130, 246, 0.18);
+    color: #bfdbfe;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.modal-resumen-botones button:hover:not(:disabled) {
+    background: rgba(59, 130, 246, 0.27);
+}
+
+.modal-resumen-botones button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.modal-resumen-botones .btn-resumen-general {
+    border-color: rgba(34, 197, 94, 0.35);
+    background: rgba(34, 197, 94, 0.16);
+    color: #bbf7d0;
+}
+
+.modal-resumen-botones .btn-resumen-general:hover:not(:disabled) {
+    background: rgba(34, 197, 94, 0.24);
 }
 </style>

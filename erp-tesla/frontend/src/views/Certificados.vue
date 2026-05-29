@@ -92,7 +92,12 @@ const indiceCacEfectivo = computed(() => {
   return 1
 })
 
-const indiceCacVariacionPorcentual = computed(() => ((indiceCacEfectivo.value - 1) * 100) || 0)
+const indiceCacEfectivoRedondeado = computed(() => {
+  const valor = Number(indiceCacEfectivo.value) || 1
+  return Math.round((valor + Number.EPSILON) * 10000) / 10000
+})
+
+const indiceCacVariacionPorcentual = computed(() => ((indiceCacEfectivoRedondeado.value - 1) * 100) || 0)
 const indiceCacBaseSeleccionado = computed(() => indicesCac.value.find((item) => Number(item.id) === Number(form.value.indice_cac_base_sel)) || null)
 const indiceCacActualSeleccionado = computed(() => indicesCac.value.find((item) => Number(item.id) === Number(form.value.indice_cac_actual_sel)) || null)
 const ultimoIndiceCac = computed(() => indicesCac.value?.[0] || null)
@@ -145,8 +150,8 @@ watch(() => indicesCac.value.length, () => {
   prefillIndiceActual()
 })
 
-const ajustePorcentajeEfectivo = computed(() => ((indiceCacEfectivo.value - 1) * 100) || 0)
-const actualizacion = computed(() => montoBaseCalculado.value * (indiceCacEfectivo.value - 1))
+const ajustePorcentajeEfectivo = computed(() => ((indiceCacEfectivoRedondeado.value - 1) * 100) || 0)
+const actualizacion = computed(() => montoBaseCalculado.value * (indiceCacEfectivoRedondeado.value - 1))
 const totalCertSinIva = computed(() => montoBaseCalculado.value + actualizacion.value)
 const iva = computed(() => {
   if (!form.value.aplica_iva) return 0
@@ -356,7 +361,7 @@ const saveCertificado = async () => {
       tipo_registro: form.value.tipo_registro,
       porcentaje_avance: Number(form.value.porcentaje_avance) || 0,
       monto_base: Number(form.value.monto_base) || 0,
-      indice_cac: indiceCacEfectivo.value,
+      indice_cac: indiceCacEfectivoRedondeado.value,
       indice_base_cac: Number(form.value.indice_cac_base || indiceCacBaseSeleccionado.value?.valor || presupuestoSeleccionado.value?.indice_base_cac || 0),
       indice_actual_cac: Number(form.value.indice_cac_actual || indiceCacActualSeleccionado.value?.valor || 0),
       aplica_iva: Boolean(form.value.aplica_iva),
@@ -540,12 +545,12 @@ onUnmounted(() => {
 
           <div class="gen-col-2">
             <label>Factor efectivo</label>
-            <input :value="Number(indiceCacEfectivo).toFixed(6)" type="text" readonly />
+            <input :value="Number(indiceCacEfectivoRedondeado).toFixed(4)" type="text" readonly />
           </div>
 
           <div class="gen-col-2">
             <label>Diferencia CAC</label>
-            <input :value="`${Number(indiceCacVariacionPorcentual).toFixed(4)}%`" type="text" readonly />
+            <input :value="`${Number(indiceCacVariacionPorcentual).toFixed(2)}%`" type="text" readonly />
           </div>
 
           <div class="field-card checkbox-card gen-col-2">
@@ -752,12 +757,12 @@ onUnmounted(() => {
 
             <div class="field-card">
               <label>Factor efectivo</label>
-              <input :value="Number(indiceCacEfectivo).toFixed(6)" type="text" readonly />
+              <input :value="Number(indiceCacEfectivoRedondeado).toFixed(4)" type="text" readonly />
             </div>
 
             <div class="field-card">
               <label>Ajuste CAC efectivo</label>
-              <input :value="`${Number(ajustePorcentajeEfectivo).toFixed(4)}%`" type="text" readonly />
+              <input :value="`${Number(ajustePorcentajeEfectivo).toFixed(2)}%`" type="text" readonly />
             </div>
 
             <div class="field-card checkbox-card">

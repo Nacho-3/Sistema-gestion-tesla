@@ -28,6 +28,79 @@ const normalizeEstado = (estado = "") => {
   return estado || "-"
 }
 
+const roundMoney = (value) => Math.round(((Number(value) || 0) + Number.EPSILON) * 100) / 100
+const formatMoneyAr = (value) =>
+  roundMoney(value).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const formatSignedMoneyAr = (value) => {
+  const amount = roundMoney(value)
+  const formatted = formatMoneyAr(Math.abs(amount))
+  if (amount > 0) return formatted
+  if (amount < 0) return `- ${formatted}`
+  return formatted
+}
+
+const normalizeDateOnly = (value) => {
+  if (!value) return null
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return null
+  return parsed.toISOString().slice(0, 10)
+}
+
+const labelMedioPago = (medio = "") => {
+  const key = String(medio || "").toLowerCase().trim()
+  if (key === "efectivo") return "EFEC"
+  if (key === "transferencia") return "TRANSF"
+  if (key === "cheque") return "CHEQ"
+  if (key === "echeq") return "ECHEQ"
+  if (key === "retencion") return "RET"
+  return "-"
+}
+
+const toSortableDateKey = (value) => {
+  if (!value) return "0000-00-00"
+
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 10)
+  }
+
+  const asText = String(value)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(asText)) {
+    return asText
+  }
+
+  const parsed = new Date(asText)
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toISOString().slice(0, 10)
+  }
+
+  return asText
+}
+
+const hasTableColumn = async (tableName, columnName) => {
+  const result = await pool.query(
+    `
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = $1
+        AND column_name = $2
+      LIMIT 1
+    `,
+    [tableName, columnName]
+  )
+  return (result.rowCount || 0) > 0
+}
+
+const getFirstExistingColumn = async (tableName, candidates = []) => {
+  for (const candidate of candidates) {
+    if (await hasTableColumn(tableName, candidate)) {
+      return candidate
+    }
+  }
+  return null
+}
+
 // Listar todos los clientes activos
 router.get("/", async (req, res) => {
   try {
@@ -54,7 +127,7 @@ router.get("/:id", async (req, res) => {
 
     const { data: cliente, error: clienteError } = await db
       .from("clientes")
-      .select("razon_social, cuit, direccion, telefono, email, iva") // Aseguramos que 'iva' esté incluido
+      .select("razon_social, cuit, direccion, telefono, email, iva, empresa, saldo_inicial_arrastre, fecha_saldo_inicial_arrastre, nota_saldo_inicial_arrastre")
       .eq("id", id)
       .single()
 
@@ -75,7 +148,7 @@ router.get("/:id/ficha-pdf", async (req, res) => {
 
     const { data: cliente, error: clienteError } = await db
       .from("clientes")
-      .select("razon_social, empresa, cuit, direccion, telefono, email, iva")
+      .select("razon_social, empresa, cuit, direccion, telefono, email, iva, saldo_inicial_arrastre, fecha_saldo_inicial_arrastre, nota_saldo_inicial_arrastre")
       .eq("id", id)
       .single()
 
@@ -129,17 +202,31 @@ router.get("/:id/ficha-pdf", async (req, res) => {
 
     if (obrasError) throw obrasError
 
+    const presupuestosTieneIvaMonto = await hasTableColumn("presupuestos", "iva_monto")
+    const columnaDetalleMovimiento = await getFirstExistingColumn("movimientos_caja", ["detalle", "descripcion"]) || "detalle"
+    const movimientosTienePresupuestoId = await hasTableColumn("movimientos_caja", "presupuesto_id")
+
+    const selectPresupuestos = ["id", "numero", "fecha", "estado", "total", "obra_id"]
+    if (presupuestosTieneIvaMonto) {
+      selectPresupuestos.push("iva_monto")
+    }
+
     const { data: presupuestos, error: presupuestosError } = await db
       .from("presupuestos")
-      .select("id, numero, fecha, estado, total, obra_id")
+      .select(selectPresupuestos.join(", "))
       .eq("cliente_id", id)
       .order("fecha", { ascending: false })
 
     if (presupuestosError) throw presupuestosError
 
+    const selectMovimientos = ["id", "fecha", columnaDetalleMovimiento, "monto_total", "observaciones"]
+    if (movimientosTienePresupuestoId) {
+      selectMovimientos.push("presupuesto_id")
+    }
+
     const { data: movimientosCaja, error: movimientosCajaError } = await db
       .from("movimientos_caja")
-      .select("fecha, detalle, monto_total, observaciones")
+      .select(selectMovimientos.join(", "))
       .eq("cliente_id", id)
       .eq("tipo", "ingreso")
       .order("fecha", { ascending: true })
@@ -148,18 +235,151 @@ router.get("/:id/ficha-pdf", async (req, res) => {
 
     const obrasList = obras || []
     const presupuestosList = presupuestos || []
-    const movimientosList = movimientosCaja || []
+    const movimientosList = (movimientosCaja || []).map((mov) => ({
+      ...mov,
+      detalle: mov?.[columnaDetalleMovimiento] || mov?.detalle || "-",
+      presupuesto_id: movimientosTienePresupuestoId ? mov?.presupuesto_id ?? null : null,
+    }))
+
+    const mediosPorMovimiento = new Map()
+    const movimientoIds = movimientosList
+      .map((mov) => Number(mov.id || 0))
+      .filter((movId) => Number.isInteger(movId) && movId > 0)
+
+    if (movimientoIds.length > 0) {
+      const detallesPagosRes = await pool.query(
+        `
+          SELECT movimiento_id, medio_pago
+          FROM detalles_medio_pago
+          WHERE movimiento_id = ANY($1::int[])
+        `,
+        [movimientoIds]
+      )
+
+      for (const row of detallesPagosRes.rows || []) {
+        const movId = Number(row.movimiento_id)
+        const actual = mediosPorMovimiento.get(movId) || new Set()
+        actual.add(labelMedioPago(row.medio_pago))
+        mediosPorMovimiento.set(movId, actual)
+      }
+    }
 
     const obraNombrePorId = new Map(obrasList.map((obra) => [Number(obra.id), obra.nombre || "Sin obra"]))
     const isAceptado = (p) => ["aprobado", "aceptado"].includes(String(p.estado || "").toLowerCase())
+    const saldoInicialArrastre = roundMoney(cliente?.saldo_inicial_arrastre)
+    const fechaSaldoInicial = normalizeDateOnly(cliente?.fecha_saldo_inicial_arrastre) || "0000-00-00"
+    const notaSaldoInicial = String(cliente?.nota_saldo_inicial_arrastre || "").trim()
 
-    const totalObras = obrasList.length
-    const obrasActivas = obrasList.filter((obra) => obra.estado === "activa").length
-    const obrasFinalizadas = obrasList.filter((obra) => obra.estado !== "activa").length
+    const presupuestosAceptadosList = presupuestosList.filter(isAceptado)
+    const presupuestoById = new Map(presupuestosList.map((p) => [Number(p.id), p]))
 
-    const totalPresupuestos = presupuestosList.length
-    const presupuestosAceptados = presupuestosList.filter(isAceptado).length
-    const presupuestosPendientes = totalPresupuestos - presupuestosAceptados
+    const pagosImputadosPorPresupuesto = new Map()
+    const pagosNoImputadosList = []
+    movimientosList.forEach((mov) => {
+      const presupuestoId = Number(mov.presupuesto_id || 0)
+      const monto = roundMoney(mov.monto_total)
+      if (presupuestoId > 0) {
+        pagosImputadosPorPresupuesto.set(presupuestoId, roundMoney((pagosImputadosPorPresupuesto.get(presupuestoId) || 0) + monto))
+      } else {
+        pagosNoImputadosList.push(mov)
+      }
+    })
+
+    const estadoCuenta = presupuestosAceptadosList.map((p) => {
+      const total = roundMoney(p.total)
+      const iva = roundMoney(p.iva_monto)
+      const sinIva = roundMoney(total - iva)
+      const pagado = roundMoney(pagosImputadosPorPresupuesto.get(Number(p.id)) || 0)
+      const saldoPendiente = roundMoney(Math.max(0, total - pagado))
+      const saldoAFavor = roundMoney(Math.max(0, pagado - total))
+      const estadoCobro = pagado <= 0 ? "Pendiente" : (pagado < total ? "Parcial" : (pagado === total ? "Pagado" : "A favor"))
+      return {
+        presupuesto_id: Number(p.id),
+        numero: p.numero,
+        fecha: p.fecha,
+        obra: obraNombrePorId.get(Number(p.obra_id)) || "Sin obra",
+        sin_iva: sinIva,
+        iva,
+        total,
+        pagado,
+        saldo_pendiente: saldoPendiente,
+        saldo_a_favor: saldoAFavor,
+        estado_cobro: estadoCobro,
+      }
+    })
+
+    const totalCargosPresupuestos = roundMoney(estadoCuenta.reduce((acc, item) => acc + item.total, 0))
+    const totalPagosCaja = roundMoney(movimientosList.reduce((acc, mov) => acc + roundMoney(mov.monto_total), 0))
+    const totalNoImputado = roundMoney(pagosNoImputadosList.reduce((acc, mov) => acc + roundMoney(mov.monto_total), 0))
+    const saldoPendienteFinal = roundMoney(saldoInicialArrastre + totalCargosPresupuestos - totalPagosCaja)
+
+    const ledgerRows = []
+    ledgerRows.push({
+      kind: "saldo_inicial",
+      sortDate: fechaSaldoInicial,
+      nro: "SI",
+      fecha: fechaSaldoInicial !== "0000-00-00" ? new Date(fechaSaldoInicial).toLocaleDateString("es-AR") : "-",
+      obra: notaSaldoInicial || "Arrastre sistema anterior",
+      importe_sin_iva: "",
+      iva: "",
+      total: formatSignedMoneyAr(saldoInicialArrastre),
+      medio: "ARRASTRE",
+      signedAmount: saldoInicialArrastre,
+    })
+
+    for (const p of presupuestosAceptadosList) {
+      const total = roundMoney(p.total)
+      const iva = roundMoney(p.iva_monto)
+      const sinIva = roundMoney(total - iva)
+      const obra = obraNombrePorId.get(Number(p.obra_id)) || "Sin obra"
+      ledgerRows.push({
+        kind: "cargo",
+        sortDate: p.fecha || "0000-00-00",
+        nro: String(p.numero || "-"),
+        fecha: p.fecha ? new Date(p.fecha).toLocaleDateString("es-AR") : "-",
+        obra,
+        importe_sin_iva: formatMoneyAr(sinIva),
+        iva: formatMoneyAr(iva),
+        total: formatMoneyAr(total),
+        medio: "",
+        signedAmount: total,
+      })
+    }
+
+    for (const mov of movimientosList) {
+      const monto = roundMoney(mov.monto_total)
+      const presupuestoRef = Number(mov.presupuesto_id || 0) > 0 ? presupuestoById.get(Number(mov.presupuesto_id)) : null
+      const obra = presupuestoRef ? (obraNombrePorId.get(Number(presupuestoRef.obra_id)) || "Sin obra") : "PAGO C/CHEQS"
+      const nroFc = presupuestoRef ? String(presupuestoRef.numero || "-") : "-"
+      const medios = [...(mediosPorMovimiento.get(Number(mov.id || 0)) || new Set())]
+      ledgerRows.push({
+        kind: "pago",
+        sortDate: mov.fecha || "0000-00-00",
+        nro: nroFc,
+        fecha: mov.fecha ? new Date(mov.fecha).toLocaleDateString("es-AR") : "-",
+        obra,
+        importe_sin_iva: "",
+        iva: "",
+        total: `- ${formatMoneyAr(monto)}`,
+        medio: medios.join("/") || "-",
+        signedAmount: -monto,
+      })
+    }
+
+    ledgerRows.sort((a, b) => {
+      const aDateKey = toSortableDateKey(a.sortDate)
+      const bDateKey = toSortableDateKey(b.sortDate)
+      if (aDateKey !== bDateKey) return aDateKey.localeCompare(bDateKey)
+      const order = { saldo_inicial: 0, cargo: 1, pago: 2 }
+      return (order[a.kind] ?? 99) - (order[b.kind] ?? 99)
+    })
+
+    let pendienteAcumulado = 0
+    ledgerRows.forEach((row) => {
+      pendienteAcumulado = roundMoney(pendienteAcumulado + row.signedAmount)
+      row.pendiente = formatMoneyAr(pendienteAcumulado)
+      row.pendienteColor = pendienteAcumulado > 0 ? "#b91c1c" : "#065f46"
+    })
 
     // start content a bit lower to avoid overlapping long headers
     let cursorY = headerBottom + 48
@@ -181,18 +401,22 @@ router.get("/:id/ficha-pdf", async (req, res) => {
       doc.fillColor(PDF_COLORS.ink)
     }
 
-    const drawRowCard = (rows = []) => {
-      ensureSpace(80)
-      const cardHeight = 56
-      doc.roundedRect(45, cursorY, pageWidth - 90, cardHeight, 6).fill(PDF_COLORS.card)
-      doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(10)
-      // render three columns evenly
+    const drawSummaryGrid = (rows = []) => {
+      ensureSpace(72)
+      const cardHeight = 48
       const availableWidth = pageWidth - 90
-      const colW = Math.floor(availableWidth / Math.max(rows.length, 1))
+      const colW = availableWidth / Math.max(rows.length, 1)
+
       rows.forEach((item, idx) => {
-        const x = 45 + idx * colW + 12
-        doc.text(item, x, cursorY + 14, { width: colW - 20 })
+        const x = 45 + idx * colW
+        doc.rect(x, cursorY, colW, cardHeight).fillAndStroke("#f8fafc", PDF_COLORS.line)
+        const [title, value] = String(item).split("\n")
+        doc.fillColor(PDF_COLORS.slate).font("Helvetica-Bold").fontSize(8)
+        doc.text(title || "", x + 8, cursorY + 9, { width: colW - 16 })
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica-Bold").fontSize(12)
+        doc.text(value || "", x + 8, cursorY + 22, { width: colW - 16 })
       })
+
       doc.fillColor(PDF_COLORS.ink)
       cursorY += cardHeight + 12
     }
@@ -212,6 +436,7 @@ router.get("/:id/ficha-pdf", async (req, res) => {
       rows,
       emptyText,
       rowHeight = 22,
+      useGrid = false,
     }) => {
       ensureSpace(30)
 
@@ -238,6 +463,13 @@ router.get("/:id/ficha-pdf", async (req, res) => {
         ensureSpace(rowHeight + 6)
         const fill = idx % 2 === 0 ? PDF_COLORS.light : PDF_COLORS.lightAlt
         doc.rect(45, cursorY, pageWidth - 90, rowHeight).fill(fill)
+        if (useGrid) {
+          doc.rect(45, cursorY, pageWidth - 90, rowHeight).lineWidth(0.4).strokeColor(PDF_COLORS.line).stroke()
+          columns.forEach((col, colIdx) => {
+            if (colIdx === 0) return
+            doc.moveTo(col.x - 4, cursorY).lineTo(col.x - 4, cursorY + rowHeight).lineWidth(0.3).strokeColor(PDF_COLORS.line).stroke()
+          })
+        }
         doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9.2)
         columns.forEach((col) => {
           const text = String(row[col.key] ?? "-")
@@ -276,45 +508,109 @@ router.get("/:id/ficha-pdf", async (req, res) => {
       emptyText: "No hay obras asociadas a este cliente.",
     })
 
-    drawSectionTitle("PRESUPUESTOS")
+    drawSectionTitle("ESTADO DE CUENTA")
+    drawSummaryGrid([
+      `Saldo inicial\n$ ${formatMoneyAr(saldoInicialArrastre)}`,
+      `Cargos presupuestos\n$ ${formatMoneyAr(totalCargosPresupuestos)}`,
+      `Pagos por caja\n$ ${formatMoneyAr(totalPagosCaja)}`,
+      `No imputado\n$ ${formatMoneyAr(totalNoImputado)}`,
+      `Saldo pendiente final\n$ ${formatMoneyAr(saldoPendienteFinal)}`,
+    ])
+
     drawTable({
       columns: [
-        { key: "numero", label: "NUMERO", x: 55, width: 70 },
-        { key: "obra", label: "OBRA", x: 130, width: 190 },
-        { key: "estado", label: "ESTADO", x: 325, width: 85 },
-        { key: "fecha", label: "FECHA", x: 415, width: 70 },
-        { key: "total", label: "TOTAL", x: 490, width: 60, align: "right" },
+        { key: "numero", label: "NRO", x: 55, width: 30 },
+        { key: "fecha", label: "FECHA", x: 87, width: 52 },
+        { key: "obra", label: "OBRA", x: 141, width: 88 },
+        { key: "sin_iva", label: "S/IVA", x: 233, width: 54, align: "right" },
+        { key: "iva", label: "IVA", x: 289, width: 42, align: "right" },
+        { key: "total", label: "TOTAL", x: 335, width: 54, align: "right" },
+        { key: "pagado", label: "PAGADO", x: 391, width: 54, align: "right" },
+        { key: "saldo", label: "SALDO", x: 447, width: 54, align: "right" },
+        { key: "estado", label: "ESTADO", x: 503, width: 43 },
       ],
-      rows: presupuestosList.map((p) => ({
+      rows: estadoCuenta.map((p) => ({
         numero: `#${p.numero || "-"}`,
-        obra: obraNombrePorId.get(Number(p.obra_id)) || "Sin obra",
-        estado: String(p.estado || "-").toUpperCase(),
         fecha: p.fecha ? new Date(p.fecha).toLocaleDateString("es-AR") : "-",
-        total: Number(p.total || 0).toLocaleString("es-AR", { minimumFractionDigits: 2 }),
+        obra: p.obra,
+        sin_iva: formatMoneyAr(p.sin_iva),
+        iva: formatMoneyAr(p.iva),
+        total: formatMoneyAr(p.total),
+        pagado: formatMoneyAr(p.pagado),
+        saldo: formatMoneyAr(p.saldo_pendiente),
+        estado: p.estado_cobro,
       })),
-      emptyText: "No hay presupuestos asociados a este cliente.",
+      emptyText: "No hay presupuestos aceptados para estado de cuenta.",
+      rowHeight: 20,
+      useGrid: true,
     })
 
-    drawSectionTitle("MOVIMIENTOS DE CAJA (INGRESOS)")
-    // Columns: Fecha | Detalle |       Monto |    Observaciones
-    drawTable({
-      columns: [
-        { key: "fecha", label: "FECHA", x: 55, width: 80 },
-        { key: "detalle", label: "DETALLE", x: 140, width: 260 },
-        // move MONTO further left and give it more width
-        { key: "monto", label: "MONTO", x: 300, width: 130, align: "right" },
-        // start OBSERVACIONES further right and increase width
-        { key: "observaciones", label: "OBSERVACIONES", x: 460, width: pageWidth - 460 - 45 },
-      ],
-      rows: movimientosList.map((mov) => ({
-        fecha: mov.fecha ? new Date(mov.fecha).toLocaleDateString("es-AR") : "-",
-        detalle: mov.detalle || "-",
-        monto: Number(mov.monto_total || 0).toLocaleString("es-AR", { minimumFractionDigits: 2 }),
-        observaciones: mov.observaciones || "-",
-      })),
-      emptyText: "No hay movimientos de caja asociados a este cliente.",
-      rowHeight: 22,
-    })
+    drawSectionTitle("CUENTA CORRIENTE HISTORICA")
+
+    const drawLedgerHeader = () => {
+      ensureSpace(26)
+      doc.rect(45, cursorY, pageWidth - 90, 22).fill(PDF_COLORS.navy)
+      doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(7.2)
+
+      const cols = [
+        { key: "nro", label: "NRO", x: 45, width: 40 },
+        { key: "fecha", label: "FECHA", x: 85, width: 56 },
+        { key: "obra", label: "OBRA", x: 141, width: 102 },
+        { key: "importe_sin_iva", label: "IMPORTE S/IVA", x: 243, width: 74 },
+        { key: "iva", label: "IVA", x: 317, width: 50 },
+        { key: "total", label: "TOTAL", x: 367, width: 74 },
+        { key: "medio", label: "MEDIO", x: 441, width: 54 },
+        { key: "pendiente", label: "PENDIENTE", x: 495, width: 55 },
+      ]
+
+      cols.forEach((col) => {
+        doc.text(col.label, col.x + 1, cursorY + 7, { width: col.width - 2, align: "left" })
+      })
+
+      cursorY += 22
+      return cols
+    }
+
+    const ledgerCols = drawLedgerHeader()
+
+    if (!ledgerRows.length) {
+      ensureSpace(24)
+      doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(9)
+      doc.text("No hay movimientos para la cuenta corriente del cliente.", 45, cursorY + 4)
+      cursorY += 26
+    } else {
+      ledgerRows.forEach((row, idx) => {
+        if (cursorY + 18 > doc.page.height - footerSafe) {
+          doc.addPage()
+          cursorY = 60
+          drawLedgerHeader()
+        }
+
+        const fill = idx % 2 === 0 ? PDF_COLORS.light : PDF_COLORS.lightAlt
+        doc.rect(45, cursorY, pageWidth - 90, 18).fill(fill)
+        doc.rect(45, cursorY, pageWidth - 90, 18).lineWidth(0.35).strokeColor(PDF_COLORS.line).stroke()
+        ledgerCols.forEach((col, colIdx) => {
+          if (colIdx === 0) return
+          doc.moveTo(col.x, cursorY).lineTo(col.x, cursorY + 18).lineWidth(0.25).strokeColor(PDF_COLORS.line).stroke()
+        })
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(7.4)
+
+        ledgerCols.forEach((col) => {
+          const text = String(row[col.key] ?? "")
+          if (col.key === "pendiente") {
+            doc.fillColor(row.pendienteColor || PDF_COLORS.ink).font("Helvetica-Bold")
+            doc.text(text, col.x + 1, cursorY + 6, { width: col.width - 2, align: "right", ellipsis: true })
+            doc.fillColor(PDF_COLORS.ink).font("Helvetica")
+            return
+          }
+          const align = ["importe_sin_iva", "iva", "total", "pendiente"].includes(col.key) ? "right" : "left"
+          doc.text(text, col.x + 1, cursorY + 6, { width: col.width - 2, align, ellipsis: true })
+        })
+
+        cursorY += 18
+      })
+      cursorY += 10
+    }
 
     doc.end()
   } catch (err) {
@@ -333,6 +629,9 @@ router.post("/", async (req, res) => {
       telefono,
       email,
       iva,
+      saldo_inicial_arrastre,
+      fecha_saldo_inicial_arrastre,
+      nota_saldo_inicial_arrastre,
     } = req.body;
 
     const razonSocialFinal = razon_social?.trim() || "-";
@@ -342,6 +641,9 @@ router.post("/", async (req, res) => {
     const telefonoFinal = telefono?.trim() || "-";
     const emailFinal = email?.trim() || "-";
     const ivaFinal = iva?.trim() || "-";
+    const saldoInicialArrastreFinal = roundMoney(saldo_inicial_arrastre)
+    const fechaSaldoInicialFinal = normalizeDateOnly(fecha_saldo_inicial_arrastre) || new Date().toISOString().slice(0, 10)
+    const notaSaldoInicialFinal = String(nota_saldo_inicial_arrastre || "").trim()
 
     const { data, error } = await db
       .from("clientes")
@@ -354,6 +656,9 @@ router.post("/", async (req, res) => {
           telefono: telefonoFinal,
           email: emailFinal,
           iva: ivaFinal,
+          saldo_inicial_arrastre: saldoInicialArrastreFinal,
+          fecha_saldo_inicial_arrastre: fechaSaldoInicialFinal,
+          nota_saldo_inicial_arrastre: notaSaldoInicialFinal,
           activo: true,
         },
       ])
@@ -380,6 +685,9 @@ router.put("/:id", async (req, res) => {
       telefono,
       email,
       iva,
+      saldo_inicial_arrastre,
+      fecha_saldo_inicial_arrastre,
+      nota_saldo_inicial_arrastre,
     } = req.body;
 
     const actualizaciones = {};
@@ -390,6 +698,17 @@ router.put("/:id", async (req, res) => {
     if (telefono !== undefined) actualizaciones.telefono = (telefono ?? "").trim() || "-";
     if (email !== undefined) actualizaciones.email = (email ?? "").trim() || "-";
     if (iva !== undefined) actualizaciones.iva = (iva ?? "").trim() || "-";
+    if (saldo_inicial_arrastre !== undefined) actualizaciones.saldo_inicial_arrastre = roundMoney(saldo_inicial_arrastre);
+    if (fecha_saldo_inicial_arrastre !== undefined) {
+      const fechaNormalizada = normalizeDateOnly(fecha_saldo_inicial_arrastre)
+      if (!fechaNormalizada) {
+        return res.status(400).json({ error: "fecha_saldo_inicial_arrastre invalida" })
+      }
+      actualizaciones.fecha_saldo_inicial_arrastre = fechaNormalizada
+    }
+    if (nota_saldo_inicial_arrastre !== undefined) {
+      actualizaciones.nota_saldo_inicial_arrastre = String(nota_saldo_inicial_arrastre || "").trim()
+    }
 
     const { data, error } = await db
       .from("clientes")

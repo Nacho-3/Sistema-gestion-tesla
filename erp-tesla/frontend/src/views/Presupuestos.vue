@@ -272,6 +272,12 @@ const totalAceptado = computed(() =>
     .reduce((acc, p) => acc + (Number(p.total) || 0), 0)
 )
 
+const totalAdeudadoClientes = computed(() =>
+  presupuestos.value
+    .filter((p) => Boolean(p.deuda_computable))
+    .reduce((acc, p) => acc + (Number(p.saldo_pendiente_cobro) || 0), 0)
+)
+
 const presupuestosCoincidentes = computed(() => {
   const termino = String(filtroBusqueda.value || "").trim().toLowerCase()
 
@@ -329,6 +335,20 @@ const estadoLabel = (estado) => {
 const estadoClass = (estado) => {
   const key = String(estado || "").toLowerCase()
   return `estado-pill estado-${key}`
+}
+
+const cobroStatusLabel = (estadoCobro) => {
+  const key = String(estadoCobro || "").toLowerCase()
+  if (key === "pagado") return "Pagado"
+  if (key === "parcial") return "Parcial"
+  if (key === "a_favor") return "A favor"
+  if (key === "pendiente") return "Pendiente"
+  return "No computa"
+}
+
+const cobroStatusClass = (estadoCobro) => {
+  const key = String(estadoCobro || "").toLowerCase()
+  return `cobro-pill cobro-${key || "sin_deuda"}`
 }
 
 const certificadoStatusLabel = (presupuesto) => {
@@ -1012,14 +1032,14 @@ onUnmounted(() => {
           <small>Suma consolidada de todos los presupuestos emitidos.</small>
         </div>
         <div class="stat-card stat-card-pending">
-          <span>Total pendiente</span>
+          <span>Total pendiente comercial</span>
           <strong>{{ formatMoney(totalPendiente) }}</strong>
           <small>Importe que sigue en etapa comercial o sin cierre.</small>
         </div>
         <div class="stat-card stat-card-accepted">
-          <span>Total aceptado</span>
-          <strong>{{ formatMoney(totalAceptado) }}</strong>
-          <small>Monto confirmado para avanzar a certificados y facturacion.</small>
+          <span>Total adeudado clientes</span>
+          <strong>{{ formatMoney(totalAdeudadoClientes) }}</strong>
+          <small>Suma de saldos pendientes en presupuestos aceptados.</small>
         </div>
       </div>
 
@@ -1126,8 +1146,20 @@ onUnmounted(() => {
                 </div>
 
                 <div class="presupuesto-total-block">
-                  <span>Total</span>
+                  <span>Totales del presupuesto</span>
                   <strong>{{ formatMoney(p.total) }}</strong>
+                  <small>Sin IVA: {{ formatMoney(p.total_sin_iva) }} · IVA: {{ formatMoney(p.total_iva) }}</small>
+                  <small>Pagado por caja: {{ formatMoney(p.total_pagado_caja) }}</small>
+                  <small v-if="p.deuda_computable">
+                    Saldo pendiente: {{ formatMoney(p.saldo_pendiente_cobro) }}
+                    <span :class="cobroStatusClass(p.estado_cobro)">{{ cobroStatusLabel(p.estado_cobro) }}</span>
+                  </small>
+                  <small v-if="p.deuda_computable && Number(p.saldo_a_favor_cobro || 0) > 0">
+                    Saldo a favor: {{ formatMoney(p.saldo_a_favor_cobro) }}
+                  </small>
+                  <small v-if="!p.deuda_computable">
+                    Estado comercial sin deuda activa (solo computa en aceptados).
+                  </small>
                   <small v-if="Number(p.cantidad_certificados || 0) > 0">
                     Certificado: {{ formatMoney(p.total_certificado_con_iva) }} · Pagado: {{ formatMoney(p.total_pagado_certificados) }}
                   </small>
@@ -2147,6 +2179,41 @@ textarea:focus {
 .estado-enviado { background: rgba(96, 165, 250, 0.14); color: #bfdbfe; border-color: rgba(96, 165, 250, 0.2); }
 .estado-aceptado { background: rgba(74, 222, 128, 0.14); color: #bbf7d0; border-color: rgba(74, 222, 128, 0.2); }
 .estado-rechazado { background: rgba(248, 113, 113, 0.14); color: #fecaca; border-color: rgba(248, 113, 113, 0.2); }
+
+.cobro-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.12rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  margin-left: 0.35rem;
+}
+
+.cobro-pendiente {
+  background: rgba(239, 68, 68, 0.16);
+  color: #fecaca;
+}
+
+.cobro-parcial {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fde68a;
+}
+
+.cobro-pagado {
+  background: rgba(34, 197, 94, 0.18);
+  color: #bbf7d0;
+}
+
+.cobro-a_favor {
+  background: rgba(16, 185, 129, 0.2);
+  color: #a7f3d0;
+}
+
+.cobro-sin_deuda {
+  background: rgba(148, 163, 184, 0.18);
+  color: #cbd5e1;
+}
 
 .estado-select {
   max-width: 138px;

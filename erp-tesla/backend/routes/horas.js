@@ -1492,15 +1492,17 @@ router.get("/resumen/prestadas/pdf", async (req, res) => {
 
     if (horasError) return res.status(400).json({ error: horasError.message })
 
-    const [empleadosRes, obrasRes, gruposRes] = await Promise.all([
+    const [empleadosRes, obrasRes, gruposRes, clientesRes] = await Promise.all([
       db.from("empleados").select("id, nombre, apellido"),
       db.from("obras").select("id, nombre"),
       db.from("grupos").select("id, nombre"),
+      db.from("clientes").select("id, empresa, razon_social"),
     ])
 
     const empleadosData = empleadosRes.data || []
     const obrasData = obrasRes.data || []
     const gruposData = gruposRes.data || []
+    const clientesData = clientesRes.data || []
     const horas = horasData || []
 
     const mesesNombre = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
@@ -1514,7 +1516,13 @@ router.get("/resumen/prestadas/pdf", async (req, res) => {
       const empLabel = emp ? `${emp.nombre} ${emp.apellido}` : `Empleado ${h.empleado_id}`
       const grupoOrigen = gruposData.find((g) => g.id === h.grupo_origen_id)?.nombre || "Sin grupo origen"
       const grupoDestino = gruposData.find((g) => g.id === h.grupo_destino_id)?.nombre || "Sin grupo destino"
-      const obra = obrasData.find((o) => o.id === h.obra_id)?.nombre || "-"
+      const obraInfo = obrasData.find((o) => o.id === h.obra_id) || null
+      const clienteInfo = obraInfo?.cliente_id
+        ? clientesData.find((c) => c.id === obraInfo.cliente_id) || null
+        : (h.cliente_id ? clientesData.find((c) => c.id === h.cliente_id) || null : null)
+      const obraNombre = obraInfo?.nombre || "-"
+      const clienteNombre = clienteInfo?.empresa || clienteInfo?.razon_social || "Sin cliente"
+      const obra = `${obraNombre} / ${clienteNombre}`
       const hs = getCantidadHoras(h)
       let fecha = "-"
       if (h.fecha) {
@@ -1633,12 +1641,12 @@ router.get("/resumen/prestadas/pdf", async (req, res) => {
           doc.text(`Total: ${formatHs(destino.total)}`, pageWidth - 160, y + 5, { width: 108, align: "right" })
           y += 18
 
-          const col = { fecha: 45, obra: 190 }
+          const col = { fecha: 45, obra: 175 }
           doc.rect(45, y, pageWidth - 90, 17).fillColor("#f0f0f0").fill()
           doc.rect(45, y, pageWidth - 90, 17).lineWidth(0.8).strokeColor("#000000").stroke()
           doc.font("Helvetica-Bold").fontSize(8.5).fillColor("#000000")
           doc.text("Fecha", col.fecha + 4, y + 4)
-          doc.text("Obra", col.obra + 4, y + 4)
+          doc.text("Obra / Cliente", col.obra + 4, y + 4)
           doc.text("Horas", pageWidth - 90, y + 4, { width: 40, align: "right" })
           y += 17
 
@@ -1648,7 +1656,7 @@ router.get("/resumen/prestadas/pdf", async (req, res) => {
             doc.rect(45, y, pageWidth - 90, 16).lineWidth(0.4).strokeColor("#888888").stroke()
             doc.font("Helvetica").fontSize(8.5).fillColor("#000000")
             doc.text(r.fecha, col.fecha + 4, y + 4, { width: 80 })
-            doc.text(r.obra, col.obra + 4, y + 4, { width: 265 })
+            doc.text(r.obra, col.obra + 4, y + 4, { width: 290, ellipsis: true })
             doc.text(formatHs(r.hs), pageWidth - 90, y + 4, { width: 40, align: "right" })
             y += 16
           }

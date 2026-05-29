@@ -1,0 +1,5 @@
+[2026-05-29 08:57:20] Inicio. RepoRoot=C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla SkipIfRunning=True npm=C:\Program Files\nodejs\npm.cmd caddy=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-05-29 08:57:21] Estado previo: backend3000=True caddy443=True
+[2026-05-29 08:57:21] Backend no se relanza por SkipIfRunning
+[2026-05-29 08:57:21] Caddy no se relanza por SkipIfRunning
+[2026-05-29 08:57:22] Estado final: backend3000=True caddy443=True

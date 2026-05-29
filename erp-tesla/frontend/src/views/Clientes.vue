@@ -32,7 +32,10 @@ const form = ref({
   direccion: "",
   telefono: "",
   email: "",
-  iva: "Responsable Inscripto"
+  iva: "Responsable Inscripto",
+  saldo_inicial_arrastre: 0,
+  fecha_saldo_inicial_arrastre: new Date().toISOString().slice(0, 10),
+  nota_saldo_inicial_arrastre: "",
 })
 
 const clientesFiltrados = computed(() => {
@@ -86,6 +89,201 @@ const clientesDisponibles = computed(() => {
 
 const clientesConEmpresa = computed(() => clientes.value.filter((cliente) => String(cliente.empresa || "").trim()).length)
 const clientesConCuit = computed(() => clientes.value.filter((cliente) => String(cliente.cuit || "").trim()).length)
+
+const formatMoney = (value) => new Intl.NumberFormat("es-AR", {
+  style: "currency",
+  currency: "ARS",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+}).format(Number(value) || 0)
+
+const roundMoney = (value) => Math.round(((Number(value) || 0) + Number.EPSILON) * 100) / 100
+
+const formatDateAr = (value) => {
+  if (!value) return "-"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return "-"
+  return date.toLocaleDateString("es-AR")
+}
+
+const toDateInputValue = (value) => {
+  if (!value) return new Date().toISOString().slice(0, 10)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(value))) return String(value)
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return new Date().toISOString().slice(0, 10)
+  return parsed.toISOString().slice(0, 10)
+}
+
+const esEstadoAceptado = (estado) => ["aceptado", "aprobado"].includes(String(estado || "").toLowerCase())
+
+const calcularEstadoCobro = (deudaComputable, total, pagado) => {
+  if (!deudaComputable) return "sin_deuda"
+  if (pagado <= 0) return "pendiente"
+  if (pagado < total) return "parcial"
+  if (pagado === total) return "pagado"
+  return "a_favor"
+}
+
+const labelEstadoCobro = (estado) => {
+  const key = String(estado || "").toLowerCase()
+  if (key === "pendiente") return "Pendiente"
+  if (key === "parcial") return "Parcial"
+  if (key === "pagado") return "Pagado"
+  if (key === "a_favor") return "A favor"
+  return "Sin deuda"
+}
+
+const claseEstadoCobro = (estado) => `estado-cobro estado-cobro-${String(estado || "sin_deuda").toLowerCase()}`
+
+const pagosImputados = computed(() =>
+  (movimientosCajaCliente.value || []).filter((m) => Number(m.presupuesto_id) > 0)
+)
+
+const pagosNoImputados = computed(() =>
+  (movimientosCajaCliente.value || []).filter((m) => !Number(m.presupuesto_id))
+)
+
+const pagosImputadosPorPresupuesto = computed(() => {
+  const map = new Map()
+  for (const mov of pagosImputados.value) {
+    const presupuestoId = Number(mov.presupuesto_id)
+    const acumulado = Number(map.get(presupuestoId) || 0)
+    map.set(presupuestoId, acumulado + (Number(mov.monto_total) || 0))
+  }
+  return map
+})
+
+const estadoCuentaPresupuestos = computed(() => {
+  return (presupuestosAceptados.value || []).map((p) => {
+    const totalConIva = Number(p.total) || 0
+    const totalIva = Number(p.total_iva ?? p.iva_monto ?? 0) || 0
+    const totalSinIva = Number(p.total_sin_iva ?? (totalConIva - totalIva)) || 0
+    const deudaComputable = Boolean(p.deuda_computable ?? esEstadoAceptado(p.estado))
+    const pagadoCaja = Number(p.total_pagado_caja)
+    const pagadoFallback = Number(pagosImputadosPorPresupuesto.value.get(Number(p.id)) || 0)
+    const pagado = Number.isFinite(pagadoCaja) ? pagadoCaja : pagadoFallback
+    const saldoPendiente = deudaComputable ? Math.max(0, totalConIva - pagado) : 0
+    const saldoAFavor = deudaComputable ? Math.max(0, pagado - totalConIva) : 0
+    const estadoCobro = String(p.estado_cobro || "") || calcularEstadoCobro(deudaComputable, totalConIva, pagado)
+
+    return {
+      ...p,
+      total_sin_iva: totalSinIva,
+      total_iva: totalIva,
+      total: totalConIva,
+      pagado,
+      saldo_pendiente: saldoPendiente,
+      saldo_a_favor: saldoAFavor,
+      estado_cobro: estadoCobro,
+      deuda_computable: deudaComputable,
+    }
+  })
+})
+
+const totalDebeCliente = computed(() =>
+  estadoCuentaPresupuestos.value.reduce((acc, p) => acc + (Number(p.saldo_pendiente) || 0), 0)
+)
+
+const totalPagadoPresupuestos = computed(() =>
+  estadoCuentaPresupuestos.value.reduce((acc, p) => acc + (Number(p.pagado) || 0), 0)
+)
+
+const totalPagosNoImputados = computed(() =>
+  pagosNoImputados.value.reduce((acc, mov) => acc + (Number(mov.monto_total) || 0), 0)
+)
+
+const totalAFavorCliente = computed(() =>
+  estadoCuentaPresupuestos.value.reduce((acc, p) => acc + (Number(p.saldo_a_favor) || 0), 0)
+)
+
+const saldoInicialArrastreCliente = computed(() => roundMoney(clienteSeleccionado.value?.saldo_inicial_arrastre))
+
+const totalCargosPresupuestosCliente = computed(() =>
+  roundMoney(estadoCuentaPresupuestos.value.reduce((acc, p) => acc + (Number(p.total) || 0), 0))
+)
+
+const totalPagosCajaCliente = computed(() =>
+  roundMoney((movimientosCajaCliente.value || []).reduce((acc, mov) => acc + (Number(mov.monto_total) || 0), 0))
+)
+
+const saldoPendienteFinalCliente = computed(() =>
+  roundMoney(saldoInicialArrastreCliente.value + totalCargosPresupuestosCliente.value - totalPagosCajaCliente.value)
+)
+
+const movimientosCuentaCorriente = computed(() => {
+  const rows = []
+  const fechaArrastre = toDateInputValue(clienteSeleccionado.value?.fecha_saldo_inicial_arrastre)
+  const notaArrastre = String(clienteSeleccionado.value?.nota_saldo_inicial_arrastre || "").trim()
+
+  rows.push({
+    tipo: "saldo_inicial",
+    fechaRaw: fechaArrastre,
+    fecha: formatDateAr(fechaArrastre),
+    referencia: notaArrastre || "Arrastre sistema anterior",
+    debe: roundMoney(Math.max(0, saldoInicialArrastreCliente.value)),
+    haber: roundMoney(Math.max(0, -saldoInicialArrastreCliente.value)),
+    impacto: roundMoney(saldoInicialArrastreCliente.value),
+  })
+
+  for (const p of estadoCuentaPresupuestos.value) {
+    const total = roundMoney(p.total)
+    rows.push({
+      tipo: "presupuesto",
+      fechaRaw: p.fecha,
+      fecha: formatDateAr(p.fecha),
+      referencia: `Presupuesto #${p.numero || "-"} - ${p.obra || "Sin obra"}`,
+      debe: total,
+      haber: 0,
+      impacto: total,
+    })
+  }
+
+  for (const mov of movimientosCajaCliente.value || []) {
+    const presupuestoNumero = Number(mov.presupuesto_id) > 0
+      ? (presupuestosPorId.value.get(Number(mov.presupuesto_id))?.numero || mov.presupuesto_id)
+      : null
+    const detalle = String(mov.detalle || "Cobro en caja")
+    const referencia = presupuestoNumero
+      ? `${detalle} - Presupuesto #${presupuestoNumero}`
+      : `${detalle} - Pago sin imputar`
+    const monto = roundMoney(mov.monto_total)
+
+    rows.push({
+      tipo: "pago",
+      fechaRaw: mov.fecha,
+      fecha: formatDateAr(mov.fecha),
+      referencia,
+      debe: 0,
+      haber: monto,
+      impacto: -monto,
+    })
+  }
+
+  rows.sort((a, b) => {
+    const aKey = String(toDateInputValue(a.fechaRaw || "1900-01-01"))
+    const bKey = String(toDateInputValue(b.fechaRaw || "1900-01-01"))
+    if (aKey !== bKey) return aKey.localeCompare(bKey)
+    const order = { saldo_inicial: 0, presupuesto: 1, pago: 2 }
+    return (order[a.tipo] ?? 99) - (order[b.tipo] ?? 99)
+  })
+
+  let saldo = 0
+  return rows.map((row) => {
+    saldo = roundMoney(saldo + row.impacto)
+    return {
+      ...row,
+      saldo,
+    }
+  })
+})
+
+const presupuestosPorId = computed(() => {
+  const map = new Map()
+  for (const p of [...(presupuestosAceptados.value || []), ...(presupuestosCliente.value || [])]) {
+    map.set(Number(p.id), p)
+  }
+  return map
+})
 
 // Cargar clientes
 const loadClientes = async () => {
@@ -159,7 +357,12 @@ const handlePresupuestosChanged = () => {
 const openForm = (cliente = null) => {
   if (cliente) {
     editingId.value = cliente.id
-    form.value = { ...cliente }
+    form.value = {
+      ...cliente,
+      saldo_inicial_arrastre: roundMoney(cliente.saldo_inicial_arrastre),
+      fecha_saldo_inicial_arrastre: toDateInputValue(cliente.fecha_saldo_inicial_arrastre),
+      nota_saldo_inicial_arrastre: String(cliente.nota_saldo_inicial_arrastre || ""),
+    }
   } else {
     editingId.value = null
     form.value = {
@@ -169,7 +372,10 @@ const openForm = (cliente = null) => {
       direccion: "",
       telefono: "",
       email: "",
-      iva: "Responsable Inscripto"
+      iva: "Responsable Inscripto",
+      saldo_inicial_arrastre: 0,
+      fecha_saldo_inicial_arrastre: new Date().toISOString().slice(0, 10),
+      nota_saldo_inicial_arrastre: "",
     }
   }
   showForm.value = true
@@ -186,7 +392,10 @@ const closeForm = () => {
     direccion: "",
     telefono: "",
     email: "",
-    iva: "Responsable Inscripto"
+    iva: "Responsable Inscripto",
+    saldo_inicial_arrastre: 0,
+    fecha_saldo_inicial_arrastre: new Date().toISOString().slice(0, 10),
+    nota_saldo_inicial_arrastre: "",
   }
 }
 
@@ -199,12 +408,25 @@ const saveCliente = async () => {
   }
   loading.value = true
   try {
+    const payload = {
+      ...form.value,
+      saldo_inicial_arrastre: roundMoney(form.value.saldo_inicial_arrastre),
+      fecha_saldo_inicial_arrastre: toDateInputValue(form.value.fecha_saldo_inicial_arrastre),
+      nota_saldo_inicial_arrastre: String(form.value.nota_saldo_inicial_arrastre || "").trim(),
+    }
+
     if (editingId.value) {
-      await api.updateCliente(editingId.value, { ...form.value })
+      await api.updateCliente(editingId.value, payload)
     } else {
-      await api.createCliente({ ...form.value })
+      await api.createCliente(payload)
     }
     await loadClientes()
+    if (clienteSeleccionado.value?.id && Number(clienteSeleccionado.value.id) === Number(editingId.value)) {
+      const actualizado = clientes.value.find((c) => Number(c.id) === Number(editingId.value))
+      if (actualizado) {
+        clienteSeleccionado.value = actualizado
+      }
+    }
     closeForm()
   } catch (err) {
     error.value = editingId.value
@@ -506,20 +728,97 @@ onUnmounted(() => {
 
         <!-- Presupuestos aceptados -->
         <div class="ficha-seccion">
-          <h3>✅ Presupuestos aceptados</h3>
-          <div v-if="presupuestosAceptados.length > 0" class="presupuestos-lista">
-            <div v-for="p in presupuestosAceptados" :key="p.id" class="presupuesto-card">
-              <div class="presupuesto-head">
-                <h4>#{{ p.numero }} - {{ p.obra || 'Sin obra' }}</h4>
-                <span class="presupuesto-estado estado-aprobado">{{ p.estado }}</span>
-              </div>
-              <div class="presupuesto-detalles">
-                <span>{{ new Date(p.fecha).toLocaleDateString('es-AR') }}</span>
-                <span>$ {{ Number(p.total || 0).toLocaleString('es-AR', { minimumFractionDigits: 2 }) }}</span>
-              </div>
-            </div>
+          <h3>✅ Estado de cuenta por presupuesto aceptado</h3>
+          <div class="estado-cuenta-resumen">
+            <article class="estado-cuenta-card">
+              <span>Saldo inicial (arrastre)</span>
+              <strong>{{ formatMoney(saldoInicialArrastreCliente) }}</strong>
+            </article>
+            <article class="estado-cuenta-card">
+              <span>Cargos por presupuestos</span>
+              <strong>{{ formatMoney(totalCargosPresupuestosCliente) }}</strong>
+            </article>
+            <article class="estado-cuenta-card">
+              <span>Pagos por caja</span>
+              <strong>{{ formatMoney(totalPagosCajaCliente) }}</strong>
+            </article>
+            <article class="estado-cuenta-card">
+              <span>Saldo pendiente final</span>
+              <strong>{{ formatMoney(saldoPendienteFinalCliente) }}</strong>
+            </article>
+          </div>
+
+          <div class="sin-datos" style="margin-bottom: 0.8rem;">
+            Arrastre desde: {{ formatDateAr(clienteSeleccionado.fecha_saldo_inicial_arrastre) }}
+            <span v-if="clienteSeleccionado.nota_saldo_inicial_arrastre"> | Nota: {{ clienteSeleccionado.nota_saldo_inicial_arrastre }}</span>
+          </div>
+
+          <div v-if="estadoCuentaPresupuestos.length > 0" class="tabla-shell">
+            <table class="tabla">
+              <thead>
+                <tr>
+                  <th>Presupuesto</th>
+                  <th>Fecha</th>
+                  <th>Obra</th>
+                  <th>Sin IVA</th>
+                  <th>IVA</th>
+                  <th>Total</th>
+                  <th>Pagado</th>
+                  <th>Saldo</th>
+                  <th>Estado</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="p in estadoCuentaPresupuestos" :key="p.id">
+                  <td>#{{ p.numero }}</td>
+                  <td>{{ new Date(p.fecha).toLocaleDateString('es-AR') }}</td>
+                  <td>{{ p.obra || 'Sin obra' }}</td>
+                  <td>{{ formatMoney(p.total_sin_iva) }}</td>
+                  <td>{{ formatMoney(p.total_iva) }}</td>
+                  <td>{{ formatMoney(p.total) }}</td>
+                  <td>{{ formatMoney(p.pagado) }}</td>
+                  <td>
+                    <div>{{ formatMoney(p.saldo_pendiente) }}</div>
+                    <small v-if="Number(p.saldo_a_favor || 0) > 0">A favor: {{ formatMoney(p.saldo_a_favor) }}</small>
+                  </td>
+                  <td><span :class="claseEstadoCobro(p.estado_cobro)">{{ labelEstadoCobro(p.estado_cobro) }}</span></td>
+                </tr>
+              </tbody>
+            </table>
           </div>
           <p v-else class="sin-datos">No hay presupuestos aceptados para este cliente</p>
+        </div>
+
+        <div class="ficha-seccion">
+          <h3>📚 Cuenta corriente cronológica</h3>
+          <div class="tabla-shell">
+            <table class="tabla">
+              <thead>
+                <tr>
+                  <th>Fecha</th>
+                  <th>Tipo</th>
+                  <th>Referencia</th>
+                  <th>Debe</th>
+                  <th>Haber</th>
+                  <th>Saldo</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(mov, idx) in movimientosCuentaCorriente" :key="`${mov.tipo}-${idx}`">
+                  <td>{{ mov.fecha }}</td>
+                  <td>
+                    <span class="estado-cobro" :class="mov.tipo === 'pago' ? 'estado-cobro-pagado' : (mov.tipo === 'presupuesto' ? 'estado-cobro-pendiente' : 'estado-cobro-sin_deuda')">
+                      {{ mov.tipo === 'saldo_inicial' ? 'Saldo inicial' : (mov.tipo === 'presupuesto' ? 'Presupuesto' : 'Pago') }}
+                    </span>
+                  </td>
+                  <td>{{ mov.referencia }}</td>
+                  <td>{{ mov.debe > 0 ? formatMoney(mov.debe) : '-' }}</td>
+                  <td>{{ mov.haber > 0 ? formatMoney(mov.haber) : '-' }}</td>
+                  <td><strong>{{ formatMoney(mov.saldo) }}</strong></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <!-- Certificados asociados -->
@@ -550,6 +849,8 @@ onUnmounted(() => {
                 <tr>
                   <th>Fecha</th>
                   <th>Detalle</th>
+                  <th>Presupuesto</th>
+                  <th>Imputación</th>
                   <th>Monto</th>
                   <th>Observaciones</th>
                 </tr>
@@ -558,7 +859,18 @@ onUnmounted(() => {
                 <tr v-for="mov in movimientosCajaCliente" :key="mov.id">
                   <td>{{ new Date(mov.fecha).toLocaleDateString('es-AR') }}</td>
                   <td>{{ mov.detalle }}</td>
-                  <td>{{ mov.monto_total }}</td>
+                  <td>
+                    <span v-if="Number(mov.presupuesto_id) > 0">
+                      #{{ presupuestosPorId.get(Number(mov.presupuesto_id))?.numero || mov.presupuesto_id }}
+                    </span>
+                    <span v-else>-</span>
+                  </td>
+                  <td>
+                    <span :class="Number(mov.presupuesto_id) > 0 ? 'estado-cobro estado-cobro-parcial' : 'estado-cobro estado-cobro-sin_deuda'">
+                      {{ Number(mov.presupuesto_id) > 0 ? 'Imputado' : 'No imputado' }}
+                    </span>
+                  </td>
+                  <td>{{ formatMoney(mov.monto_total) }}</td>
                   <td>{{ mov.observaciones || '-' }}</td>
                 </tr>
               </tbody>
@@ -653,6 +965,33 @@ onUnmounted(() => {
                 type="text"
                 id="email"
                 placeholder="Ingrese el email o '-' si no aplica"
+              />
+            </label>
+
+            <label class="form-group">
+              <span>Saldo inicial (arrastre)</span>
+              <input
+                v-model.number="form.saldo_inicial_arrastre"
+                type="number"
+                step="0.01"
+                placeholder="0.00"
+              />
+            </label>
+
+            <label class="form-group">
+              <span>Fecha saldo inicial</span>
+              <input
+                v-model="form.fecha_saldo_inicial_arrastre"
+                type="date"
+              />
+            </label>
+
+            <label class="form-group form-group-full">
+              <span>Nota saldo inicial</span>
+              <input
+                v-model="form.nota_saldo_inicial_arrastre"
+                type="text"
+                placeholder="Ej: Arrastre sistema anterior"
               />
             </label>
             </div>
@@ -1455,6 +1794,77 @@ td {
   justify-content: space-between;
   font-size: 0.875rem;
   color: #cbd5e1;
+}
+
+.estado-cuenta-resumen {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.8rem;
+  margin-bottom: 1rem;
+}
+
+.estado-cuenta-card {
+  padding: 0.9rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 0.6rem;
+  background: rgba(30, 41, 59, 0.62);
+  display: grid;
+  gap: 0.3rem;
+}
+
+.estado-cuenta-card span {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #94a3b8;
+  font-weight: 700;
+}
+
+.estado-cuenta-card strong {
+  font-size: 1.1rem;
+  color: #f8fafc;
+}
+
+.estado-cobro {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.estado-cobro-pendiente {
+  background: rgba(239, 68, 68, 0.16);
+  color: #fecaca;
+}
+
+.estado-cobro-parcial {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fde68a;
+}
+
+.estado-cobro-pagado {
+  background: rgba(34, 197, 94, 0.18);
+  color: #bbf7d0;
+}
+
+.estado-cobro-a_favor {
+  background: rgba(16, 185, 129, 0.2);
+  color: #a7f3d0;
+}
+
+.estado-cobro-sin_deuda {
+  background: rgba(148, 163, 184, 0.18);
+  color: #cbd5e1;
+}
+
+.tabla td small {
+  display: block;
+  color: #94a3b8;
+  margin-top: 0.2rem;
 }
 
 .sin-datos {

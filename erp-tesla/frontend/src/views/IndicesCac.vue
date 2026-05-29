@@ -24,7 +24,7 @@ const form = ref(emptyForm())
 const totalIndices = computed(() => indices.value.length)
 
 const formatMoney = (v) =>
-  new Intl.NumberFormat("es-AR", { minimumFractionDigits: 4, maximumFractionDigits: 4 }).format(Number(v) || 0)
+  new Intl.NumberFormat("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(v) || 0)
 
 const formatDate = (v) => {
   if (!v) return "-"
@@ -170,7 +170,7 @@ const indicesOrdenados = computed(() =>
             </div>
             <div class="field">
               <label>Valor del índice <span class="req">*</span></label>
-              <input v-model="form.valor" type="number" step="0.0001" min="0.0001" placeholder="Ej: 15026.2" />
+              <input v-model="form.valor" type="number" step="0.01" min="0.01" placeholder="Ej: 15026.2" />
             </div>
             <div class="field">
               <label>Fecha de publicación</label>

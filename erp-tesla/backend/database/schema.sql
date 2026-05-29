@@ -55,11 +55,17 @@ CREATE TABLE IF NOT EXISTS clientes (
   email VARCHAR(120),
   iva VARCHAR(100) DEFAULT 'Responsable Inscripto',
   empresa VARCHAR(255) DEFAULT '-',
+  saldo_inicial_arrastre NUMERIC(12,2) NOT NULL DEFAULT 0,
+  fecha_saldo_inicial_arrastre DATE NOT NULL DEFAULT CURRENT_DATE,
+  nota_saldo_inicial_arrastre TEXT DEFAULT '',
   activo BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ALTER TABLE clientes ADD COLUMN IF NOT EXISTS iva VARCHAR(100) DEFAULT 'Responsable Inscripto';
+ALTER TABLE clientes ADD COLUMN IF NOT EXISTS saldo_inicial_arrastre NUMERIC(12,2) NOT NULL DEFAULT 0;
+ALTER TABLE clientes ADD COLUMN IF NOT EXISTS fecha_saldo_inicial_arrastre DATE NOT NULL DEFAULT CURRENT_DATE;
+ALTER TABLE clientes ADD COLUMN IF NOT EXISTS nota_saldo_inicial_arrastre TEXT DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS obras (
   id SERIAL PRIMARY KEY,

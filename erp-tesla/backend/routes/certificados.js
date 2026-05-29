@@ -1,15 +1,20 @@
                         
-						import express from "express"
+import express from "express"
 import { existsSync } from "fs"
 import path from "path"
 import { fileURLToPath } from "url"
 import { pool } from "../db.js"
 import { getIo } from "../socket.js"
 import PDFDocument from "pdfkit"
+import fs from "fs/promises"
+import { sanitizeFileText } from "../pdf/premiumTheme.js"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const LOGO_PATH = path.join(__dirname, "..", "assets", "logo.png")
 const LOGO_PRESUPUESTO_PATH = path.join(__dirname, "..", "assets", "logo_presupuesto.png")
+
+const CERTIFICADOS_BASE_FOLDER=
+	process.env.CERTIFICADOS_BASE_FOLDER || path.join("C:\\Users\\usuario\\Desktop\\GESTION TESLA\\certificados")
 
 const router = express.Router()
 
@@ -74,6 +79,15 @@ const formatDate = (value) => {
 	const date = new Date(value)
 	if (Number.isNaN(date.getTime())) return String(value)
 	return date.toLocaleDateString("es-AR")
+}
+
+const formatPercentLabel = (value) => {
+	const num = toNumber(value, 0)
+	const formatted = new Intl.NumberFormat("es-AR", {
+		minimumFractionDigits: 0,
+		maximumFractionDigits: 2,
+	}).format(num)
+	return `${formatted} %`
 }
 
 const validarInputCertificado = (input = {}) => {
@@ -462,7 +476,7 @@ router.get("/presupuesto/:presupuestoId/pdf", async (req, res) => {
 			drawItemRow(`   CERTIFICADO NRO.${c.secuencia} (${formatDate(c.fecha)})`, "", 0, rowIndex++)
 			drawItemRow(`   AVANCE DE OBRAS (${avanceRef})`, avanceRef, c.monto_base, rowIndex++)
 			drawItemRow("   ACTUALIZACION S/INDICE CAC", `${ajustePct.toFixed(2)}%`, c.actualizacion, rowIndex++)
-			drawItemRow("   IVA", `${toNumber(c.iva_porcentaje, 21).toFixed(0)}%`, c.iva, rowIndex++)
+			drawItemRow("   IVA", formatPercentLabel(toNumber(c.iva_porcentaje, 21)), c.iva, rowIndex++)
 
 			if (y + rowH > pageBottom) {
 				doc.addPage()
@@ -525,12 +539,14 @@ router.get("/:id/pdf", async (req, res) => {
 					p.numero AS presupuesto_numero,
 					p.fecha AS presupuesto_fecha,
 					p.total AS presupuesto_total,
-					p.iva_porcentaje,
+					p.iva_porcentaje AS presupuesto_iva_porcentaje,
 					p.forma_pago,
 					p.proyecto AS presupuesto_proyecto,
 					p.indice_cac_base_id,
 					ic.periodo AS indice_base_periodo,
 					ic.valor AS indice_base_valor,
+					ia.periodo AS indice_actual_periodo,
+					ia.valor AS indice_actual_valor,
 					COALESCE(NULLIF(TRIM(cl.empresa), ''), cl.razon_social) AS cliente_nombre,
 					cl.cuit AS cliente_cuit,
 					cl.iva AS cliente_iva,
@@ -540,6 +556,13 @@ router.get("/:id/pdf", async (req, res) => {
 				FROM certificados c
 				INNER JOIN presupuestos p ON p.id = c.presupuesto_id
 				LEFT JOIN indices_cac ic ON ic.id = p.indice_cac_base_id
+				LEFT JOIN LATERAL (
+					SELECT i.periodo, i.valor
+					FROM indices_cac i
+					WHERE ABS(COALESCE(i.valor, 0) - COALESCE(c.indice_actual_cac, 0)) < 0.0001
+					ORDER BY i.id DESC
+					LIMIT 1
+				) ia ON true
 				INNER JOIN clientes cl ON cl.id = p.cliente_id
 				INNER JOIN obras o ON o.id = p.obra_id
 				WHERE c.id = $1
@@ -667,10 +690,12 @@ router.get("/:id/pdf", async (req, res) => {
 		const indiceBaseTexto = cert.indice_base_periodo && cert.indice_base_valor
 			? `${String(cert.indice_base_periodo)} (${toNumber(cert.indice_base_valor).toFixed(1)})`
 			: (cert.indice_base_cac > 0 ? toNumber(cert.indice_base_cac).toFixed(1) : "-")
-		const indiceActualTexto = cert.indice_actual_cac > 0 ? toNumber(cert.indice_actual_cac).toFixed(1) : "-"
+		const indiceActualTexto = cert.indice_actual_periodo && cert.indice_actual_valor
+			? `${String(cert.indice_actual_periodo)} (${toNumber(cert.indice_actual_valor).toFixed(1)})`
+			: (cert.indice_actual_cac > 0 ? toNumber(cert.indice_actual_cac).toFixed(1) : "-")
 		const indiceRef = cert.indice_base_cac > 0 && cert.indice_actual_cac > 0
-			? `${indiceBaseTexto} / ${indiceActualTexto}`
-			: `factor ${toNumber(cert.indice_cac, 1).toFixed(6)}`
+			? `${indiceBaseTexto}`
+			: `factor ${toNumber(cert.indice_cac, 1).toFixed(4)}`
 		const ajusteRef = `${ajustePct.toFixed(2)}%`
 
 		drawItemRow(`*  PRESUPUESTO ORIGINAL NRO.${getSafe(cert.presupuesto_numero)}`, "", cert.presupuesto_total, 0)
@@ -679,7 +704,7 @@ router.get("/:id/pdf", async (req, res) => {
 		drawItemRow(`   ${certLabel}`, "", 0, 2)
 		drawItemRow(`   AVANCE DE OBRAS (${avanceRef})`, avanceRef, cert.monto_base, 3)
 		drawItemRow(`   FORMULA CAC: ${indiceRef}`, "", 0, 4)
-		drawItemRow("   ACTUALIZACION S/INDICE CAC", ajusteRef, cert.actualizacion, 5)
+		drawItemRow(`   ACTUALIZACION S/INDICE CAC: ${indiceActualTexto}`, ajusteRef, cert.actualizacion, 5)
 		drawItemRow("", "", 0, 6)
 
 		// fila subtotal del certificado (banda beige)
@@ -713,7 +738,7 @@ router.get("/:id/pdf", async (req, res) => {
 		doc.font("Helvetica").fontSize(8.3).fillColor("#111")
 		doc.text("SUBTOTAL", sumLabelX, ySummary + 8, { width: sumW - 24 - sumValueW })
 		doc.text(`$ ${formatMoney(cert.total_cert_sin_iva)}`, sumValueX, ySummary + 8, { width: sumValueW, align: "right" })
-		doc.text(`IVA ${toNumber(cert.iva_porcentaje, 21).toFixed(0)}%`, sumLabelX, ySummary + 24, { width: sumW - 24 - sumValueW })
+		doc.text(`IVA ${formatPercentLabel(toNumber(cert.iva_porcentaje, 21))}`, sumLabelX, ySummary + 24, { width: sumW - 24 - sumValueW })
 		doc.text(`$ ${formatMoney(cert.iva)}`, sumValueX, ySummary + 24, { width: sumValueW, align: "right" })
 		doc.text("RESTO PRESUP.", sumLabelX, ySummary + 40, { width: sumW - 24 - sumValueW })
 		doc.text(`$ ${formatMoney(cert.saldo_pre_original)}`, sumValueX, ySummary + 40, { width: sumValueW, align: "right" })
