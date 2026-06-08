@@ -456,6 +456,20 @@ CREATE TABLE IF NOT EXISTS movimientos_caja (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS movimientos_caja_presupuestos (
+  movimiento_id INTEGER NOT NULL REFERENCES movimientos_caja(id) ON DELETE CASCADE,
+  presupuesto_id INTEGER NOT NULL REFERENCES presupuestos(id) ON DELETE CASCADE,
+  orden INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (movimiento_id, presupuesto_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_movimientos_caja_presupuestos_movimiento_id
+  ON movimientos_caja_presupuestos(movimiento_id);
+
+CREATE INDEX IF NOT EXISTS idx_movimientos_caja_presupuestos_presupuesto_id
+  ON movimientos_caja_presupuestos(presupuesto_id);
+
 CREATE TABLE IF NOT EXISTS gastos (
   id SERIAL PRIMARY KEY,
   tipo VARCHAR(20) NOT NULL CHECK (tipo IN ('tesla', 'facu', 'juani')),

@@ -3,3 +3,48 @@
 [2026-05-29 08:57:21] Backend no se relanza por SkipIfRunning
 [2026-05-29 08:57:21] Caddy no se relanza por SkipIfRunning
 [2026-05-29 08:57:22] Estado final: backend3000=True caddy443=True
+[2026-06-01 07:24:11] Inicio. RepoRoot=C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla SkipIfRunning=True npm=C:\Program Files\nodejs\npm.cmd caddy=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-06-01 07:24:12] Estado previo: backend3000=False caddy443=False
+[2026-06-01 07:24:13] Lanzado backend en nueva terminal
+[2026-06-01 07:24:13] Lanzado caddy en nueva terminal
+[2026-06-01 07:24:14] Estado final: backend3000=False caddy443=False
+[2026-06-01 07:27:48] Inicio. RepoRoot=c:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla SkipIfRunning=True npm=C:\Program Files\nodejs\npm.cmd caddy=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-06-01 07:27:48] Estado previo: backend3000=False caddy443=False
+[2026-06-01 07:27:48] Lanzado backend en nueva terminal
+[2026-06-01 07:27:48] Lanzado caddy en nueva terminal
+[2026-06-01 07:27:50] Estado final: backend3000=False caddy443=False
+[2026-06-01 07:28:01] Inicio. RepoRoot=C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla SkipIfRunning=True npm=C:\Program Files\nodejs\npm.cmd caddy=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-06-01 07:28:02] Estado previo: backend3000=True caddy443=True
+[2026-06-01 07:28:02] Backend no se relanza por SkipIfRunning
+[2026-06-01 07:28:02] Caddy no se relanza por SkipIfRunning
+[2026-06-01 07:28:04] Estado final: backend3000=True caddy443=True
+[2026-06-01 07:29:08] Inicio. RepoRoot=C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla SkipIfRunning=True npm=C:\Program Files\nodejs\npm.cmd caddy=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-06-01 07:29:10] Estado previo: backend3000=False caddy443=False
+[2026-06-01 07:29:11] Lanzado backend en nueva terminal
+[2026-06-01 07:29:11] Lanzado caddy en nueva terminal
+[2026-06-01 07:29:12] Estado final: backend3000=False caddy443=False
+[2026-06-02 07:25:23] Inicio. RepoRoot=C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla SkipIfRunning=True npm=C:\Program Files\nodejs\npm.cmd caddy=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-06-02 07:25:31] Estado previo: backend3000=False caddy443=False
+[2026-06-02 07:25:31] Lanzado backend en nueva terminal
+[2026-06-02 07:25:31] Lanzado caddy en nueva terminal
+[2026-06-02 07:25:33] Estado final: backend3000=False caddy443=False
+[2026-06-03 07:32:06] Inicio. RepoRoot=C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla SkipIfRunning=True npm=C:\Program Files\nodejs\npm.cmd caddy=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-06-03 07:32:08] Estado previo: backend3000=False caddy443=False
+[2026-06-03 07:32:08] Lanzado backend en nueva terminal
+[2026-06-03 07:32:08] Lanzado caddy en nueva terminal
+[2026-06-03 07:32:09] Estado final: backend3000=False caddy443=False
+[2026-06-04 07:28:21] Inicio. RepoRoot=C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla SkipIfRunning=True npm=C:\Program Files\nodejs\npm.cmd caddy=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-06-04 07:28:22] Estado previo: backend3000=False caddy443=False
+[2026-06-04 07:28:22] Lanzado backend en nueva terminal
+[2026-06-04 07:28:22] Lanzado caddy en nueva terminal
+[2026-06-04 07:28:24] Estado final: backend3000=False caddy443=False
+[2026-06-05 08:45:51] Inicio. RepoRoot=C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla SkipIfRunning=True npm=C:\Program Files\nodejs\npm.cmd caddy=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-06-05 08:45:53] Estado previo: backend3000=False caddy443=False
+[2026-06-05 08:45:53] Lanzado backend en nueva terminal
+[2026-06-05 08:45:53] Lanzado caddy en nueva terminal
+[2026-06-05 08:45:55] Estado final: backend3000=False caddy443=False
+[2026-06-08 07:29:11] Inicio. RepoRoot=C:\Users\usuario\Documents\Sistema Gestion TESLA\Sistema-gestion-tesla\erp-tesla SkipIfRunning=True npm=C:\Program Files\nodejs\npm.cmd caddy=C:\Users\usuario\AppData\Local\Microsoft\WinGet\Links\caddy.exe
+[2026-06-08 07:29:12] Estado previo: backend3000=False caddy443=False
+[2026-06-08 07:29:13] Lanzado backend en nueva terminal
+[2026-06-08 07:29:13] Lanzado caddy en nueva terminal
+[2026-06-08 07:29:14] Estado final: backend3000=False caddy443=False

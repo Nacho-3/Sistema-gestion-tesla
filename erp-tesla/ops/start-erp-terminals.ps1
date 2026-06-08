@@ -73,7 +73,10 @@ function New-WindowCommand {
 
   $safePath = $Path.Replace("'", "''")
   $safeTitle = $Title.Replace("'", "''")
-  $safeCommand = $Command.Replace("'", "''")
+  # $Command already contains the needed quoting for executable paths.
+  # Escaping single quotes again here turns "& 'C:\\...\\npm.cmd'" into
+  # "& ''C:\\...\\npm.cmd''", which PowerShell cannot execute.
+  $safeCommand = $Command
 
   if ($Skip -and $Port -gt 0) {
     return "Set-Location -LiteralPath '$safePath'; `$Host.UI.RawUI.WindowTitle = '$safeTitle'; if ((Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0) { Write-Host 'Ya estaba en ejecucion (puerto $Port).'; } else { $safeCommand }"
