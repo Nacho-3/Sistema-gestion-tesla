@@ -50,7 +50,19 @@ const chequesDisponibles = ref([])
 const loadingLibroCheques = ref(false)
 const filtroBusquedaLibroCheques = ref("")
 const libroChequesExpandido = ref(true)
+const noDisponiblesExpandido = ref(false)
 const movimientosExpandido = ref(true)
+const mostrarModalAsignaciones = ref(false)
+const mostrarModalTransferenciaCheques = ref(false)
+const transferiendoCheques = ref(false)
+const asignacionesDraft = ref([])
+const transferenciaChequesForm = ref({
+  caja_destino: "",
+  fecha: new Date().toISOString().split('T')[0],
+  cheques_ids: [],
+  detalle: "",
+  observaciones: "",
+})
 
 // Filtros
 const filtroFechaInicio = ref("")
@@ -67,12 +79,15 @@ const form = ref({
   destinatario: "",
   cliente_id: "",
   presupuesto_id: "",
+  presupuesto_ids: [],
+  presupuestos_asignaciones: [],
   detalle: "",
   observaciones: "",
   monto_total: 0,
   desglose: {
     efectivo: 0,
     transferencia: 0,
+    banco: 0,
     retencion: 0
   },
   cheques: [],
@@ -85,6 +100,7 @@ const form = ref({
 const mediosDePago = [
   { id: "efectivo", label: "Efectivo" },
   { id: "transferencia", label: "Transferencia" },
+  { id: "banco", label: "Banco" },
   { id: "echeq", label: "Echeq" },
   { id: "retencion", label: "Retención" },
   { id: "cheque", label: "Cheque" }
@@ -93,6 +109,7 @@ const mediosDePago = [
 const mediosDePagoSimples = [
   { id: "efectivo", label: "Efectivo" },
   { id: "transferencia", label: "Transferencia" },
+  { id: "banco", label: "Banco" },
   { id: "retencion", label: "Retención" },
 ]
 
@@ -102,7 +119,7 @@ const tiposCheque = [
 ]
 
 const handleCajaChanged = () => {
-  refrescarCaja()
+  refrescarCaja({ mantenerSeleccion: true, recargarReferencias: true })
 }
 
 
@@ -349,6 +366,7 @@ const libroChequesFiltrado = computed(() => {
   const termino = String(filtroBusquedaLibroCheques.value || "").trim().toLowerCase()
 
   return (libroCheques.value || []).filter((item) => {
+    if (String(item?.medio_pago || "").toLowerCase() !== "cheque") return false
     if (!termino) return true
     return [item.numero_cheque, item.banco, item.librador_endosante, item.endosado_a]
       .some((v) => String(v || "").toLowerCase().includes(termino))
@@ -420,13 +438,18 @@ const esFormularioValido = computed(() => {
     if (!identificadorValido) return false
 
     if (form.value.tipo === "ingreso" && ["cheque", "echeq"].includes(String(item?.medio_pago || ""))) {
-      return Boolean(
-        String(item?.librador_endosante || "").trim() &&
-        String(item?.banco || "").trim() &&
-        String(item?.numero_cheque || item?.identificador || "").trim() &&
-        String(item?.fecha_cheque || "").trim() &&
-        String(item?.fecha_entrada || item?.fecha_cobro || "").trim()
-      )
+      const esEcheq = String(item?.medio_pago || "") === "echeq"
+      const identificadorOk = Boolean(String(item?.numero_cheque || item?.identificador || "").trim())
+      const fechaEntradaOk = Boolean(String(item?.fecha_entrada || item?.fecha_cobro || "").trim())
+      if (!identificadorOk || !fechaEntradaOk) return false
+      if (!esEcheq) {
+        return Boolean(
+          String(item?.librador_endosante || "").trim() &&
+          String(item?.banco || "").trim() &&
+          String(item?.fecha_cheque || "").trim()
+        )
+      }
+      return true
     }
 
     return true
@@ -531,8 +554,41 @@ const etiquetaSemanaActiva = computed(() => {
 })
 
 const presupuestosDisponibles = computed(() => {
-  if (!form.value.cliente_id) return presupuestos.value
-  return presupuestos.value.filter((p) => String(p.cliente_id) === String(form.value.cliente_id))
+  if (!form.value.cliente_id) return []
+  return presupuestos.value.filter((p) => {
+    const mismoCliente = String(p.cliente_id) === String(form.value.cliente_id)
+    const saldoPendiente = Number(p?.saldo_pendiente_cobro || 0)
+    return mismoCliente && saldoPendiente > 0.009
+  })
+})
+
+const totalAsignadoPresupuestosDraft = computed(() => {
+  return (asignacionesDraft.value || []).reduce((acc, item) => acc + Number(item?.monto_asignado || 0), 0)
+})
+
+const diferenciaAsignacionesDraft = computed(() => {
+  return Number(form.value.monto_total || 0) - Number(totalAsignadoPresupuestosDraft.value || 0)
+})
+
+const asignacionesDraftValidas = computed(() => {
+  const idsSeleccionados = (form.value.presupuesto_ids || []).map((id) => String(id))
+  if (!idsSeleccionados.length) return true
+
+  const idsDraft = (asignacionesDraft.value || []).map((item) => String(item.presupuesto_id || ""))
+  const sinRepetidos = new Set(idsDraft).size === idsDraft.length
+  const mismosIds = idsSeleccionados.every((id) => idsDraft.includes(String(id))) && idsDraft.every((id) => idsSeleccionados.includes(String(id)))
+  return sinRepetidos && mismosIds && Math.abs(Number(diferenciaAsignacionesDraft.value || 0)) < 0.01
+})
+
+const chequesTransferibles = computed(() => {
+  return (libroChequesDisponibles.value || []).filter((item) => String(item?.medio_pago || "").toLowerCase() === "cheque")
+})
+
+const totalTransferenciaCheques = computed(() => {
+  const ids = new Set((transferenciaChequesForm.value.cheques_ids || []).map((id) => Number(id)))
+  return chequesTransferibles.value
+    .filter((item) => ids.has(Number(item.id)))
+    .reduce((acc, item) => acc + Number(item.importe || 0), 0)
 })
 
 const clientesOrdenados = computed(() => {
@@ -656,7 +712,10 @@ const cargarSemanasCaja = async (mantenerSeleccion = true) => {
   }
 }
 
-const refrescarCaja = async ({ mantenerSeleccion = true } = {}) => {
+const refrescarCaja = async ({ mantenerSeleccion = true, recargarReferencias = true } = {}) => {
+  if (recargarReferencias) {
+    await cargarReferencias()
+  }
   await cargarDatos()
   await cargarSemanasCaja(mantenerSeleccion)
   await cargarLibroCheques()
@@ -943,12 +1002,15 @@ const crearFormularioVacio = () => ({
   destinatario: "",
   cliente_id: "",
   presupuesto_id: "",
+  presupuesto_ids: [],
+  presupuestos_asignaciones: [],
   detalle: "",
   observaciones: "",
   monto_total: 0,
   desglose: {
     efectivo: 0,
     transferencia: 0,
+    banco: 0,
     retencion: 0
   },
   cheques: [],
@@ -957,6 +1019,115 @@ const crearFormularioVacio = () => ({
   fecha_salida_cheques: new Date().toISOString().split('T')[0],
   endosado_a_cheques: ""
 })
+
+const normalizarAsignacionesPresupuestos = (asignaciones = [], { excluirCeros = false } = {}) => {
+  return (Array.isArray(asignaciones) ? asignaciones : [])
+    .map((item) => ({
+      presupuesto_id: String(item?.presupuesto_id || item?.id || ""),
+      monto_asignado: Math.max(0, Number(item?.monto_asignado ?? item?.monto ?? 0)),
+    }))
+    .filter((item) => {
+      if (!item.presupuesto_id) return false
+      return excluirCeros ? Number(item.monto_asignado) > 0 : Number(item.monto_asignado) >= 0
+    })
+}
+
+const sincronizarAsignacionesConSeleccion = () => {
+  const idsSeleccionados = (form.value.presupuesto_ids || []).map((id) => String(id))
+  if (!idsSeleccionados.length) {
+    form.value.presupuestos_asignaciones = []
+    return
+  }
+
+  const actuales = normalizarAsignacionesPresupuestos(form.value.presupuestos_asignaciones || [])
+  const mapaActual = new Map(actuales.map((item) => [String(item.presupuesto_id), Number(item.monto_asignado || 0)]))
+  const nuevas = idsSeleccionados.map((id) => ({
+    presupuesto_id: String(id),
+    monto_asignado: Number(mapaActual.get(String(id)) || 0),
+  }))
+
+  if (nuevas.length === 1 && !(nuevas[0].monto_asignado > 0)) {
+    nuevas[0].monto_asignado = Number(form.value.monto_total || 0)
+  }
+
+  form.value.presupuestos_asignaciones = nuevas
+}
+
+const abrirModalAsignacionesPresupuestos = () => {
+  if (!form.value.cliente_id || !Array.isArray(form.value.presupuesto_ids) || form.value.presupuesto_ids.length === 0) {
+    error.value = "Seleccioná al menos un presupuesto para repartir el monto"
+    return
+  }
+
+  sincronizarAsignacionesConSeleccion()
+  asignacionesDraft.value = normalizarAsignacionesPresupuestos(form.value.presupuestos_asignaciones || [])
+
+  if (!asignacionesDraft.value.length) {
+    asignacionesDraft.value = (form.value.presupuesto_ids || []).map((id) => ({
+      presupuesto_id: String(id),
+      monto_asignado: 0,
+    }))
+  }
+  mostrarModalAsignaciones.value = true
+}
+
+const aplicarAsignacionesPresupuestos = () => {
+  if (!asignacionesDraftValidas.value) {
+    error.value = "La suma asignada debe coincidir exactamente con el monto total del movimiento"
+    return
+  }
+
+  form.value.presupuestos_asignaciones = normalizarAsignacionesPresupuestos(asignacionesDraft.value)
+  mostrarModalAsignaciones.value = false
+}
+
+const abrirModalTransferenciaCheques = () => {
+  transferenciaChequesForm.value = {
+    caja_destino: CAJAS_DISPONIBLES.find((item) => item.id !== filtroCaja.value)?.id || "",
+    fecha: new Date().toISOString().split('T')[0],
+    cheques_ids: [],
+    detalle: `Pasan cheques a ${getLabelCaja(CAJAS_DISPONIBLES.find((item) => item.id !== filtroCaja.value)?.id || "")}`,
+    observaciones: "",
+  }
+  mostrarModalTransferenciaCheques.value = true
+}
+
+const confirmarTransferenciaCheques = async () => {
+  error.value = ""
+  const destino = String(transferenciaChequesForm.value.caja_destino || "")
+  const ids = (transferenciaChequesForm.value.cheques_ids || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
+
+  if (!destino) {
+    error.value = "Seleccioná la caja destino para transferir los cheques"
+    return
+  }
+  if (destino === filtroCaja.value) {
+    error.value = "La caja destino debe ser distinta a la caja actual"
+    return
+  }
+  if (!ids.length) {
+    error.value = "Seleccioná al menos un cheque disponible"
+    return
+  }
+
+  try {
+    transferiendoCheques.value = true
+    await api.transferirChequesCaja({
+      caja_origen: filtroCaja.value,
+      caja_destino: destino,
+      fecha: transferenciaChequesForm.value.fecha,
+      cheques: ids.map((id) => ({ libro_cheque_id: id })),
+      detalle: transferenciaChequesForm.value.detalle,
+      observaciones: transferenciaChequesForm.value.observaciones,
+    })
+    mostrarModalTransferenciaCheques.value = false
+    await refrescarCaja()
+  } catch (err) {
+    error.value = `Error al transferir cheques: ${err.response?.data?.error || err.message}`
+  } finally {
+    transferiendoCheques.value = false
+  }
+}
 
 const normalizarDesglose = (detalles = []) => {
   const base = {
@@ -997,7 +1168,8 @@ const cerrarFormulario = () => {
   error.value = ""
 }
 
-const abrirFormulario = () => {
+const abrirFormulario = async () => {
+  await cargarReferencias()
   form.value = crearFormularioVacio()
   editandoMovimientoId.value = null
   error.value = ""
@@ -1017,34 +1189,95 @@ const eliminarCheque = (index) => {
   form.value.cheques.splice(index, 1)
 }
 
-const abrirEdicion = (movimiento) => {
-  const chequesMovimiento = normalizarCheques(movimiento.detalles_medio_pago || [])
-  const chequesSalidaIds = chequesMovimiento
-    .map((item) => Number(item.libro_cheque_id || 0))
-    .filter((id) => Number.isInteger(id) && id > 0)
+const abrirEdicion = async (movimiento) => {
+  try {
+    loading.value = true
+    const res = await api.getMovimientoCaja(movimiento.id)
+    const movimientoCompleto = res?.data || movimiento
 
-  form.value = {
-    fecha: String(movimiento.fecha || "").split("T")[0],
-    caja_codigo: movimiento.caja_codigo || filtroCaja.value || "tesla",
-    tipo: movimiento.tipo || "ingreso",
-    categoria: movimiento.categoria || "mano_obra",
-    con_iva: movimiento.con_iva !== false,
-    destinatario: movimiento.destinatario || "",
-    cliente_id: movimiento.cliente_id || "",
-    presupuesto_id: movimiento.presupuesto_id || "",
-    detalle: movimiento.detalle || "",
-    observaciones: movimiento.observaciones || "",
-    monto_total: parseFloat(movimiento.monto_total) || 0,
-    desglose: normalizarDesglose(movimiento.detalles_medio_pago || []),
-    cheques: chequesMovimiento,
-    usar_cheques_libro: movimiento.tipo === "egreso" && chequesSalidaIds.length > 0,
-    cheques_salida: chequesSalidaIds,
-    fecha_salida_cheques: String(movimiento.fecha || "").split("T")[0] || new Date().toISOString().split('T')[0],
-    endosado_a_cheques: String(movimiento.destinatario || "").trim(),
+    const chequesMovimiento = normalizarCheques(movimientoCompleto.detalles_medio_pago || [])
+    const detalleChequesSalida = Array.isArray(movimientoCompleto.cheques_salida_detalle)
+      ? movimientoCompleto.cheques_salida_detalle
+      : []
+    const chequesSalidaIdsBackend = Array.isArray(movimientoCompleto.cheques_salida_ids)
+      ? movimientoCompleto.cheques_salida_ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
+      : []
+    const chequesSalidaIdsDetalles = chequesMovimiento
+      .map((item) => Number(item.libro_cheque_id || 0))
+      .filter((id) => Number.isInteger(id) && id > 0)
+    const chequesSalidaIds = chequesSalidaIdsBackend.length > 0 ? chequesSalidaIdsBackend : chequesSalidaIdsDetalles
+
+    detalleChequesSalida.forEach((item) => {
+      const libroId = Number(item?.id || 0)
+      if (!Number.isInteger(libroId) || libroId <= 0) return
+
+      const existentePorLibro = chequesMovimiento.find((cheque) => Number(cheque?.libro_cheque_id || 0) === libroId)
+      if (existentePorLibro) return
+
+      const numero = String(item?.numero_cheque || "").trim()
+      const existentePorNumeroSinLibro = chequesMovimiento.find((cheque) => {
+        if (Number(cheque?.libro_cheque_id || 0) > 0) return false
+        const nroCheque = String(cheque?.numero_cheque || cheque?.identificador || "").trim()
+        return numero && nroCheque && nroCheque === numero
+      })
+
+      if (existentePorNumeroSinLibro) {
+        existentePorNumeroSinLibro.libro_cheque_id = libroId
+        if (!(Number(existentePorNumeroSinLibro.monto || 0) > 0)) {
+          existentePorNumeroSinLibro.monto = Number(item?.importe || 0)
+        }
+        return
+      }
+
+      chequesMovimiento.push({
+        medio_pago: String(item?.medio_pago || "cheque").toLowerCase(),
+        monto: Number(item?.importe || 0),
+        identificador: numero,
+        numero_cheque: numero,
+        librador_endosante: String(item?.librador_endosante || "").trim(),
+        banco: String(item?.banco || "").trim(),
+        fecha_cheque: String(item?.fecha_cheque || "").split("T")[0],
+        fecha_entrada: String(item?.fecha_salida || movimientoCompleto.fecha || "").split("T")[0],
+        libro_cheque_id: libroId,
+      })
+    })
+
+    form.value = {
+      fecha: String(movimientoCompleto.fecha || "").split("T")[0],
+      caja_codigo: movimientoCompleto.caja_codigo || filtroCaja.value || "tesla",
+      tipo: movimientoCompleto.tipo || "ingreso",
+      categoria: movimientoCompleto.categoria || "mano_obra",
+      con_iva: movimientoCompleto.con_iva !== false,
+      destinatario: movimientoCompleto.destinatario || "",
+      cliente_id: movimientoCompleto.cliente_id || "",
+      presupuesto_id: movimientoCompleto.presupuesto_id || "",
+      presupuesto_ids: Array.isArray(movimientoCompleto.presupuestos_ids) && movimientoCompleto.presupuestos_ids.length > 0
+        ? movimientoCompleto.presupuestos_ids.map((id) => String(id))
+        : (movimientoCompleto.presupuesto_id ? [String(movimientoCompleto.presupuesto_id)] : []),
+      presupuestos_asignaciones: normalizarAsignacionesPresupuestos(
+        movimientoCompleto.presupuestos_asignaciones
+        || (Array.isArray(movimientoCompleto.presupuestos_ids)
+          ? movimientoCompleto.presupuestos_ids.map((id) => ({ presupuesto_id: id, monto_asignado: 0 }))
+          : [])
+      ),
+      detalle: movimientoCompleto.detalle || "",
+      observaciones: movimientoCompleto.observaciones || "",
+      monto_total: parseFloat(movimientoCompleto.monto_total) || 0,
+      desglose: normalizarDesglose(movimientoCompleto.detalles_medio_pago || []),
+      cheques: chequesMovimiento,
+      usar_cheques_libro: movimientoCompleto.tipo === "egreso" && chequesSalidaIds.length > 0,
+      cheques_salida: chequesSalidaIds,
+      fecha_salida_cheques: String(movimientoCompleto.fecha_salida_cheques || movimientoCompleto.fecha || "").split("T")[0] || new Date().toISOString().split('T')[0],
+      endosado_a_cheques: String(movimientoCompleto.endosado_a_cheques || movimientoCompleto.destinatario || "").trim(),
+    }
+    editandoMovimientoId.value = movimientoCompleto.id
+    error.value = ""
+    showForm.value = true
+  } catch (err) {
+    error.value = `Error al cargar edición: ${err.response?.data?.error || err.message}`
+  } finally {
+    loading.value = false
   }
-  editandoMovimientoId.value = movimiento.id
-  error.value = ""
-  showForm.value = true
 }
 
 const payloadMovimiento = () => ({
@@ -1057,13 +1290,25 @@ const payloadMovimiento = () => ({
     ? String(form.value.destinatario || form.value.endosado_a_cheques || "").trim()
     : null,
   cliente_id: form.value.tipo === "ingreso" ? (form.value.cliente_id || null) : null,
-  presupuesto_id: form.value.tipo === "ingreso" ? (form.value.presupuesto_id || null) : null,
+  presupuesto_id: form.value.tipo === "ingreso"
+    ? ((form.value.presupuesto_ids || []).length > 0 ? Number(form.value.presupuesto_ids[0]) : (form.value.presupuesto_id || null))
+    : null,
+  presupuesto_ids: form.value.tipo === "ingreso"
+    ? ((form.value.presupuesto_ids || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0))
+    : [],
+  presupuestos_asignaciones: form.value.tipo === "ingreso"
+    ? normalizarAsignacionesPresupuestos(form.value.presupuestos_asignaciones || [], { excluirCeros: true }).map((item) => ({
+      presupuesto_id: Number(item.presupuesto_id),
+      monto_asignado: Number(item.monto_asignado || 0),
+    }))
+    : [],
   detalle: form.value.detalle,
   observaciones: String(form.value.observaciones || "").trim() || null,
   monto_total: parseFloat(form.value.monto_total),
   desglose: {
     efectivo: parseFloat(form.value.desglose.efectivo) || 0,
     transferencia: parseFloat(form.value.desglose.transferencia) || 0,
+    banco: parseFloat(form.value.desglose.banco) || 0,
     retencion: parseFloat(form.value.desglose.retencion) || 0
   },
   detalles_medio_pago: chequesCargados.value
@@ -1120,27 +1365,60 @@ const cargarChequesDisponibles = async () => {
 const sincronizarChequesSalidaSeleccionados = () => {
   if (!(form.value.tipo === "egreso" && form.value.usar_cheques_libro)) return
 
-  const seleccionados = (form.value.cheques_salida || [])
-    .map((id) => chequesDisponibles.value.find((item) => Number(item.id) === Number(id)))
+  const idsSeleccionados = new Set((form.value.cheques_salida || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0))
+  const seleccionadosDisponibles = [...idsSeleccionados]
+    .map((id) => chequesDisponibles.value.find((item) => Number(item.id) === id))
     .filter(Boolean)
+
+  const seleccionadosPersistidos = (form.value.cheques || []).filter((item) => {
+    const id = Number(item?.libro_cheque_id || 0)
+    if (!Number.isInteger(id) || id <= 0) return false
+    if (!idsSeleccionados.has(id)) return false
+    return !seleccionadosDisponibles.some((disponible) => Number(disponible.id) === id)
+  })
+
+  const seleccionados = [
+    ...seleccionadosDisponibles.map((item) => ({
+      medio_pago: String(item.medio_pago || "cheque").toLowerCase(),
+      monto: Number(item.importe || 0),
+      identificador: String(item.numero_cheque || ""),
+      numero_cheque: String(item.numero_cheque || ""),
+      librador_endosante: String(item.librador_endosante || ""),
+      banco: String(item.banco || ""),
+      fecha_cheque: String(item.fecha_cheque || "").split("T")[0],
+      fecha_entrada: String(item.fecha_entrada || "").split("T")[0],
+      libro_cheque_id: Number(item.id),
+    })),
+    ...seleccionadosPersistidos,
+  ]
 
   form.value.cheques = seleccionados.map((item) => ({
     medio_pago: String(item.medio_pago || "cheque").toLowerCase(),
-    monto: Number(item.importe || 0),
-    identificador: String(item.numero_cheque || ""),
-    numero_cheque: String(item.numero_cheque || ""),
+    monto: Number(item.importe || item.monto || 0),
+    identificador: String(item.identificador || item.numero_cheque || ""),
+    numero_cheque: String(item.numero_cheque || item.identificador || ""),
     librador_endosante: String(item.librador_endosante || ""),
     banco: String(item.banco || ""),
     fecha_cheque: String(item.fecha_cheque || "").split("T")[0],
-    fecha_entrada: String(item.fecha_entrada || "").split("T")[0],
-    libro_cheque_id: Number(item.id),
+    fecha_entrada: String(item.fecha_entrada || item.fecha_salida || "").split("T")[0],
+    libro_cheque_id: Number(item.libro_cheque_id || item.id || 0) || null,
   }))
 }
 
 const guardarMovimiento = async () => {
+  error.value = ""
   if (!esFormularioValido.value) {
     error.value = "Por favor completa todos los campos correctamente"
     return
+  }
+
+  if (form.value.tipo === "ingreso" && Array.isArray(form.value.presupuesto_ids) && form.value.presupuesto_ids.length > 1) {
+    sincronizarAsignacionesConSeleccion()
+    const totalAsignado = (form.value.presupuestos_asignaciones || []).reduce((acc, item) => acc + Number(item?.monto_asignado || 0), 0)
+    if (Math.abs(Number(form.value.monto_total || 0) - totalAsignado) > 0.01) {
+      error.value = "La imputacion por presupuesto debe sumar el monto total del movimiento"
+      return
+    }
   }
 
   try {
@@ -1215,9 +1493,46 @@ const getNombreCliente = (clienteId) => {
 }
 
 const getNumeroPresupuesto = (presupuestoId) => {
-  if (!presupuestoId) return "-"
-  const presupuesto = presupuestos.value.find((p) => String(p.id) === String(presupuestoId))
-  return presupuesto?.numero ? `#${presupuesto.numero}` : `Presupuesto ${presupuestoId}`
+  const ids = Array.isArray(presupuestoId)
+    ? presupuestoId
+    : (presupuestoId ? [presupuestoId] : [])
+  if (ids.length === 0) return "-"
+
+  const etiquetas = ids
+    .map((id) => {
+      const presupuesto = presupuestos.value.find((p) => String(p.id) === String(id))
+      return presupuesto?.numero ? `#${presupuesto.numero}` : `Presupuesto ${id}`
+    })
+    .filter(Boolean)
+
+  return etiquetas.join(", ") || "-"
+}
+
+const getPresupuestoById = (presupuestoId) => {
+  return presupuestos.value.find((p) => String(p.id) === String(presupuestoId)) || null
+}
+
+const getMontoPendientePresupuesto = (presupuestoId) => {
+  const presupuesto = getPresupuestoById(presupuestoId)
+  return Number(presupuesto?.saldo_pendiente_cobro || 0)
+}
+
+const getMontoTotalPresupuesto = (presupuestoId) => {
+  const presupuesto = getPresupuestoById(presupuestoId)
+  return Number(presupuesto?.total || 0)
+}
+
+const aplicarMontoPresupuestoEnDraft = (presupuestoId, modo = "pendiente") => {
+  const id = String(presupuestoId || "")
+  if (!id) return
+
+  const pendiente = getMontoPendientePresupuesto(id)
+  const total = getMontoTotalPresupuesto(id)
+  const monto = modo === "total" ? total : (pendiente > 0 ? pendiente : total)
+  const fila = (asignacionesDraft.value || []).find((item) => String(item.presupuesto_id) === id)
+  if (!fila) return
+
+  fila.monto_asignado = Math.max(0, Number(monto || 0))
 }
 
 const getLabelCategoria = (categoria) => {
@@ -1229,11 +1544,19 @@ const getLabelCategoria = (categoria) => {
 
 const getChequesMovimiento = (movimiento) => {
   return (movimiento?.detalles_medio_pago || []).filter((detalle) => {
-    return ["cheque", "echeq"].includes(String(detalle?.medio_pago || "").toLowerCase())
+    return String(detalle?.medio_pago || "").toLowerCase() === "cheque"
   })
 }
 
 const getCantidadCheques = (movimiento) => getChequesMovimiento(movimiento).length
+
+const getEcheqsMovimiento = (movimiento) => {
+  return (movimiento?.detalles_medio_pago || []).filter((detalle) => {
+    return String(detalle?.medio_pago || "").toLowerCase() === "echeq"
+  })
+}
+
+const getCantidadEcheqs = (movimiento) => getEcheqsMovimiento(movimiento).length
 
 const getIdentificadoresCheque = (movimiento) => {
   const ids = getChequesMovimiento(movimiento)
@@ -1249,6 +1572,23 @@ const getResumenCheques = (movimiento) => {
 
   const ids = getIdentificadoresCheque(movimiento)
   const textoCantidad = `${cantidad} ${cantidad === 1 ? "cheque" : "cheques"}`
+  return ids ? `${textoCantidad} · ${ids}` : textoCantidad
+}
+
+const getIdentificadoresEcheq = (movimiento) => {
+  const ids = getEcheqsMovimiento(movimiento)
+    .map((detalle) => String(detalle?.identificador || detalle?.numero_cheque || "").trim())
+    .filter(Boolean)
+
+  return ids.join(" · ")
+}
+
+const getResumenEcheq = (movimiento) => {
+  const cantidad = getCantidadEcheqs(movimiento)
+  if (!cantidad) return ""
+
+  const ids = getIdentificadoresEcheq(movimiento)
+  const textoCantidad = `${cantidad} ${cantidad === 1 ? "eCheq" : "eCheq"}`
   return ids ? `${textoCantidad} · ${ids}` : textoCantidad
 }
 
@@ -1300,6 +1640,7 @@ watch(() => form.value.tipo, (tipo) => {
     form.value.categoria = ""
     form.value.cliente_id = ""
     form.value.presupuesto_id = ""
+    form.value.presupuesto_ids = []
     return
   }
 
@@ -1315,7 +1656,11 @@ watch(() => form.value.tipo, (tipo) => {
 watch(() => form.value.usar_cheques_libro, (usar) => {
   if (form.value.tipo !== "egreso") return
   if (usar) {
-    form.value.cheques = []
+    // Mantener cheques vinculados al libro durante edicion para no perder seleccion previa.
+    form.value.cheques = (form.value.cheques || []).filter((item) => {
+      const id = Number(item?.libro_cheque_id || 0)
+      return Number.isInteger(id) && id > 0
+    })
     sincronizarChequesSalidaSeleccionados()
   } else {
     form.value.cheques_salida = []
@@ -1328,6 +1673,17 @@ watch(() => form.value.cheques_salida, () => {
   sincronizarChequesSalidaSeleccionados()
 }, { deep: true })
 
+watch(() => form.value.presupuesto_ids, (ids) => {
+  form.value.presupuesto_id = Array.isArray(ids) && ids.length > 0 ? ids[0] : ""
+  sincronizarAsignacionesConSeleccion()
+}, { deep: true })
+
+watch(() => form.value.monto_total, () => {
+  if (Array.isArray(form.value.presupuesto_ids) && form.value.presupuesto_ids.length === 1) {
+    sincronizarAsignacionesConSeleccion()
+  }
+})
+
 watch(() => filtroBusquedaLibroCheques.value, () => {
   cargarLibroCheques()
 })
@@ -1335,13 +1691,23 @@ watch(() => filtroBusquedaLibroCheques.value, () => {
 watch(() => form.value.cliente_id, (clienteId) => {
   if (!clienteId) {
     form.value.presupuesto_id = ""
+    form.value.presupuesto_ids = []
+    form.value.presupuestos_asignaciones = []
     return
   }
 
-  const presupuestoActual = presupuestos.value.find((p) => String(p.id) === String(form.value.presupuesto_id))
-  if (presupuestoActual && String(presupuestoActual.cliente_id) !== String(clienteId)) {
-    form.value.presupuesto_id = ""
-  }
+  const idsFiltrados = (form.value.presupuesto_ids || []).filter((id) => {
+    const presupuesto = presupuestos.value.find((p) => String(p.id) === String(id))
+    return presupuesto && String(presupuesto.cliente_id) === String(clienteId)
+  })
+  form.value.presupuesto_ids = idsFiltrados
+  form.value.presupuesto_id = idsFiltrados[0] || ""
+  sincronizarAsignacionesConSeleccion()
+})
+
+watch(() => transferenciaChequesForm.value.caja_destino, (destino) => {
+  if (!destino) return
+  transferenciaChequesForm.value.detalle = `Pasan cheques a ${getLabelCaja(destino)}`
 })
 
 onMounted(() => {
@@ -1396,7 +1762,7 @@ onUnmounted(() => {
           <div class="caja-semana-copy">
             <span class="section-kicker">Caja semanal</span>
             <h3>{{ etiquetaSemanaActiva }}</h3>
-            <p>La semana nueva arranca con el saldo final de la anterior y los movimientos quedan encapsulados en su propio período.</p>
+            <!--<p>La semana nueva arranca con el saldo final de la anterior y los movimientos quedan encapsulados en su propio período.</p>-->
           </div>
           <div class="caja-semana-actions">
             <label class="caja-semana-select">
@@ -1420,7 +1786,7 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="caja-semana-grid">
+        <!--<div class="caja-semana-grid">
           <article class="caja-semana-card">
             <span>Saldo inicial</span>
             <strong>{{ formatoMoneda(saldoInicialSemana) }}</strong>
@@ -1443,77 +1809,7 @@ onUnmounted(() => {
               <small class="caja-semana-meta">Cheques: {{ formatoMoneda(saldoFinalChequesSemana) }}</small>
             </div>
           </article>
-        </div>
-
-        <div
-          v-if="semanaActiva.saldo_banco !== null && semanaActiva.saldo_banco !== undefined
-            || semanaActiva.saldo_pendiente_echeq !== null && semanaActiva.saldo_pendiente_echeq !== undefined
-            || semanaActiva.saldo_echeq_depositados !== null && semanaActiva.saldo_echeq_depositados !== undefined
-            || semanaActiva.saldo_efectivo !== null && semanaActiva.saldo_efectivo !== undefined
-            || semanaActiva.saldo_cheques !== null && semanaActiva.saldo_cheques !== undefined"
-          class="caja-resumen-bancario-card"
-        >
-          <span class="caja-resumen-bancario-title">Resumen bancario</span>
-          <div class="caja-resumen-bancario-grid">
-            <div v-if="semanaActiva.saldo_banco !== null && semanaActiva.saldo_banco !== undefined" class="caja-semana-bank-box">
-              <span class="bank-label">Saldo Banco</span>
-              <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_banco) }}</strong>
-            </div>
-            <div v-if="semanaActiva.saldo_pendiente_echeq !== null && semanaActiva.saldo_pendiente_echeq !== undefined" class="caja-semana-bank-box caja-semana-echeq-box">
-              <span class="bank-label">eCheqs a depositar</span>
-              <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_pendiente_echeq) }}</strong>
-            </div>
-            <div v-if="semanaActiva.saldo_echeq_depositados !== null && semanaActiva.saldo_echeq_depositados !== undefined" class="caja-semana-bank-box caja-semana-echeq-box">
-              <span class="bank-label">eCheqs depositados</span>
-              <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_echeq_depositados) }}</strong>
-            </div>
-            <div v-if="semanaActiva.saldo_efectivo !== null && semanaActiva.saldo_efectivo !== undefined" class="caja-semana-bank-box caja-semana-cash-box">
-              <span class="bank-label">Efectivo ingresado</span>
-              <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_efectivo) }}</strong>
-            </div>
-            <div v-if="semanaActiva.saldo_cheques !== null && semanaActiva.saldo_cheques !== undefined" class="caja-semana-bank-box caja-semana-cash-box">
-              <span class="bank-label">Cheques ingresados</span>
-              <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_cheques) }}</strong>
-            </div>
-          </div>
-        </div>
-
-        <section class="caja-bank-inline-shell">
-          <div class="caja-bank-inline-head">
-            <span class="section-kicker">Resumen bancario semanal</span>
-            <p>{{ semanaEstaCerrada ? 'Semana cerrada: no se pueden modificar estos valores.' : 'Podés editar estos montos en cualquier momento. Al cerrar semana se vuelven a confirmar.' }}</p>
-          </div>
-          <div class="caja-bank-inline-grid">
-            <label class="form-group form-card-field form-card-field-accent">
-              <span>Saldo banco ($)</span>
-              <input v-model.number="saldoBancoEditable" type="number" @wheel.prevent placeholder="0.00" step="0.01" :disabled="semanaEstaCerrada" />
-            </label>
-            <label class="form-group form-card-field form-card-field-accent">
-              <span>eCheqs a depositar ($)</span>
-              <input v-model.number="saldoEcheqADepositarEditable" type="number" @wheel.prevent placeholder="0.00" step="0.01" :disabled="semanaEstaCerrada" />
-            </label>
-            <label class="form-group form-card-field form-card-field-accent">
-              <span>eCheqs depositados ($)</span>
-              <input v-model.number="saldoEcheqDepositadosEditable" type="number" @wheel.prevent placeholder="0.00" step="0.01" :disabled="semanaEstaCerrada" />
-            </label>
-            <label class="form-group form-card-field form-card-field-accent">
-              <span>Efectivo en caja ($)</span>
-              <input v-model.number="saldoEfectivoEditable" type="number" @wheel.prevent placeholder="0.00" step="0.01" :disabled="semanaEstaCerrada" />
-            </label>
-            <label class="form-group form-card-field form-card-field-accent">
-              <span>Cheques en caja ($)</span>
-              <input v-model.number="saldoChequesEditable" type="number" @wheel.prevent placeholder="0.00" step="0.01" :disabled="semanaEstaCerrada" />
-            </label>
-          </div>
-          <div class="caja-bank-inline-actions">
-            <button type="button" class="btn btn-secondary" :disabled="guardandoSaldosSemana || semanaEstaCerrada" @click="descartarSaldosSemana()">
-              Descartar cambios
-            </button>
-            <button type="button" class="btn btn-primary" :disabled="guardandoSaldosSemana || semanaEstaCerrada" @click="guardarSaldosSemana()">
-              {{ guardandoSaldosSemana ? "Guardando..." : "Guardar saldos" }}
-            </button>
-          </div>
-        </section>
+        </div>-->
 
         <section class="caja-stats-grid">
           <article class="caja-stat-card caja-stat-balance">
@@ -1537,6 +1833,76 @@ onUnmounted(() => {
             <small>{{ textoTipoFiltro() }}</small>
           </article>
         </section>
+      </section>
+            
+      <div
+        v-if="semanaActiva.saldo_banco !== null && semanaActiva.saldo_banco !== undefined
+          || semanaActiva.saldo_pendiente_echeq !== null && semanaActiva.saldo_pendiente_echeq !== undefined
+          || semanaActiva.saldo_echeq_depositados !== null && semanaActiva.saldo_echeq_depositados !== undefined
+          || semanaActiva.saldo_efectivo !== null && semanaActiva.saldo_efectivo !== undefined
+          || semanaActiva.saldo_cheques !== null && semanaActiva.saldo_cheques !== undefined"
+        class="caja-resumen-bancario-card"
+      >
+        <span class="caja-resumen-bancario-title">Resumen bancario</span>
+        <div class="caja-resumen-bancario-grid">
+          <div v-if="semanaActiva.saldo_banco !== null && semanaActiva.saldo_banco !== undefined" class="caja-semana-bank-box">
+            <span class="bank-label">Saldo Banco</span>
+            <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_banco) }}</strong>
+          </div>
+          <div v-if="semanaActiva.saldo_pendiente_echeq !== null && semanaActiva.saldo_pendiente_echeq !== undefined" class="caja-semana-bank-box caja-semana-echeq-box">
+            <span class="bank-label">eCheqs a depositar</span>
+            <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_pendiente_echeq) }}</strong>
+          </div>
+          <div v-if="semanaActiva.saldo_echeq_depositados !== null && semanaActiva.saldo_echeq_depositados !== undefined" class="caja-semana-bank-box caja-semana-echeq-box">
+            <span class="bank-label">eCheqs depositados</span>
+            <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_echeq_depositados) }}</strong>
+          </div>
+          <div v-if="semanaActiva.saldo_efectivo !== null && semanaActiva.saldo_efectivo !== undefined" class="caja-semana-bank-box caja-semana-cash-box">
+            <span class="bank-label">Efectivo ingresado</span>
+            <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_efectivo) }}</strong>
+          </div>
+          <div v-if="semanaActiva.saldo_cheques !== null && semanaActiva.saldo_cheques !== undefined" class="caja-semana-bank-box caja-semana-cash-box">
+            <span class="bank-label">Cheques ingresados</span>
+            <strong class="bank-value">{{ formatoMoneda(semanaActiva.saldo_cheques) }}</strong>
+          </div>
+        </div>
+      </div>
+
+      <section class="caja-bank-inline-shell">
+        <div class="caja-bank-inline-head">
+          <span class="section-kicker">Resumen bancario semanal</span>
+          <p>{{ semanaEstaCerrada ? 'Semana cerrada: no se pueden modificar estos valores.' : 'Podés editar estos montos en cualquier momento. Al cerrar semana se vuelven a confirmar.' }}</p>
+        </div>
+        <div class="caja-bank-inline-grid">
+          <label class="form-group form-card-field form-card-field-accent">
+            <span>Saldo banco ($)</span>
+            <input v-model.number="saldoBancoEditable" type="number" @wheel.prevent placeholder="0.00" step="0.01" :disabled="semanaEstaCerrada" />
+          </label>
+          <label class="form-group form-card-field form-card-field-accent">
+            <span>eCheqs a depositar ($)</span>
+            <input v-model.number="saldoEcheqADepositarEditable" type="number" @wheel.prevent placeholder="0.00" step="0.01" :disabled="semanaEstaCerrada" />
+          </label>
+          <label class="form-group form-card-field form-card-field-accent">
+            <span>eCheqs depositados ($)</span>
+            <input v-model.number="saldoEcheqDepositadosEditable" type="number" @wheel.prevent placeholder="0.00" step="0.01" :disabled="semanaEstaCerrada" />
+          </label>
+          <label class="form-group form-card-field form-card-field-accent">
+            <span>Efectivo en caja ($)</span>
+            <input v-model.number="saldoEfectivoEditable" type="number" @wheel.prevent placeholder="0.00" step="0.01" :disabled="semanaEstaCerrada" />
+          </label>
+          <label class="form-group form-card-field form-card-field-accent">
+            <span>Cheques en caja ($)</span>
+            <input v-model.number="saldoChequesEditable" type="number" @wheel.prevent placeholder="0.00" step="0.01" :disabled="semanaEstaCerrada" />
+          </label>
+        </div>
+        <div class="caja-bank-inline-actions">
+          <button type="button" class="btn btn-secondary" :disabled="guardandoSaldosSemana || semanaEstaCerrada" @click="descartarSaldosSemana()">
+            Descartar cambios
+          </button>
+          <button type="button" class="btn btn-primary" :disabled="guardandoSaldosSemana || semanaEstaCerrada" @click="guardarSaldosSemana()">
+            {{ guardandoSaldosSemana ? "Guardando..." : "Guardar saldos" }}
+          </button>
+        </div>
       </section>
 
       <section class="caja-toolbar-shell">
@@ -1605,6 +1971,9 @@ onUnmounted(() => {
           <div class="libro-cheques-header-actions">
             <p class="libro-cheques-counter">{{ libroChequesFiltrado.length }} cheque(s) para {{ cajaActiva.label.toLowerCase() }}.</p>
             <div class="section-actions-group">
+              <button type="button" class="btn btn-ghost" @click="abrirModalTransferenciaCheques">
+                Transferir cheques
+              </button>
               <button type="button" class="btn btn-ghost btn-collapse-toggle" @click="libroChequesExpandido = !libroChequesExpandido">
                 {{ libroChequesExpandido ? "Contraer" : "Expandir" }}
               </button>
@@ -1675,9 +2044,18 @@ onUnmounted(() => {
                 <span class="section-kicker">No disponibles</span>
                 <h3>Cheques no disponibles</h3>
               </div>
-              <p class="section-heading-count">{{ libroChequesNoDisponibles.length }} cheque(s).</p>
+              <div class="section-actions-group">
+                <p class="section-heading-count">{{ libroChequesNoDisponibles.length }} cheque(s).</p>
+                <button type="button" class="btn btn-ghost btn-collapse-toggle" @click="noDisponiblesExpandido = !noDisponiblesExpandido">
+                  {{ noDisponiblesExpandido ? "Contraer" : "Expandir" }}
+                </button>
+              </div>
             </div>
-            <div v-if="!libroChequesNoDisponibles.length" class="empty">
+            <div v-if="!noDisponiblesExpandido" class="empty empty-collapsed">
+              <strong>Listado contraído</strong>
+              <span>Expandí para ver los cheques no disponibles.</span>
+            </div>
+            <div v-else-if="!libroChequesNoDisponibles.length" class="empty">
               <strong>Sin cheques no disponibles</strong>
               <span>No hay cheques egresados o anulados para este filtro.</span>
             </div>
@@ -1764,7 +2142,7 @@ onUnmounted(() => {
             </td>
             <td>
               <div class="tabla-referencia">
-                <strong>{{ mov.tipo === 'egreso' ? (mov.destinatario || '-') : (getNumeroPresupuesto(mov.presupuesto_id) !== '-' ? getNumeroPresupuesto(mov.presupuesto_id) : getNombreCliente(mov.cliente_id)) }}</strong>
+                <strong>{{ mov.tipo === 'egreso' ? (mov.destinatario || '-') : (getNumeroPresupuesto((mov.presupuestos_ids && mov.presupuestos_ids.length) ? mov.presupuestos_ids : mov.presupuesto_id) !== '-' ? getNumeroPresupuesto((mov.presupuestos_ids && mov.presupuestos_ids.length) ? mov.presupuestos_ids : mov.presupuesto_id) : getNombreCliente(mov.cliente_id)) }}</strong>
                 <small v-if="getIdentificadoresCheque(mov)" class="referencia-cheques" :title="`Cheque(s): ${getIdentificadoresCheque(mov)}`">Cheque(s): {{ getIdentificadoresCheque(mov) }}</small>
               </div>
             </td>
@@ -1773,7 +2151,10 @@ onUnmounted(() => {
               <span class="observacion-completa">{{ mov.observaciones || '-' }}</span>
             </td>
             <td class="td-cheques">
-              <span v-if="getCantidadCheques(mov)" class="cell-clamp" :title="getResumenCheques(mov)">{{ getResumenCheques(mov) }}</span>
+              <template v-if="getCantidadCheques(mov) || getCantidadEcheqs(mov)">
+                <span v-if="getCantidadCheques(mov)" class="cell-clamp" :title="getResumenCheques(mov)">{{ getResumenCheques(mov) }}</span>
+                <span v-if="getCantidadEcheqs(mov)" class="cell-clamp" :title="getResumenEcheq(mov)">{{ getResumenEcheq(mov) }}</span>
+              </template>
               <span v-else>-</span>
             </td>
             <td class="monto-total">{{ formatoMoneda(mov.monto_total) }}</td>
@@ -1865,12 +2246,16 @@ onUnmounted(() => {
             <p>{{ getNombreCliente(movimientoSeleccionado.cliente_id) }}</p>
           </div>
           <div class="info-item">
-            <label>Presupuesto asociado</label>
-            <p>{{ getNumeroPresupuesto(movimientoSeleccionado.presupuesto_id) }}</p>
+            <label>Presupuestos asociados</label>
+            <p>{{ getNumeroPresupuesto((movimientoSeleccionado.presupuestos_ids && movimientoSeleccionado.presupuestos_ids.length) ? movimientoSeleccionado.presupuestos_ids : movimientoSeleccionado.presupuesto_id) }}</p>
           </div>
           <div class="info-item" v-if="getCantidadCheques(movimientoSeleccionado)">
             <label>Cheques asociados</label>
             <p>{{ getResumenCheques(movimientoSeleccionado) }}</p>
+          </div>
+          <div class="info-item" v-if="getCantidadEcheqs(movimientoSeleccionado)">
+            <label>eCheq asociados</label>
+            <p>{{ getResumenEcheq(movimientoSeleccionado) }}</p>
           </div>
           <div class="info-item">
             <label>ID de movimiento</label>
@@ -1941,6 +2326,117 @@ onUnmounted(() => {
           <button type="button" class="btn-secondary" :disabled="generandoPdfCheques" @click="mostrarModalPdfCheques = false">
             Cancelar
           </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="mostrarModalTransferenciaCheques" class="modal-overlay modal-overlay-front" @click.self="mostrarModalTransferenciaCheques = false">
+    <div class="modal modal-confirmacion modal-transfer-cheques">
+      <div class="modal-header modal-header-confirmacion">
+        <div class="modal-header-copy">
+          <span class="section-kicker">Libro de cheques</span>
+          <h3>Transferir cheques de caja</h3>
+          <p>Los cheques seleccionados saldran de {{ getLabelCaja(filtroCaja) }} y se agregaran como disponibles en la caja destino.</p>
+        </div>
+        <button type="button" class="btn-close" aria-label="Cerrar modal" @click="mostrarModalTransferenciaCheques = false">×</button>
+      </div>
+
+      <div class="modal-form modal-form-transfer-cheques">
+        <label class="form-group">
+          <span>Caja destino *</span>
+          <select v-model="transferenciaChequesForm.caja_destino">
+            <option value="" disabled>Seleccionar</option>
+            <option v-for="caja in CAJAS_DISPONIBLES.filter((item) => item.id !== filtroCaja)" :key="caja.id" :value="caja.id">
+              {{ caja.label }}
+            </option>
+          </select>
+        </label>
+
+        <label class="form-group">
+          <span>Fecha *</span>
+          <input v-model="transferenciaChequesForm.fecha" type="date" />
+        </label>
+
+        <label class="form-group">
+          <span>Detalle</span>
+          <input v-model="transferenciaChequesForm.detalle" type="text" />
+        </label>
+
+        <label class="form-group">
+          <span>Observaciones</span>
+          <textarea v-model="transferenciaChequesForm.observaciones" rows="2" />
+        </label>
+
+        <div class="form-group">
+          <span>Cheques disponibles *</span>
+          <div class="cheques-transfer-list">
+            <label v-for="item in chequesTransferibles" :key="`tr-${item.id}`" class="cheque-transfer-item">
+              <input v-model="transferenciaChequesForm.cheques_ids" type="checkbox" :value="item.id" />
+              <span>#{{ item.numero_cheque }} · {{ item.banco || '-' }} · {{ formatoMoneda(item.importe || 0) }}</span>
+            </label>
+            <small v-if="!chequesTransferibles.length" class="form-help">No hay cheques disponibles para transferir.</small>
+          </div>
+        </div>
+
+        <div class="transfer-cheques-total">
+          <span>Total seleccionado</span>
+          <strong>{{ formatoMoneda(totalTransferenciaCheques || 0) }}</strong>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn-primary" :disabled="transferiendoCheques" @click="confirmarTransferenciaCheques">
+            {{ transferiendoCheques ? "Transfiriendo..." : "Confirmar transferencia" }}
+          </button>
+          <button type="button" class="btn-secondary" :disabled="transferiendoCheques" @click="mostrarModalTransferenciaCheques = false">
+            Cancelar
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="mostrarModalAsignaciones" class="modal-overlay modal-overlay-front" @click.self="mostrarModalAsignaciones = false">
+    <div class="modal modal-confirmacion modal-asignaciones-presupuestos">
+      <div class="modal-header modal-header-confirmacion">
+        <div class="modal-header-copy">
+          <span class="section-kicker">Imputacion</span>
+          <h3>Asignar monto por presupuesto</h3>
+          <p>La suma de las asignaciones debe ser igual al monto total del movimiento.</p>
+        </div>
+        <button type="button" class="btn-close" aria-label="Cerrar modal" @click="mostrarModalAsignaciones = false">×</button>
+      </div>
+
+      <div class="modal-form modal-form-asignaciones">
+        <div class="asignaciones-grid">
+          <div v-for="item in asignacionesDraft" :key="item.presupuesto_id" class="asignacion-presupuesto-card">
+            <div class="asignacion-presupuesto-head">
+              <strong>{{ getNumeroPresupuesto(item.presupuesto_id) }}</strong>
+              <span>Pendiente: {{ formatoMoneda(getMontoPendientePresupuesto(item.presupuesto_id)) }}</span>
+              <span>Total: {{ formatoMoneda(getMontoTotalPresupuesto(item.presupuesto_id)) }}</span>
+            </div>
+            <div class="asignacion-presupuesto-controls">
+              <input v-model.number="item.monto_asignado" type="number" step="0.01" @wheel.prevent />
+              <button type="button" class="btn btn-ghost btn-sm" @click="aplicarMontoPresupuestoEnDraft(item.presupuesto_id, 'pendiente')">
+                Usar pendiente
+              </button>
+              <button type="button" class="btn btn-ghost btn-sm" @click="aplicarMontoPresupuestoEnDraft(item.presupuesto_id, 'total')">
+                Usar total
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="asignaciones-resumen">
+          <span>Total asignado: <strong>{{ formatoMoneda(totalAsignadoPresupuestosDraft || 0) }}</strong></span>
+          <span :class="Math.abs(diferenciaAsignacionesDraft || 0) < 0.01 ? 'ok' : 'warn'">
+            Diferencia: {{ formatoMoneda(diferenciaAsignacionesDraft || 0) }}
+          </span>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn-primary" @click="aplicarAsignacionesPresupuestos">Aplicar</button>
+          <button type="button" class="btn-secondary" @click="mostrarModalAsignaciones = false">Cancelar</button>
         </div>
       </div>
     </div>
@@ -2053,15 +2549,25 @@ onUnmounted(() => {
                 </option>
               </select>
             </label>
-            <label class="form-group form-card-field">
-              <span>Presupuesto (opcional)</span>
-              <select v-model="form.presupuesto_id">
-                <option value="">Sin presupuesto</option>
-                <option v-for="pres in presupuestosDisponibles" :key="pres.id" :value="pres.id">
-                  #{{ pres.numero }}
-                </option>
-              </select>
-            </label>
+            <div v-if="form.cliente_id" class="form-group form-card-field">
+              <span>Presupuestos (opcional)</span>
+              <div v-if="presupuestosDisponibles.length" class="presupuestos-checklist">
+                <label v-for="pres in presupuestosDisponibles" :key="pres.id" class="presupuesto-check-item">
+                  <input v-model="form.presupuesto_ids" type="checkbox" :value="String(pres.id)" />
+                  <span>#{{ pres.numero }} · {{ formatoMoneda(Number(pres.saldo_pendiente_cobro || 0)) }} pendiente</span>
+                </label>
+              </div>
+              <small v-else class="form-help">No hay presupuestos para el cliente seleccionado.</small>
+              <small class="form-help">Podes asociar uno o más presupuestos del cliente seleccionado.</small>
+              <div v-if="(form.presupuesto_ids || []).length > 0" class="presupuesto-asignacion-actions">
+                <button type="button" class="btn btn-ghost" @click="abrirModalAsignacionesPresupuestos">
+                  Imputar montos por presupuesto
+                </button>
+                <small v-if="(form.presupuestos_asignaciones || []).length">
+                  Asignado: {{ formatoMoneda((form.presupuestos_asignaciones || []).reduce((acc, item) => acc + Number(item?.monto_asignado || 0), 0)) }} / {{ formatoMoneda(form.monto_total || 0) }}
+                </small>
+              </div>
+            </div>
           </div>
 
           </div>
@@ -2200,19 +2706,19 @@ onUnmounted(() => {
                       <span>Identificador *</span>
                       <input v-model="cheque.identificador" :readonly="chequesBloqueadosPorLibro" :disabled="chequesBloqueadosPorLibro" type="text" placeholder="Ej: CHQ-A12345" />
                     </label>
-                    <label v-if="esIngreso" class="form-group form-card-field">
+                    <label v-if="esIngreso && cheque.medio_pago !== 'echeq'" class="form-group form-card-field">
                       <span>Numero cheque *</span>
                       <input v-model="cheque.numero_cheque" type="text" placeholder="Numero de cheque" />
                     </label>
-                    <label v-if="esIngreso" class="form-group form-card-field">
+                    <label v-if="esIngreso && cheque.medio_pago !== 'echeq'" class="form-group form-card-field">
                       <span>Librador o endosante *</span>
                       <input v-model="cheque.librador_endosante" type="text" placeholder="Nombre" />
                     </label>
-                    <label v-if="esIngreso" class="form-group form-card-field">
+                    <label v-if="esIngreso && cheque.medio_pago !== 'echeq'" class="form-group form-card-field">
                       <span>Banco *</span>
                       <input v-model="cheque.banco" type="text" placeholder="Banco emisor" />
                     </label>
-                    <label v-if="esIngreso" class="form-group form-card-field">
+                    <label v-if="esIngreso && cheque.medio_pago !== 'echeq'" class="form-group form-card-field">
                       <span>Fecha cheque *</span>
                       <input v-model="cheque.fecha_cheque" type="date" />
                     </label>
@@ -2370,6 +2876,7 @@ onUnmounted(() => {
 <style scoped>
 .caja-toolbar-shell {
   margin-bottom: 2.5rem;
+  margin-top: -2.5rem;
   padding: 1.15rem 1.2rem;
   border-radius: 1rem;
   border: 1px solid rgba(148, 163, 184, 0.16);
@@ -2519,7 +3026,7 @@ onUnmounted(() => {
 }
 
 .caja-bank-inline-shell {
-  margin-top: 1rem;
+  margin-top: -0.5rem;
   margin-bottom: 2rem;
   padding: 1rem;
   border-radius: 0.9rem;
@@ -3156,6 +3663,7 @@ onUnmounted(() => {
 .desglose-medios {
   display: grid;
   gap: 1rem;
+  margin-top: -3rem;
 }
 
 .libro-cheques-split {
@@ -3919,12 +4427,6 @@ onUnmounted(() => {
   margin-bottom: 0.75rem;
 }
 
-.desglose-compact-item:last-child {
-  grid-column: 1 / -1;
-  max-width: 50%;
-  margin: 0 auto;
-}
-
 .desglose-compact-item {
   display: flex;
   flex-direction: column;
@@ -3959,6 +4461,25 @@ onUnmounted(() => {
   border-color: #3b82f6;
   background: rgba(30, 41, 59, 0.9);
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.presupuestos-checklist {
+  display: grid;
+  gap: 0.4rem;
+  max-height: 10rem;
+  overflow-y: auto;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 0.55rem;
+  padding: 0.55rem;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.presupuesto-check-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #cbd5e1;
+  font-size: 0.9rem;
 }
 
 .desglose-validacion-compact {
@@ -4323,6 +4844,10 @@ onUnmounted(() => {
   animation: fadeIn 0.18s ease-out;
 }
 
+.modal-overlay-front {
+  z-index: 1300;
+}
+
 .modal {
   background-color: #0f172a;
   border: 1px solid rgba(148, 163, 184, 0.2);
@@ -4445,6 +4970,191 @@ onUnmounted(() => {
   background:
     radial-gradient(circle at top left, rgba(59, 130, 246, 0.14), transparent 34%),
     linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(15, 23, 42, 0.94));
+}
+
+.modal-transfer-cheques {
+  width: min(96vw, 920px);
+  max-width: 920px;
+  border-color: rgba(148, 163, 184, 0.22);
+  background: #0f172a;
+}
+
+.modal-form-transfer-cheques {
+  padding: 1.1rem 1.35rem 1.35rem;
+  gap: 0.85rem;
+}
+
+.modal-form-transfer-cheques .form-group textarea {
+  padding: 0.75rem;
+  background-color: rgba(30, 41, 59, 0.8);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 0.375rem;
+  color: #e2e8f0;
+  font-size: 0.9375rem;
+  resize: vertical;
+  min-height: 72px;
+}
+
+.modal-form-transfer-cheques .form-group textarea:focus {
+  outline: none;
+  border-color: #3b82f6;
+  background-color: rgba(30, 41, 59, 1);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.cheques-transfer-list {
+  max-height: 300px;
+  overflow: auto;
+  padding: 0.4rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 0.8rem;
+  background: rgba(15, 23, 42, 0.52);
+  display: grid;
+  gap: 0.5rem;
+}
+
+.cheque-transfer-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.6rem;
+  align-items: center;
+  padding: 0.65rem 0.7rem;
+  border-radius: 0.65rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(30, 41, 59, 0.55);
+}
+
+.cheque-transfer-item:hover {
+  border-color: rgba(125, 211, 252, 0.34);
+  background: rgba(30, 41, 59, 0.75);
+}
+
+.cheque-transfer-item span {
+  color: #e2e8f0;
+  font-size: 0.92rem;
+  line-height: 1.4;
+}
+
+.transfer-cheques-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 0.9rem;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(96, 165, 250, 0.2);
+  background: rgba(30, 64, 175, 0.16);
+  color: #bfdbfe;
+}
+
+.transfer-cheques-total strong {
+  color: #f8fafc;
+}
+
+.modal-asignaciones-presupuestos {
+  width: min(92vw, 700px);
+  max-width: 700px;
+  border-color: rgba(96, 165, 250, 0.22);
+  background: #0f172a;
+}
+
+.modal-form-asignaciones {
+  padding: 1.05rem 1.25rem 1.3rem;
+  gap: 0.95rem;
+}
+
+.asignaciones-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.8rem;
+}
+
+.asignacion-presupuesto-card {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.75rem;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(30, 41, 59, 0.52);
+}
+
+.asignacion-presupuesto-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.85rem;
+  align-items: baseline;
+}
+
+.asignacion-presupuesto-head strong {
+  color: #f8fafc;
+  font-size: 0.96rem;
+}
+
+.asignacion-presupuesto-head span {
+  font-size: 0.82rem;
+  color: #cbd5e1;
+}
+
+.asignacion-presupuesto-controls {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto auto;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.asignacion-presupuesto-controls input {
+  min-height: 2.6rem;
+  font-weight: 600;
+  padding: 0.65rem 0.75rem;
+  background-color: rgba(15, 23, 42, 0.8);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 0.5rem;
+  color: #e2e8f0;
+}
+
+.asignacion-presupuesto-controls input:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.btn-sm {
+  padding: 0.48rem 0.72rem;
+  font-size: 0.82rem;
+}
+
+.asignaciones-resumen {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.72rem 0.85rem;
+  border-radius: 0.72rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(15, 23, 42, 0.64);
+  color: #cbd5e1;
+}
+
+.asignaciones-resumen .ok {
+  color: #86efac;
+  font-weight: 600;
+}
+
+.asignaciones-resumen .warn {
+  color: #fda4af;
+  font-weight: 600;
+}
+
+.presupuesto-asignacion-actions {
+  margin-top: 0.6rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 0.85rem;
+  align-items: center;
+}
+
+.presupuesto-asignacion-actions small {
+  color: #93c5fd;
 }
 
 .modal-form-pdf-cheques {
@@ -4914,14 +5624,16 @@ onUnmounted(() => {
     grid-template-columns: 1fr;
   }
 
-  .desglose-compact-item:last-child {
-    grid-column: auto;
-    max-width: none;
-    margin: 0;
-  }
-
   .modal-actions {
     flex-direction: column;
+  }
+
+  .asignaciones-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .asignacion-presupuesto-controls {
+    grid-template-columns: 1fr;
   }
 }
 </style>

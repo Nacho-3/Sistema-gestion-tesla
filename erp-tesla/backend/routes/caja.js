@@ -7,7 +7,7 @@ import { fileURLToPath } from "url"
 import { drawPremiumHeader, setupPremiumFooter, drawPremiumSectionTitle, PDF_COLORS, sanitizeFileText } from "../pdf/premiumTheme.js"
 
 const router = express.Router()
-const MEDIOS_PAGO = ["efectivo", "transferencia", "cheque", "echeq", "retencion"]
+const MEDIOS_PAGO = ["efectivo", "transferencia", "banco", "cheque", "echeq", "retencion"]
 const MEDIOS_CHEQUE = ["cheque", "echeq"]
 const CAJAS_DISPONIBLES = ["tesla", "teslita", "juani"]
 const CATEGORIAS_CAJA = ["mano_obra", "materiales", "varios"]
@@ -19,6 +19,7 @@ const LABEL_CAJA = {
 const LABEL_MEDIO = {
   efectivo: "Efectivo",
   transferencia: "Transferencia",
+  banco: "Banco",
   cheque: "Cheque",
   echeq: "Echeq",
   retencion: "Retencion",
@@ -35,6 +36,8 @@ const LOGO_PATH = path.join(__dirname, "..", "assets", "logo_presupuesto.png")
 let detalleColumnCache = null
 let detallesSchemaCache = null
 let libroChequesSchemaReady = false
+let movimientosCajaPresupuestosSchemaReady = false
+let detallesMedioPagoConstraintReady = false
 
 const roundMoney = (valor) => Math.round((Number(valor) || 0) * 100) / 100
 
@@ -96,6 +99,61 @@ async function ensureLibroChequesSchema() {
   libroChequesSchemaReady = true
 }
 
+async function ensureMovimientosCajaPresupuestosSchema() {
+  if (movimientosCajaPresupuestosSchemaReady) return
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS movimientos_caja_presupuestos (
+      movimiento_id INTEGER NOT NULL REFERENCES movimientos_caja(id) ON DELETE CASCADE,
+      presupuesto_id INTEGER NOT NULL REFERENCES presupuestos(id) ON DELETE CASCADE,
+      monto_asignado NUMERIC(12,2),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (movimiento_id, presupuesto_id)
+    );
+  `)
+
+  await pool.query("ALTER TABLE movimientos_caja_presupuestos ADD COLUMN IF NOT EXISTS monto_asignado NUMERIC(12,2);")
+  await pool.query(`
+    UPDATE movimientos_caja_presupuestos mcp
+    SET monto_asignado = mc.monto_total
+    FROM movimientos_caja mc
+    WHERE mcp.movimiento_id = mc.id
+      AND (mcp.monto_asignado IS NULL OR mcp.monto_asignado <= 0)
+  `)
+
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_movimientos_caja_presupuestos_movimiento_id ON movimientos_caja_presupuestos(movimiento_id);")
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_movimientos_caja_presupuestos_presupuesto_id ON movimientos_caja_presupuestos(presupuesto_id);")
+
+  movimientosCajaPresupuestosSchemaReady = true
+}
+
+async function ensureDetallesMedioPagoConstraint() {
+  if (detallesMedioPagoConstraintReady) return
+
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF to_regclass('detalles_medio_pago') IS NULL THEN
+        RETURN;
+      END IF;
+
+      IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_detalles_medio_pago_codigo'
+          AND conrelid = 'detalles_medio_pago'::regclass
+      ) THEN
+        ALTER TABLE detalles_medio_pago DROP CONSTRAINT chk_detalles_medio_pago_codigo;
+      END IF;
+
+      ALTER TABLE detalles_medio_pago
+        ADD CONSTRAINT chk_detalles_medio_pago_codigo
+        CHECK (medio_pago IN ('efectivo', 'transferencia', 'banco', 'cheque', 'echeq', 'retencion'));
+    END $$;
+  `)
+
+  detallesMedioPagoConstraintReady = true
+}
+
 const normalizeChequeDate = (value, fallback = null) => {
   const normalized = normalizarFechaISO(value)
   return normalized || fallback
@@ -106,30 +164,43 @@ const sanitizeChequeText = (value) => String(value || "").trim()
 const isChequePayment = (medioPago) => ["cheque", "echeq"].includes(String(medioPago || "").toLowerCase())
 
 const validarCamposChequeIngreso = (item = {}) => {
+  const esEcheq = String(item.medio_pago || "").toLowerCase() === "echeq"
   const libradorEndosante = sanitizeChequeText(item.librador_endosante)
   const banco = sanitizeChequeText(item.banco)
   const numeroCheque = sanitizeChequeText(item.numero_cheque || item.identificador)
   const fechaCheque = normalizeChequeDate(item.fecha_cheque)
   const fechaEntrada = normalizeChequeDate(item.fecha_entrada, normalizeChequeDate(item.fecha_cobro))
 
-  if (!libradorEndosante) throw new Error("Cada cheque de ingreso debe informar librador o endosante")
-  if (!banco) throw new Error("Cada cheque de ingreso debe informar banco")
+  if (!esEcheq && !libradorEndosante) throw new Error("Cada cheque de ingreso debe informar librador o endosante")
+  if (!esEcheq && !banco) throw new Error("Cada cheque de ingreso debe informar banco")
   if (!numeroCheque) throw new Error("Cada cheque de ingreso debe informar numero de cheque")
-  if (!fechaCheque) throw new Error("Cada cheque de ingreso debe informar fecha de cheque")
+  if (!esEcheq && !fechaCheque) throw new Error("Cada cheque de ingreso debe informar fecha de cheque")
   if (!fechaEntrada) throw new Error("Cada cheque de ingreso debe informar fecha de entrada")
 
   return {
-    librador_endosante: libradorEndosante,
-    banco,
+    librador_endosante: esEcheq ? (libradorEndosante || "") : libradorEndosante,
+    banco: esEcheq ? (banco || "") : banco,
     numero_cheque: numeroCheque,
-    fecha_cheque: fechaCheque,
+    fecha_cheque: esEcheq ? (fechaCheque || fechaEntrada) : fechaCheque,
     fecha_entrada: fechaEntrada,
   }
 }
 
 async function crearChequesLibroDesdeIngreso({ client, movimientoId, cajaCodigo, fechaMovimiento, detallesPago = [] }) {
-  const chequesIngreso = detallesPago.filter((item) => isChequePayment(item?.medio_pago))
+  const chequesIngreso = detallesPago.filter((item) => String(item?.medio_pago || "").toLowerCase() === "cheque")
   if (!chequesIngreso.length) return
+
+  const existentes = await client.query(
+    `
+      SELECT COUNT(*)::int AS total
+      FROM libro_cheques_caja
+      WHERE movimiento_entrada_id = $1
+    `,
+    [movimientoId]
+  )
+  if (Number(existentes.rows?.[0]?.total || 0) > 0) {
+    throw new Error("El movimiento ya tiene cheques registrados en el libro")
+  }
 
   const fechaDefault = normalizeChequeDate(fechaMovimiento)
   const filas = chequesIngreso.map((item) => {
@@ -149,6 +220,25 @@ async function crearChequesLibroDesdeIngreso({ client, movimientoId, cajaCodigo,
   })
 
   for (const fila of filas) {
+    const duplicado = await client.query(
+      `
+        SELECT id
+        FROM libro_cheques_caja
+        WHERE caja_codigo = $1
+          AND LOWER(COALESCE(numero_cheque, '')) = LOWER($2)
+          AND LOWER(COALESCE(banco, '')) = LOWER($3)
+          AND fecha_cheque = $4
+          AND importe = $5
+          AND estado <> 'anulado'
+        LIMIT 1
+      `,
+      [fila.caja_codigo, fila.numero_cheque, fila.banco, fila.fecha_cheque, fila.importe]
+    )
+
+    if (duplicado.rowCount > 0) {
+      throw new Error(`Cheque duplicado detectado (${fila.numero_cheque}) en libro de cheques`)
+    }
+
     const values = [
       fila.caja_codigo,
       fila.medio_pago,
@@ -174,7 +264,7 @@ async function crearChequesLibroDesdeIngreso({ client, movimientoId, cajaCodigo,
   }
 }
 
-async function registrarSalidaCheques({ client, movimientoId, cajaCodigo, fechaSalida, endosadoA, chequesSalida = [] }) {
+async function registrarSalidaCheques({ client, movimientoId, cajaCodigo, fechaSalida, endosadoA, chequesSalida = [], expectedChequeTotal = null }) {
   if (!Array.isArray(chequesSalida) || !chequesSalida.length) return []
 
   const ids = chequesSalida
@@ -183,14 +273,19 @@ async function registrarSalidaCheques({ client, movimientoId, cajaCodigo, fechaS
 
   if (!ids.length) throw new Error("Debe seleccionar al menos un cheque disponible para el egreso")
 
+  const idsUnicos = Array.from(new Set(ids))
+  if (idsUnicos.length !== ids.length) {
+    throw new Error("Hay cheques repetidos en la selección de salida")
+  }
+
   const fechaSalidaNorm = normalizeChequeDate(fechaSalida)
   if (!fechaSalidaNorm) throw new Error("La fecha de salida de cheque es obligatoria")
 
   const endosadoTexto = sanitizeChequeText(endosadoA)
   if (!endosadoTexto) throw new Error("Debe indicar a quien se endosa el cheque")
 
-  const placeholders = ids.map((_, i) => `$${i + 1}`).join(",")
-  const placeholdersUpdate = ids.map((_, i) => `$${i + 4}`).join(",")
+  const placeholders = idsUnicos.map((_, i) => `$${i + 1}`).join(",")
+  const placeholdersUpdate = idsUnicos.map((_, i) => `$${i + 4}`).join(",")
   const consulta = await client.query(
     `
       SELECT id, caja_codigo, estado, importe
@@ -198,16 +293,24 @@ async function registrarSalidaCheques({ client, movimientoId, cajaCodigo, fechaS
       WHERE id IN (${placeholders})
       FOR UPDATE
     `,
-    ids
+    idsUnicos
   )
 
-  if (consulta.rowCount !== ids.length) {
+  if (consulta.rowCount !== idsUnicos.length) {
     throw new Error("Uno o mas cheques seleccionados no existen en el libro")
   }
 
   const invalidos = consulta.rows.filter((row) => row.estado !== "disponible" || row.caja_codigo !== cajaCodigo)
   if (invalidos.length) {
     throw new Error("Hay cheques seleccionados que no estan disponibles para salida")
+  }
+
+  if (expectedChequeTotal !== null && expectedChequeTotal !== undefined) {
+    const totalSeleccionado = roundMoney(consulta.rows.reduce((acc, row) => acc + Number(row.importe || 0), 0))
+    const totalEsperado = roundMoney(Number(expectedChequeTotal || 0))
+    if (Math.abs(totalSeleccionado - totalEsperado) > 0.01) {
+      throw new Error(`La suma de cheques seleccionados (${totalSeleccionado}) no coincide con el monto en desglose (${totalEsperado})`)
+    }
   }
 
   await client.query(
@@ -220,10 +323,40 @@ async function registrarSalidaCheques({ client, movimientoId, cajaCodigo, fechaS
           updated_at = CURRENT_TIMESTAMP
       WHERE id IN (${placeholdersUpdate})
     `,
-    [movimientoId, fechaSalidaNorm, endosadoTexto, ...ids]
+    [movimientoId, fechaSalidaNorm, endosadoTexto, ...idsUnicos]
   )
 
   return consulta.rows
+}
+
+function validarEgresoConChequesLibro({ detallesPago = [], chequesSalida = [] } = {}) {
+  const chequesDetalle = (detallesPago || []).filter((item) => isChequePayment(item?.medio_pago))
+  if (!chequesDetalle.length) return { totalChequesDetalle: 0 }
+
+  const idsDetalles = chequesDetalle
+    .map((item) => Number(item?.libro_cheque_id || 0))
+    .filter((id) => Number.isInteger(id) && id > 0)
+
+  if (idsDetalles.length !== chequesDetalle.length) {
+    throw new Error("En egresos, todos los cheques del desglose deben estar vinculados al libro de cheques")
+  }
+
+  const idsSalida = (Array.isArray(chequesSalida) ? chequesSalida : [])
+    .map((item) => Number(item?.libro_cheque_id || item?.id || 0))
+    .filter((id) => Number.isInteger(id) && id > 0)
+
+  if (!idsSalida.length) {
+    throw new Error("Debe seleccionar cheques del libro para registrar egresos con cheque/eCheq")
+  }
+
+  const setSalida = new Set(idsSalida)
+  const faltantes = idsDetalles.filter((id) => !setSalida.has(id))
+  if (faltantes.length > 0) {
+    throw new Error("Hay cheques en el desglose que no fueron seleccionados en la salida")
+  }
+
+  const totalChequesDetalle = roundMoney(chequesDetalle.reduce((acc, item) => acc + Number(item?.monto || 0), 0))
+  return { totalChequesDetalle }
 }
 
 async function revertirSalidaChequesPorMovimiento({ client, movimientoId }) {
@@ -239,6 +372,23 @@ async function revertirSalidaChequesPorMovimiento({ client, movimientoId }) {
     `,
     [movimientoId]
   )
+}
+
+async function obtenerChequesSalidaPorMovimiento(movimientoId) {
+  const id = Number(movimientoId || 0)
+  if (!Number.isInteger(id) || id <= 0) return []
+
+  const result = await pool.query(
+    `
+      SELECT id, medio_pago, importe, numero_cheque, banco, librador_endosante, fecha_cheque, fecha_salida, endosado_a
+      FROM libro_cheques_caja
+      WHERE movimiento_salida_id = $1
+      ORDER BY id ASC
+    `,
+    [id]
+  )
+
+  return result.rows || []
 }
 
 async function validarIngresoEliminable({ client, movimientoId }) {
@@ -547,6 +697,9 @@ function normalizarMovimiento(movimiento) {
     nombre_cliente: movimiento.nombre_cliente ?? movimiento.cliente ?? null,
     numero_presupuesto: movimiento.numero_presupuesto ?? null,
     presupuesto_id: movimiento.presupuesto_id ?? null,
+    presupuestos_ids: Array.isArray(movimiento.presupuestos_ids)
+      ? movimiento.presupuestos_ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
+      : (movimiento.presupuesto_id ? [Number(movimiento.presupuesto_id)] : []),
     detalles_medio_pago: detallesNormalizados,
   }
 }
@@ -560,6 +713,8 @@ function normalizarBoolean(valor, defaultValue = false) {
 }
 
 async function getDetallesSchema() {
+  await ensureDetallesMedioPagoConstraint()
+
   if (detallesSchemaCache) return detallesSchemaCache
 
   const result = await pool.query(
@@ -745,7 +900,7 @@ async function enriquecerSemanasConMedios(cajaCodigo, semanas = []) {
   return enriquecidas.sort((a, b) => new Date(b.fecha_inicio) - new Date(a.fecha_inicio))
 }
 
-const MEDIOS_SIMPLES = ["efectivo", "transferencia", "retencion"]
+const MEDIOS_SIMPLES = ["efectivo", "transferencia", "banco", "retencion"]
 const MEDIOS_MULTIPLES = ["cheque", "echeq"]
 
 function construirDetallesPago({ desglose = {}, detalles_medio_pago = [] } = {}) {
@@ -841,8 +996,172 @@ async function validarPresupuestoCliente(presupuestoId, clienteId) {
   return presupuesto
 }
 
+function normalizarPresupuestosIds(presupuestoIdsRaw, presupuestoIdRaw) {
+  if (Array.isArray(presupuestoIdsRaw)) {
+    return Array.from(new Set(
+      presupuestoIdsRaw
+        .map((id) => Number(id))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    ))
+  }
+
+  const idUnico = Number(presupuestoIdRaw || 0)
+  return Number.isInteger(idUnico) && idUnico > 0 ? [idUnico] : []
+}
+
+function normalizarPresupuestosAsignaciones(asignacionesRaw = []) {
+  if (!Array.isArray(asignacionesRaw)) return []
+
+  return asignacionesRaw
+    .map((item) => ({
+      presupuesto_id: Number(item?.presupuesto_id || item?.id || 0),
+      monto_asignado: roundMoney(Number(item?.monto_asignado ?? item?.monto ?? 0)),
+    }))
+    .filter((item) => Number.isInteger(item.presupuesto_id) && item.presupuesto_id > 0 && item.monto_asignado > 0)
+}
+
+function construirAsignacionesPresupuestos({ presupuestosIds = [], asignacionesRaw = [], montoTotal = 0 }) {
+  const ids = Array.from(new Set((presupuestosIds || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)))
+  if (!ids.length) return []
+
+  const totalEsperado = roundMoney(Number(montoTotal || 0))
+  if (!(totalEsperado > 0)) {
+    throw new Error("El monto total debe ser mayor a 0 para imputar presupuestos")
+  }
+
+  const asignaciones = normalizarPresupuestosAsignaciones(asignacionesRaw)
+  if (!asignaciones.length) {
+    if (ids.length === 1) {
+      return [{ presupuesto_id: ids[0], monto_asignado: totalEsperado }]
+    }
+    throw new Error("Debe indicar el monto asignado para cada presupuesto seleccionado")
+  }
+
+  const idsAsignados = Array.from(new Set(asignaciones.map((item) => item.presupuesto_id)))
+  if (idsAsignados.length !== asignaciones.length) {
+    throw new Error("Hay presupuestos repetidos en la imputacion")
+  }
+
+  const setIds = new Set(ids)
+  const faltantes = ids.filter((id) => !idsAsignados.includes(id))
+  const extras = idsAsignados.filter((id) => !setIds.has(id))
+  if (faltantes.length || extras.length) {
+    throw new Error("La imputacion por presupuesto no coincide con los presupuestos seleccionados")
+  }
+
+  const totalAsignado = roundMoney(asignaciones.reduce((acc, item) => acc + Number(item.monto_asignado || 0), 0))
+  if (Math.abs(totalAsignado - totalEsperado) > 0.01) {
+    throw new Error(`La suma de imputaciones (${totalAsignado}) no coincide con el monto total (${totalEsperado})`)
+  }
+
+  return asignaciones
+}
+
+async function validarPresupuestosCliente(presupuestosIds = [], clienteId = null) {
+  const ids = Array.from(new Set((presupuestosIds || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)))
+  if (!ids.length) return []
+
+  const result = await pool.query(
+    `
+      SELECT id, cliente_id
+      FROM presupuestos
+      WHERE id = ANY($1::int[])
+    `,
+    [ids]
+  )
+  const presupuestos = result.rows || []
+
+  if (!Array.isArray(presupuestos) || presupuestos.length !== ids.length) {
+    throw new Error("Uno o más presupuestos son inválidos")
+  }
+
+  if (clienteId) {
+    const invalido = presupuestos.find((p) => String(p.cliente_id) !== String(clienteId))
+    if (invalido) {
+      throw new Error("Uno o más presupuestos seleccionados no pertenecen al cliente indicado")
+    }
+  }
+
+  return presupuestos
+}
+
+async function sincronizarMovimientosCajaPresupuestos({ client, movimientoId, presupuestosIds = [], presupuestosAsignaciones = [] }) {
+  await ensureMovimientosCajaPresupuestosSchema()
+
+  await client.query("DELETE FROM movimientos_caja_presupuestos WHERE movimiento_id = $1", [movimientoId])
+
+  const ids = Array.from(new Set((presupuestosIds || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)))
+  if (!ids.length) return
+
+  const mapaAsignaciones = new Map(
+    (normalizarPresupuestosAsignaciones(presupuestosAsignaciones) || []).map((item) => [item.presupuesto_id, item.monto_asignado])
+  )
+
+  const values = []
+  const placeholders = ids.map((id, index) => {
+    const base = index * 3
+    const montoAsignado = roundMoney(Number(mapaAsignaciones.get(id) || 0))
+    values.push(movimientoId, id, montoAsignado > 0 ? montoAsignado : null)
+    return `($${base + 1}, $${base + 2}, $${base + 3})`
+  }).join(",")
+
+  await client.query(
+    `INSERT INTO movimientos_caja_presupuestos (movimiento_id, presupuesto_id, monto_asignado) VALUES ${placeholders}`,
+    values
+  )
+}
+
+async function obtenerPresupuestosAsignacionesPorMovimientos(movimientosIds = []) {
+  await ensureMovimientosCajaPresupuestosSchema()
+  const ids = Array.from(new Set((movimientosIds || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)))
+  if (!ids.length) return new Map()
+
+  const placeholders = ids.map((_, i) => `$${i + 1}`).join(",")
+  const result = await pool.query(
+    `
+      SELECT movimiento_id, presupuesto_id, monto_asignado
+      FROM movimientos_caja_presupuestos
+      WHERE movimiento_id IN (${placeholders})
+      ORDER BY movimiento_id, presupuesto_id
+    `,
+    ids
+  )
+
+  const mapa = new Map()
+  ids.forEach((id) => mapa.set(id, []))
+  result.rows.forEach((row) => {
+    const movId = Number(row.movimiento_id)
+    const presId = Number(row.presupuesto_id)
+    const monto = roundMoney(Number(row.monto_asignado || 0))
+    if (!mapa.has(movId)) mapa.set(movId, [])
+    mapa.get(movId).push({ presupuesto_id: presId, monto_asignado: monto })
+  })
+
+  return mapa
+}
+
+async function obtenerPresupuestosIdsPorMovimientos(movimientosIds = []) {
+  const mapaAsignaciones = await obtenerPresupuestosAsignacionesPorMovimientos(movimientosIds)
+  const mapaIds = new Map()
+  mapaAsignaciones.forEach((items, movId) => {
+    mapaIds.set(movId, (items || []).map((item) => Number(item.presupuesto_id)).filter((id) => Number.isInteger(id) && id > 0))
+  })
+  return mapaIds
+}
+
+async function obtenerPresupuestosIdsPorMovimiento(movimientoId) {
+  const mapa = await obtenerPresupuestosIdsPorMovimientos([movimientoId])
+  return mapa.get(Number(movimientoId)) || []
+}
+
+async function obtenerPresupuestosAsignacionesPorMovimiento(movimientoId) {
+  const mapa = await obtenerPresupuestosAsignacionesPorMovimientos([movimientoId])
+  return mapa.get(Number(movimientoId)) || []
+}
+
 async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id } = {}) {
   await getDetallesSchema()
+  await ensureMovimientosCajaPresupuestosSchema()
 
   let query = db.from("movimientos_caja").select(`
     *,
@@ -880,6 +1199,7 @@ async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_
     desglose: {
       efectivo: 0,
       transferencia: 0,
+      banco: 0,
       cheque: 0,
       echeq: 0,
       retencion: 0,
@@ -887,6 +1207,18 @@ async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_
   }
 
   const movimientos = (data || []).map(normalizarMovimiento)
+  const mapaPresupuestos = await obtenerPresupuestosIdsPorMovimientos(movimientos.map((mov) => mov.id))
+  const mapaAsignaciones = await obtenerPresupuestosAsignacionesPorMovimientos(movimientos.map((mov) => mov.id))
+
+  movimientos.forEach((mov) => {
+    const asociados = mapaPresupuestos.get(Number(mov.id)) || []
+    const asignaciones = mapaAsignaciones.get(Number(mov.id)) || []
+    if (asociados.length > 0) {
+      mov.presupuestos_ids = asociados
+      mov.presupuesto_id = mov.presupuesto_id || asociados[0]
+    }
+    mov.presupuestos_asignaciones = asignaciones
+  })
 
   movimientos.forEach((mov) => {
     const montoTotal = parseFloat(mov.monto_total || 0)
@@ -961,7 +1293,7 @@ router.get("/libro-cheques", async (req, res) => {
     }
 
     const params = [cajaCodigo]
-    const where = ["l.caja_codigo = $1"]
+    const where = ["l.caja_codigo = $1", "l.medio_pago = 'cheque'"]
 
     if (estado) {
       if (!ESTADOS_LIBRO_CHEQUES.includes(estado)) {
@@ -1015,6 +1347,7 @@ router.get("/libro-cheques/disponibles", async (req, res) => {
       SELECT *
       FROM libro_cheques_caja
       WHERE caja_codigo = $1
+        AND medio_pago = 'cheque'
         AND estado = 'disponible'
       ORDER BY fecha_cheque DESC, id ASC
       `,
@@ -1045,7 +1378,7 @@ router.get("/libro-cheques/pdf", async (req, res) => {
     }
 
     const params = [cajaCodigo]
-    const where = ["l.caja_codigo = $1"]
+    const where = ["l.caja_codigo = $1", "l.medio_pago = 'cheque'"]
 
     if (busqueda) {
       params.push(`%${busqueda}%`)
@@ -1170,8 +1503,6 @@ router.get("/libro-cheques/pdf", async (req, res) => {
     }
 
     const drawSection = (title, sectionRows, { showSalida = false } = {}) => {
-      drawSectionTitleCentered(title)
-
       if (!sectionRows.length) {
         ensureRowSpace(30)
         doc.font("Helvetica").fontSize(9).fillColor(PDF_COLORS.slate)
@@ -1619,6 +1950,32 @@ router.get("/resumen/pdf", async (req, res) => {
       drawPremiumSectionTitle(doc, title)
     }
 
+    const drawDetailTitle = () => {
+      doc.moveDown(0.6)
+      doc.font("Helvetica-Bold").fontSize(11.5).fillColor(PDF_COLORS.ink)
+      doc.text("Detalle de movimientos", 45, doc.y, {
+        width: pageWidth - 90,
+        align: "left",
+        lineBreak: false,
+      })
+      const y = doc.y + 2
+      doc.strokeColor(PDF_COLORS.line).lineWidth(0.8).moveTo(45, y).lineTo(pageWidth - 45, y).stroke()
+      doc.y = y + 6
+    }
+
+    const drawDesgloseTitle = () => {
+      doc.moveDown(0.6)
+      doc.font("Helvetica-Bold").fontSize(11.5).fillColor(PDF_COLORS.ink)
+      doc.text("Desglose por medio de pago", 45, doc.y, {
+        width: pageWidth - 90,
+        align: "left",
+        lineBreak: false,
+      })
+      const y = doc.y + 2
+      doc.strokeColor(PDF_COLORS.line).lineWidth(0.8).moveTo(45, y).lineTo(pageWidth - 45, y).stroke()
+      doc.y = y + 6
+    }
+
     const filtroPeriodo = [
       cajaCodigoNormalizada ? LABEL_CAJA[cajaCodigoNormalizada] : "Todas las cajas",
       fecha_inicio ? `Desde ${formatoFecha(fecha_inicio)}` : "",
@@ -1639,66 +1996,22 @@ router.get("/resumen/pdf", async (req, res) => {
     doc.y = headerBottom + 15
 
     if (esResumenSemanal) {
-      const periodoY = doc.y
-      doc.roundedRect(45, periodoY, pageWidth - 90, 42, 6).fill("#dbeafe")
-      doc.fillColor("#1e3a8a").font("Helvetica-Bold").fontSize(9)
-      doc.text("SEMANA IMPRESA", 58, periodoY + 10, { width: 140 })
-      doc.font("Helvetica").fontSize(11)
-      doc.text(etiquetaPeriodo, 180, periodoY + 9, { width: pageWidth - 240, align: "right" })
-      doc.fillColor(PDF_COLORS.ink)
-      doc.y = periodoY + 54
-
       const semanalY = doc.y
-      const semanalHeight = 138
-      const cardWidth = (pageWidth - 110) / 4
+      const semanalHeight = 56
       doc.roundedRect(45, semanalY, pageWidth - 90, semanalHeight, 8).fill(PDF_COLORS.card)
       doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(12)
       doc.text("Caja semanal", 58, semanalY + 10, { width: 180 })
       doc.font("Helvetica-Bold").fontSize(11)
       doc.text(etiquetaPeriodo, 58, semanalY + 28, { width: 220 })
       doc.fillColor(PDF_COLORS.slate).font("Helvetica").fontSize(8.8)
-      doc.text("La semana nueva arranca con el saldo final de la anterior y los movimientos quedan encapsulados en su propio período.", 58, semanalY + 46, { width: pageWidth - 116 })
-
-      const cardsY = semanalY + 88
-      const labels = [
-        { titulo: "Saldo inicial", valor: cajaSemanalResumen?.saldo_inicial || 0 },
-        { titulo: "Ingresos semana", valor: cajaSemanalResumen?.total_ingresos || 0 },
-        { titulo: "Egresos semana", valor: cajaSemanalResumen?.total_egresos || 0 },
-        { titulo: "Saldo final", valor: cajaSemanalResumen?.saldo_final || 0 },
-      ]
-
-
-      labels.forEach((item, index) => {
-        const x = 58 + index * (cardWidth + 4)
-        const mostrarDetalleMedios = index === 0 || index === 3
-        const cardHeight = mostrarDetalleMedios ? 64 : 36
-
-        doc.roundedRect(x, cardsY, cardWidth, cardHeight, 6).fill(index === 3 ? "#dbeafe" : PDF_COLORS.lightAlt)
-        doc.fillColor("#334155").font("Helvetica-Bold").fontSize(8)
-        doc.text(item.titulo.toUpperCase(), x + 8, cardsY + 6, { width: cardWidth - 16, lineBreak: false })
-        doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(10.2)
-        doc.text(formatoMoneda(item.valor), x + 8, cardsY + 18, { width: cardWidth - 16, align: "left", lineBreak: false })
-
-        if (mostrarDetalleMedios) {
-          const efectivoValor = index === 0
-            ? cajaSemanalResumen?.saldo_inicial_efectivo || 0
-            : cajaSemanalResumen?.saldo_final_efectivo || 0
-          const chequesValor = index === 0
-            ? cajaSemanalResumen?.saldo_inicial_cheques || 0
-            : cajaSemanalResumen?.saldo_final_cheques || 0
-
-          doc.fillColor("#334155").font("Helvetica-Bold").fontSize(8.2)
-          doc.text(`EFECTIVO: ${formatoMoneda(efectivoValor)}`, x + 8, cardsY + 34, { width: cardWidth - 16, lineBreak: false })
-          doc.text(`CHEQUES: ${formatoMoneda(chequesValor)}`, x + 8, cardsY + 48, { width: cardWidth - 16, lineBreak: false })
-        }
-      })
+      // doc.text("La semana nueva arranca con el saldo final de la anterior y los movimientos quedan encapsulados en su propio período.", 290, semanalY + 18, { width: pageWidth - 348, align: "left" })
 
       doc.fillColor(PDF_COLORS.ink)
       doc.y = semanalY + semanalHeight + 14
     }
 
     const resumenY = doc.y
-    doc.roundedRect(65, resumenY, pageWidth - 90, 82, 6).fill(PDF_COLORS.card)
+    doc.roundedRect(45, resumenY, pageWidth - 90, 82, 6).fill(PDF_COLORS.card)
     const balanceTexto = formatoMoneda(balance)
     const balanceInicioX = 430 + 110 - doc.font("Helvetica-Bold").fontSize(13).widthOfString(balanceTexto)
 
@@ -1840,7 +2153,7 @@ router.get("/resumen/pdf", async (req, res) => {
     }))
 
     const drawDesgloseTable = () => {
-      drawSectionTitle("Desglose por medio de pago")
+      drawDesgloseTitle()
 
       const colMedioX = 55
       const colIngresosX = 190
@@ -1919,7 +2232,7 @@ router.get("/resumen/pdf", async (req, res) => {
     const drawDetailPageHeader = () => {
       const detalleHeaderBottom = drawPremiumHeader(doc, {
         title: "TESLA MONTAJES ELECTRICOS",
-        subtitle: "Detalle de movimientos de caja",
+        subtitle: "Detalle de movimientos",
         accentText: filtroPeriodo || "Sin filtros",
         logoPath: LOGO_PATH,
       })
@@ -1940,11 +2253,10 @@ router.get("/resumen/pdf", async (req, res) => {
       doc.y = headerY + 24
     }
 
-    // El detalle siempre empieza en la segunda página.
+    drawDesgloseTable()
     doc.addPage()
     drawDetailPageHeader()
-    drawDesgloseTable()
-    drawSectionTitle("Detalle de movimientos")
+    drawDetailTitle()
     drawMovHeader()
     let yMov = doc.y
 
@@ -2145,7 +2457,23 @@ router.get("/:id", async (req, res) => {
     if (error) return res.status(400).json({ error: error.message })
     if (!data) return res.status(404).json({ error: "Movimiento no encontrado" })
 
-    res.json(normalizarMovimiento(data))
+    const movimiento = normalizarMovimiento(data)
+    movimiento.presupuestos_ids = await obtenerPresupuestosIdsPorMovimiento(movimiento.id)
+    movimiento.presupuestos_asignaciones = await obtenerPresupuestosAsignacionesPorMovimiento(movimiento.id)
+    if (movimiento.presupuestos_ids.length > 0 && !movimiento.presupuesto_id) {
+      movimiento.presupuesto_id = movimiento.presupuestos_ids[0]
+    }
+    if (String(movimiento?.tipo || "").toLowerCase() === "egreso") {
+      const chequesSalida = await obtenerChequesSalidaPorMovimiento(movimiento.id)
+      movimiento.cheques_salida_ids = chequesSalida.map((item) => Number(item.id)).filter((value) => Number.isInteger(value) && value > 0)
+      movimiento.cheques_salida_detalle = chequesSalida
+      if (chequesSalida.length > 0) {
+        movimiento.fecha_salida_cheques = normalizarFechaISO(chequesSalida[0]?.fecha_salida) || null
+        movimiento.endosado_a_cheques = String(chequesSalida[0]?.endosado_a || "").trim() || null
+      }
+    }
+
+    res.json(movimiento)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -2167,6 +2495,8 @@ router.post("/", async (req, res) => {
       con_iva,
       cliente_id,
       presupuesto_id,
+      presupuesto_ids,
+      presupuestos_asignaciones,
       destinatario,
       cheques_salida,
       fecha_salida_cheques,
@@ -2213,6 +2543,14 @@ router.post("/", async (req, res) => {
     validarDetallesPago(detallesPago, tipoNormalizado)
 
     const chequesSalidaLista = Array.isArray(cheques_salida) ? cheques_salida : []
+    let totalChequesDetalle = 0
+    if (tipoNormalizado === "egreso") {
+      const validacionCheques = validarEgresoConChequesLibro({
+        detallesPago,
+        chequesSalida: chequesSalidaLista,
+      })
+      totalChequesDetalle = validacionCheques.totalChequesDetalle
+    }
     if (tipoNormalizado === "egreso" && chequesSalidaLista.length > 0) {
       const endosadoTexto = sanitizeChequeText(endosado_a_cheques || destinatarioNormalizado)
       if (!endosadoTexto) {
@@ -2227,7 +2565,27 @@ router.post("/", async (req, res) => {
       })
     }
 
-    await validarPresupuestoCliente(presupuesto_id, cliente_id)
+    const presupuestoIdsFinal = tipoNormalizado === "ingreso"
+      ? normalizarPresupuestosIds(presupuesto_ids, presupuesto_id)
+      : []
+
+    if (tipoNormalizado === "ingreso" && presupuestoIdsFinal.length > 0 && !cliente_id) {
+      return res.status(400).json({ error: "Para asociar presupuestos debe seleccionar un cliente" })
+    }
+
+    const montoTotalNormalizado = roundMoney(Number(monto_total || 0))
+    const presupuestosAsignacionesFinal = tipoNormalizado === "ingreso"
+      ? construirAsignacionesPresupuestos({
+        presupuestosIds: presupuestoIdsFinal,
+        asignacionesRaw: presupuestos_asignaciones,
+        montoTotal: montoTotalNormalizado,
+      })
+      : []
+
+    if (presupuestoIdsFinal.length === 1) {
+      await validarPresupuestoCliente(presupuestoIdsFinal[0], cliente_id)
+    }
+    await validarPresupuestosCliente(presupuestoIdsFinal, cliente_id)
 
     // Crear movimiento (solo los campos básicos, sin desglose)
     const { data: movimiento, error: errorMovimiento } = await db
@@ -2244,7 +2602,7 @@ router.post("/", async (req, res) => {
           con_iva: normalizarBoolean(con_iva, true),
           destinatario: tipoNormalizado === "egreso" ? destinatarioNormalizado : null,
           cliente_id: tipoNormalizado === "ingreso" ? (cliente_id || null) : null,
-          presupuesto_id: tipoNormalizado === "ingreso" ? (presupuesto_id || null) : null,
+          presupuesto_id: tipoNormalizado === "ingreso" ? (presupuestoIdsFinal[0] || null) : null,
         }
       ])
       .select()
@@ -2283,6 +2641,7 @@ router.post("/", async (req, res) => {
         movimiento_id: movimientoId,
         efectivo: parseFloat(desglose.efectivo) || 0,
         transferencia: parseFloat(desglose.transferencia) || 0,
+        banco: parseFloat(desglose.banco) || 0,
         cheque: parseFloat(desglose.cheque) || 0,
         echeq: parseFloat(desglose.echeq) || 0,
         retencion: parseFloat(desglose.retencion) || 0,
@@ -2300,6 +2659,13 @@ router.post("/", async (req, res) => {
     try {
       const client = await pool.connect()
       try {
+        await sincronizarMovimientosCajaPresupuestos({
+          client,
+          movimientoId,
+          presupuestosIds: tipoNormalizado === "ingreso" ? presupuestoIdsFinal : [],
+          presupuestosAsignaciones: tipoNormalizado === "ingreso" ? presupuestosAsignacionesFinal : [],
+        })
+
         if (tipoNormalizado === "ingreso") {
           await crearChequesLibroDesdeIngreso({
             client,
@@ -2318,6 +2684,7 @@ router.post("/", async (req, res) => {
             fechaSalida: fecha_salida_cheques || fecha,
             endosadoA: endosado_a_cheques || destinatarioNormalizado,
             chequesSalida: chequesSalidaLista,
+            expectedChequeTotal: totalChequesDetalle,
           })
         }
       } finally {
@@ -2345,8 +2712,15 @@ router.post("/", async (req, res) => {
       .eq("id", movimientoId)
       .single()
 
+    const movimientoCompletoNormalizado = normalizarMovimiento(movimientoCompleto)
+    movimientoCompletoNormalizado.presupuestos_ids = await obtenerPresupuestosIdsPorMovimiento(movimientoId)
+    movimientoCompletoNormalizado.presupuestos_asignaciones = await obtenerPresupuestosAsignacionesPorMovimiento(movimientoId)
+    if (movimientoCompletoNormalizado.presupuestos_ids.length > 0 && !movimientoCompletoNormalizado.presupuesto_id) {
+      movimientoCompletoNormalizado.presupuesto_id = movimientoCompletoNormalizado.presupuestos_ids[0]
+    }
+
     getIo()?.emit('caja:changed')
-    res.status(201).json(normalizarMovimiento(movimientoCompleto))
+    res.status(201).json(movimientoCompletoNormalizado)
   } catch (err) {
     console.error("Error en POST /caja:", err)
     res.status(500).json({ error: err.message })
@@ -2370,6 +2744,8 @@ router.put("/:id", async (req, res) => {
       con_iva,
       cliente_id,
       presupuesto_id,
+      presupuesto_ids,
+      presupuestos_asignaciones,
       destinatario,
       cheques_salida,
       fecha_salida_cheques,
@@ -2421,8 +2797,37 @@ router.put("/:id", async (req, res) => {
     }
 
     const clienteFinal = cliente_id !== undefined ? cliente_id : movimientoActual.cliente_id
-    const presupuestoFinal = presupuesto_id !== undefined ? presupuesto_id : movimientoActual.presupuesto_id
-    await validarPresupuestoCliente(presupuestoFinal, clienteFinal)
+    const montoTotalFinal = roundMoney(Number(monto_total ?? movimientoActual.monto_total ?? 0))
+    const presupuestosActuales = await obtenerPresupuestosIdsPorMovimiento(id)
+    const presupuestosAsignacionesActuales = await obtenerPresupuestosAsignacionesPorMovimiento(id)
+    const presupuestoIdsFinal = tipoFinal === "ingreso"
+      ? (
+        (presupuesto_ids !== undefined || presupuesto_id !== undefined)
+          ? normalizarPresupuestosIds(presupuesto_ids, presupuesto_id)
+          : presupuestosActuales
+      )
+      : []
+
+    if (tipoFinal === "ingreso" && presupuestoIdsFinal.length > 0 && !clienteFinal) {
+      return res.status(400).json({ error: "Para asociar presupuestos debe seleccionar un cliente" })
+    }
+
+    const presupuestosAsignacionesFinal = tipoFinal === "ingreso"
+      ? (
+        (presupuestos_asignaciones !== undefined || presupuesto_ids !== undefined || presupuesto_id !== undefined || monto_total !== undefined)
+          ? construirAsignacionesPresupuestos({
+            presupuestosIds: presupuestoIdsFinal,
+            asignacionesRaw: presupuestos_asignaciones,
+            montoTotal: montoTotalFinal,
+          })
+          : presupuestosAsignacionesActuales
+      )
+      : []
+
+    if (presupuestoIdsFinal.length === 1) {
+      await validarPresupuestoCliente(presupuestoIdsFinal[0], clienteFinal)
+    }
+    await validarPresupuestosCliente(presupuestoIdsFinal, clienteFinal)
 
     // Actualizar movimiento
     const actualizaciones = {}
@@ -2436,16 +2841,22 @@ router.put("/:id", async (req, res) => {
     if (con_iva !== undefined) actualizaciones.con_iva = normalizarBoolean(con_iva, true)
     if (destinatario !== undefined) actualizaciones.destinatario = tipoFinal === "egreso" ? destinatarioNormalizado : null
     if (cliente_id !== undefined) actualizaciones.cliente_id = tipoFinal === "ingreso" ? (cliente_id || null) : null
-    if (presupuesto_id !== undefined) actualizaciones.presupuesto_id = tipoFinal === "ingreso" ? (presupuesto_id || null) : null
+    if (presupuesto_ids !== undefined || presupuesto_id !== undefined) {
+      actualizaciones.presupuesto_id = tipoFinal === "ingreso" ? (presupuestoIdsFinal[0] || null) : null
+    }
 
     if (tipo !== undefined && tipoFinal === "egreso") {
       actualizaciones.categoria = null
       if (cliente_id === undefined) actualizaciones.cliente_id = null
-      if (presupuesto_id === undefined) actualizaciones.presupuesto_id = null
+      if (presupuesto_id === undefined && presupuesto_ids === undefined) actualizaciones.presupuesto_id = null
     }
 
     if (tipo !== undefined && tipoFinal === "ingreso" && destinatario === undefined) {
       actualizaciones.destinatario = null
+    }
+
+    if (tipo !== undefined && tipoFinal === "ingreso" && presupuesto_id === undefined && presupuesto_ids === undefined) {
+      actualizaciones.presupuesto_id = presupuestoIdsFinal[0] || null
     }
 
     const cajaSemanalAnteriorId = movimientoActual.caja_semanal_id
@@ -2465,6 +2876,15 @@ router.put("/:id", async (req, res) => {
     if (desglose || detalles_medio_pago) {
       const detallesPago = construirDetallesPago({ desglose, detalles_medio_pago })
       validarDetallesPago(detallesPago, tipoFinal)
+      const chequesSalidaLista = Array.isArray(cheques_salida) ? cheques_salida : []
+      let totalChequesDetalle = 0
+      if (tipoFinal === "egreso") {
+        const validacionCheques = validarEgresoConChequesLibro({
+          detallesPago,
+          chequesSalida: chequesSalidaLista,
+        })
+        totalChequesDetalle = validacionCheques.totalChequesDetalle
+      }
       const montoBaseValidacion = monto_total ?? movimientoActualizado[0]?.monto_total ?? movimientoActual.monto_total ?? 0
       const montoTotalValidacion = parseFloat(montoBaseValidacion || 0)
       const sumaDesglose = totalDetallesPago(detallesPago)
@@ -2502,6 +2922,7 @@ router.put("/:id", async (req, res) => {
           movimiento_id: id,
           efectivo: parseFloat(desglose.efectivo) || 0,
           transferencia: parseFloat(desglose.transferencia) || 0,
+          banco: parseFloat(desglose.banco) || 0,
           cheque: parseFloat(desglose.cheque) || 0,
           echeq: parseFloat(desglose.echeq) || 0,
           retencion: parseFloat(desglose.retencion) || 0,
@@ -2513,8 +2934,6 @@ router.put("/:id", async (req, res) => {
 
       const client = await pool.connect()
       try {
-        const chequesSalidaLista = Array.isArray(cheques_salida) ? cheques_salida : []
-
         if (tipoFinal === "ingreso") {
           await validarIngresoEliminable({ client, movimientoId: id })
           await client.query("DELETE FROM libro_cheques_caja WHERE movimiento_entrada_id = $1", [id])
@@ -2537,12 +2956,25 @@ router.put("/:id", async (req, res) => {
               fechaSalida: fecha_salida_cheques || fechaFinalMovimiento,
               endosadoA: endosado_a_cheques || destinatarioNormalizado || movimientoActual.destinatario,
               chequesSalida: chequesSalidaLista,
+              expectedChequeTotal: totalChequesDetalle,
             })
           }
         }
       } finally {
         client.release()
       }
+    }
+
+    const clientPresupuestos = await pool.connect()
+    try {
+      await sincronizarMovimientosCajaPresupuestos({
+        client: clientPresupuestos,
+        movimientoId: id,
+        presupuestosIds: tipoFinal === "ingreso" ? presupuestoIdsFinal : [],
+        presupuestosAsignaciones: tipoFinal === "ingreso" ? presupuestosAsignacionesFinal : [],
+      })
+    } finally {
+      clientPresupuestos.release()
     }
 
     const semanaAsignada = await asignarCajaSemanalAMovimiento({
@@ -2565,10 +2997,226 @@ router.put("/:id", async (req, res) => {
       .eq("id", id)
       .single()
 
+    const movimientoFinalNormalizado = normalizarMovimiento(movimientoFinal)
+    movimientoFinalNormalizado.presupuestos_ids = await obtenerPresupuestosIdsPorMovimiento(id)
+    movimientoFinalNormalizado.presupuestos_asignaciones = await obtenerPresupuestosAsignacionesPorMovimiento(id)
+    if (movimientoFinalNormalizado.presupuestos_ids.length > 0 && !movimientoFinalNormalizado.presupuesto_id) {
+      movimientoFinalNormalizado.presupuesto_id = movimientoFinalNormalizado.presupuestos_ids[0]
+    }
+
     getIo()?.emit('caja:changed')
-    res.json(normalizarMovimiento(movimientoFinal))
+    res.json(movimientoFinalNormalizado)
   } catch (err) {
     res.status(500).json({ error: err.message })
+  }
+})
+
+router.post("/libro-cheques/transferir", async (req, res) => {
+  const client = await pool.connect()
+  let transactionStarted = false
+  try {
+    await ensureLibroChequesSchema()
+
+    const {
+      caja_origen,
+      caja_destino,
+      fecha,
+      cheques,
+      detalle,
+      observaciones,
+    } = req.body || {}
+
+    const cajaOrigen = String(caja_origen || "").toLowerCase().trim()
+    const cajaDestino = String(caja_destino || "").toLowerCase().trim()
+    const fechaMovimiento = normalizarFechaISO(fecha)
+    const detalleBase = String(detalle || "").trim() || `Pasan cheques a ${LABEL_CAJA[cajaDestino] || cajaDestino}`
+    const observacionesTexto = String(observaciones || "").trim() || null
+
+    if (!CAJAS_DISPONIBLES.includes(cajaOrigen) || !CAJAS_DISPONIBLES.includes(cajaDestino)) {
+      return res.status(400).json({ error: "Debe indicar cajas de origen y destino validas" })
+    }
+
+    if (cajaOrigen === cajaDestino) {
+      return res.status(400).json({ error: "La caja de destino debe ser distinta a la de origen" })
+    }
+
+    if (!fechaMovimiento) {
+      return res.status(400).json({ error: "La fecha de transferencia es obligatoria" })
+    }
+
+    const chequeIds = (Array.isArray(cheques) ? cheques : [])
+      .map((item) => Number(item?.libro_cheque_id || item?.id || item))
+      .filter((id) => Number.isInteger(id) && id > 0)
+
+    const idsUnicos = Array.from(new Set(chequeIds))
+    if (!idsUnicos.length) {
+      return res.status(400).json({ error: "Debe seleccionar al menos un cheque para transferir" })
+    }
+
+    await client.query("BEGIN")
+    transactionStarted = true
+
+    const placeholders = idsUnicos.map((_, i) => `$${i + 1}`).join(",")
+    const chequesResult = await client.query(
+      `
+        SELECT id, caja_codigo, estado, medio_pago, importe, numero_cheque, banco, librador_endosante, fecha_cheque, fecha_entrada
+        FROM libro_cheques_caja
+        WHERE id IN (${placeholders})
+        FOR UPDATE
+      `,
+      idsUnicos
+    )
+
+    if (chequesResult.rowCount !== idsUnicos.length) {
+      throw new Error("Uno o mas cheques seleccionados no existen")
+    }
+
+    const noTransferibles = chequesResult.rows.filter((item) => String(item.estado) !== "disponible" || String(item.caja_codigo) !== cajaOrigen)
+    if (noTransferibles.length) {
+      throw new Error("Solo se pueden transferir cheques disponibles de la caja de origen")
+    }
+
+    const totalTransferencia = roundMoney(chequesResult.rows.reduce((acc, item) => acc + Number(item.importe || 0), 0))
+    if (!(totalTransferencia > 0)) {
+      throw new Error("El total de cheques a transferir debe ser mayor a 0")
+    }
+
+    const detalleColumn = await getDetalleColumn()
+    const detalleDestino = `Ingreso por transferencia de cheques desde ${LABEL_CAJA[cajaOrigen] || cajaOrigen}`
+    const destinatarioOrigen = LABEL_CAJA[cajaDestino] || cajaDestino
+
+    const movOrigenInsert = await client.query(
+      `
+        INSERT INTO movimientos_caja (fecha, caja_codigo, tipo, ${detalleColumn}, observaciones, monto_total, categoria, con_iva, destinatario, cliente_id, presupuesto_id)
+        VALUES ($1,$2,'egreso',$3,$4,$5,NULL,true,$6,NULL,NULL)
+        RETURNING id
+      `,
+      [fechaMovimiento, cajaOrigen, detalleBase, observacionesTexto, totalTransferencia, destinatarioOrigen]
+    )
+    const movimientoOrigenId = Number(movOrigenInsert.rows?.[0]?.id || 0)
+
+    const movDestinoInsert = await client.query(
+      `
+        INSERT INTO movimientos_caja (fecha, caja_codigo, tipo, ${detalleColumn}, observaciones, monto_total, categoria, con_iva, destinatario, cliente_id, presupuesto_id)
+        VALUES ($1,$2,'ingreso',$3,$4,$5,'varios',true,$6,NULL,NULL)
+        RETURNING id
+      `,
+      [fechaMovimiento, cajaDestino, detalleDestino, observacionesTexto, totalTransferencia, null]
+    )
+    const movimientoDestinoId = Number(movDestinoInsert.rows?.[0]?.id || 0)
+
+    if (!movimientoOrigenId || !movimientoDestinoId) {
+      throw new Error("No se pudieron registrar los movimientos de transferencia")
+    }
+
+    for (const item of chequesResult.rows) {
+      await client.query(
+        `
+          INSERT INTO detalles_medio_pago (
+            movimiento_id, medio_pago, monto, identificador, banco, fecha_cobro,
+            librador_endosante, numero_cheque, fecha_cheque, fecha_entrada, endosado_a, libro_cheque_id
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        `,
+        [
+          movimientoOrigenId,
+          "cheque",
+          roundMoney(Number(item.importe || 0)),
+          String(item.numero_cheque || ""),
+          String(item.banco || ""),
+          normalizarFechaISO(item.fecha_cheque),
+          String(item.librador_endosante || ""),
+          String(item.numero_cheque || ""),
+          normalizarFechaISO(item.fecha_cheque),
+          fechaMovimiento,
+          destinatarioOrigen,
+          Number(item.id),
+        ]
+      )
+    }
+
+    for (const item of chequesResult.rows) {
+      await client.query(
+        `
+          INSERT INTO detalles_medio_pago (
+            movimiento_id, medio_pago, monto, identificador, banco, fecha_cobro,
+            librador_endosante, numero_cheque, fecha_cheque, fecha_entrada, endosado_a, libro_cheque_id
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        `,
+        [
+          movimientoDestinoId,
+          "cheque",
+          roundMoney(Number(item.importe || 0)),
+          String(item.numero_cheque || ""),
+          String(item.banco || ""),
+          normalizarFechaISO(item.fecha_cheque),
+          String(item.librador_endosante || ""),
+          String(item.numero_cheque || ""),
+          normalizarFechaISO(item.fecha_cheque),
+          normalizarFechaISO(item.fecha_entrada) || fechaMovimiento,
+          null,
+          null,
+        ]
+      )
+    }
+
+    await registrarSalidaCheques({
+      client,
+      movimientoId: movimientoOrigenId,
+      cajaCodigo: cajaOrigen,
+      fechaSalida: fechaMovimiento,
+      endosadoA: destinatarioOrigen,
+      chequesSalida: idsUnicos.map((id) => ({ libro_cheque_id: id })),
+      expectedChequeTotal: totalTransferencia,
+    })
+
+    for (const item of chequesResult.rows) {
+      await client.query(
+        `
+          INSERT INTO libro_cheques_caja (
+            caja_codigo, medio_pago, movimiento_entrada_id, fecha_entrada,
+            librador_endosante, banco, numero_cheque, importe, fecha_cheque,
+            observaciones, estado, movimiento_salida_id, fecha_salida, endosado_a
+          ) VALUES ($1,'cheque',$2,$3,$4,$5,$6,$7,$8,$9,'disponible',NULL,NULL,NULL)
+        `,
+        [
+          cajaDestino,
+          movimientoDestinoId,
+          normalizarFechaISO(item.fecha_entrada) || fechaMovimiento,
+          String(item.librador_endosante || ""),
+          String(item.banco || ""),
+          String(item.numero_cheque || ""),
+          roundMoney(Number(item.importe || 0)),
+          normalizarFechaISO(item.fecha_cheque) || fechaMovimiento,
+          observacionesTexto,
+        ]
+      )
+    }
+
+    await client.query("COMMIT")
+    transactionStarted = false
+
+    await asignarCajaSemanalAMovimiento({ movimientoId: movimientoOrigenId, fecha: fechaMovimiento, caja_codigo: cajaOrigen })
+    await asignarCajaSemanalAMovimiento({ movimientoId: movimientoDestinoId, fecha: fechaMovimiento, caja_codigo: cajaDestino })
+
+    getIo()?.emit('caja:changed')
+    res.json({
+      ok: true,
+      total_transferido: totalTransferencia,
+      cantidad_cheques: idsUnicos.length,
+      movimiento_origen_id: movimientoOrigenId,
+      movimiento_destino_id: movimientoDestinoId,
+    })
+  } catch (err) {
+    if (transactionStarted) {
+      try {
+        await client.query("ROLLBACK")
+      } catch {
+        // no-op
+      }
+    }
+    res.status(500).json({ error: err.message })
+  } finally {
+    client.release()
   }
 })
 

@@ -62,6 +62,8 @@ const formConceptos = ref({
   vacaciones: 0,
   feriados_cantidad: 0,
   dias_enfermedad: 0,
+  dias_no_trabajados_8h: 0,
+  dias_no_trabajados_9h: 0,
   dias_no_trabajados: 0,
   adelantos: 0,
   observaciones: "",
@@ -96,6 +98,8 @@ const normalizarLiquidacion = (liq = {}) => ({
   horas_extra_cantidad: toNumber(liq.horas_extra_cantidad),
   horas_extra_100_cantidad: toNumber(liq.horas_extra_100_cantidad),
   feriados_cantidad: toNumber(liq.feriados_cantidad),
+  dias_no_trabajados_8h: toNumber(liq.dias_no_trabajados_8h),
+  dias_no_trabajados_9h: toNumber(liq.dias_no_trabajados_9h),
   dias_no_trabajados: toNumber(liq.dias_no_trabajados),
   dias_enfermedad: toNumber(liq.dias_enfermedad),
   importe_feriados: toNumber(liq.importe_feriados),
@@ -128,6 +132,8 @@ const crearFormularioConceptos = (liquidacion = {}, opciones = {}) => {
     aguinaldo: liquidacion.aguinaldo || 0,
     vacaciones: liquidacion.vacaciones || 0,
     feriados_cantidad: liquidacion.feriados_cantidad || 0,
+    dias_no_trabajados_8h: toNumber(liquidacion.dias_no_trabajados_8h),
+    dias_no_trabajados_9h: toNumber(liquidacion.dias_no_trabajados_9h),
     dias_no_trabajados: liquidacion.dias_no_trabajados || 0,
     dias_enfermedad: toNumber(liquidacion.dias_enfermedad),
     adelantos: liquidacion.adelantos || 0,
@@ -309,6 +315,8 @@ const actualizarConceptos = async () => {
   error.value = ""
   loading.value = true
   try {
+    formConceptos.value.dias_no_trabajados =
+      toNumber(formConceptos.value.dias_no_trabajados_8h) + toNumber(formConceptos.value.dias_no_trabajados_9h)
     const res = await api.updateLiquidacion(liquidacionSeleccionada.value.id, formConceptos.value)
     liquidacionSeleccionada.value = normalizarLiquidacion(res.data)
     await cargarLiquidaciones()
@@ -516,7 +524,9 @@ const importeEnfermedadPreview = computed(() => {
 })
 
 const descuentoDiasNoTrabajadosPreview = computed(() => {
-  return toNumber(formConceptos.value.dias_no_trabajados) * 8 * valorHoraDetalle.value
+  const dias8h = toNumber(formConceptos.value.dias_no_trabajados_8h)
+  const dias9h = toNumber(formConceptos.value.dias_no_trabajados_9h)
+  return ((dias8h * 8) + (dias9h * 9)) * valorHoraDetalle.value
 })
 
 const totalConceptosExtrasPreview = computed(() => {
@@ -1411,9 +1421,15 @@ const puedeDescargarPdfLiquidacion = computed(() => !!liquidacionSeleccionada.va
                 </label>
 
                 <label class="form-group form-card-field">
-                  <span>Días no trabajados (cantidad)</span>
-                  <input v-model.number="formConceptos.dias_no_trabajados" type="number" min="0" step="1" @wheel.prevent />
-                  <small class="form-help">Se descuenta 8 horas por día faltado. Descuento calculado: -{{ formatearMoneda(descuentoDiasNoTrabajadosPreview) }}</small>
+                  <span>Días no trabajados de 8h (cantidad)</span>
+                  <input v-model.number="formConceptos.dias_no_trabajados_8h" type="number" min="0" step="1" @wheel.prevent />
+                  <small class="form-help">Cada día descuenta 8 horas al valor común.</small>
+                </label>
+
+                <label class="form-group form-card-field">
+                  <span>Días no trabajados de 9h (cantidad)</span>
+                  <input v-model.number="formConceptos.dias_no_trabajados_9h" type="number" min="0" step="1" @wheel.prevent />
+                  <small class="form-help">Cada día descuenta 9 horas al valor común. Descuento total calculado: -{{ formatearMoneda(descuentoDiasNoTrabajadosPreview) }}</small>
                 </label>
 
                 <label class="form-group form-card-field">

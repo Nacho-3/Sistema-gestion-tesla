@@ -398,6 +398,10 @@ export default {
     return api.get(`/caja/libro-cheques/pdf?${params.toString()}`, { responseType: "blob" })
   },
 
+  transferirChequesCaja(payload) {
+    return api.post("/caja/libro-cheques/transferir", payload)
+  },
+
   // Presupuestos
   getPresupuestos() {
     return api.get("/presupuestos")
@@ -485,6 +489,21 @@ export default {
 
   getGastos: (tipo, mes, anio) =>
     api.get("/gastos", { params: { tipo, mes, anio } }),
+
+  getGastosCatalogoFijos: () =>
+    api.get("/gastos/catalogo-fijos"),
+
+  createGastoFijoCatalogo: (data) =>
+    api.post("/gastos/catalogo-fijos", data),
+
+  updateGastoFijoCatalogo: (id, data) =>
+    api.put(`/gastos/catalogo-fijos/${id}`, data),
+
+  deleteGastoFijoCatalogo: (id) =>
+    api.delete(`/gastos/catalogo-fijos/${id}`),
+
+  syncGastosPeriodo: (payload) =>
+    api.post("/gastos/bulk", payload),
 
   getGastosResumenPdf: (mes, anio, tipos) =>
     api.get("/gastos/resumen/pdf", {

@@ -14,14 +14,61 @@ const LOGO_PATH = path.join(__dirname, "..", "assets", "logo.png")
 const LOGO_PRESUPUESTO_PATH = path.join(__dirname, "..", "assets", "logo_presupuesto.png")
 const PRESUPUESTOS_BASE_FOLDER = path.join("C:\\Users\\usuario\\Desktop\\GESTION TESLA", "Presupuestos")
 
-const formatoMoneda = (valor) => {
+const MONEDAS_PRESUPUESTO = new Set(["ARS", "USD"])
+
+const normalizeMoneda = (value = "ARS") => {
+	const moneda = String(value || "").toUpperCase().trim()
+	return MONEDAS_PRESUPUESTO.has(moneda) ? moneda : "ARS"
+}
+
+const formatoMoneda = (valor, moneda = "ARS") => {
 	const numero = Number(valor) || 0
+	const monedaNormalizada = normalizeMoneda(moneda)
 	return new Intl.NumberFormat("es-AR", {
 		style: "currency",
-		currency: "ARS",
+		currency: monedaNormalizada,
 		minimumFractionDigits: 2,
 		maximumFractionDigits: 2,
 	}).format(numero)
+}
+
+let ensurePresupuestosMonedaColumnPromise = null
+let ensureMovimientosCajaPresupuestosPromise = null
+
+const ensurePresupuestosMonedaColumn = async () => {
+	if (!ensurePresupuestosMonedaColumnPromise) {
+		ensurePresupuestosMonedaColumnPromise = (async () => {
+			await pool.query(`ALTER TABLE presupuestos ADD COLUMN IF NOT EXISTS moneda VARCHAR(3) NOT NULL DEFAULT 'ARS'`)
+			await pool.query(`UPDATE presupuestos SET moneda = 'ARS' WHERE moneda IS NULL OR TRIM(moneda) = ''`)
+		})().catch((error) => {
+			ensurePresupuestosMonedaColumnPromise = null
+			throw error
+		})
+	}
+
+	return ensurePresupuestosMonedaColumnPromise
+}
+
+const ensureMovimientosCajaPresupuestos = async () => {
+	if (!ensureMovimientosCajaPresupuestosPromise) {
+		ensureMovimientosCajaPresupuestosPromise = (async () => {
+			await pool.query(`
+				CREATE TABLE IF NOT EXISTS movimientos_caja_presupuestos (
+					movimiento_id INTEGER NOT NULL REFERENCES movimientos_caja(id) ON DELETE CASCADE,
+					presupuesto_id INTEGER NOT NULL REFERENCES presupuestos(id) ON DELETE CASCADE,
+					monto_asignado NUMERIC(12,2),
+					created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+					PRIMARY KEY (movimiento_id, presupuesto_id)
+				)
+			`)
+			await pool.query("ALTER TABLE movimientos_caja_presupuestos ADD COLUMN IF NOT EXISTS monto_asignado NUMERIC(12,2)")
+		})().catch((error) => {
+			ensureMovimientosCajaPresupuestosPromise = null
+			throw error
+		})
+	}
+
+	return ensureMovimientosCajaPresupuestosPromise
 }
 
 const formatoFecha = (valor) => {
@@ -151,6 +198,7 @@ const calcularTotales = ({
 	aplicaIvaMateriales,
 	aplicaIvaManoObra,
 	ivaPorcentaje,
+	subtotalGeneralMateriales = 0,
 	subtotalGeneralManoObra = 0,
 	descuentoActivo = false,
 	descuentoTipo = "monto",
@@ -158,7 +206,12 @@ const calcularTotales = ({
 	descuentoValor = 0,
 	descuentoMontoManual = 0,
 }) => {
-	const subtotalMateriales = materiales.reduce((acc, item) => acc + item.subtotal, 0)
+	const subtotalMaterialesCalculado = materiales.reduce((acc, item) => {
+		const precioUnitario = Math.max(0, toNumber(item.precio_unitario, 0))
+		if (precioUnitario <= 0) return acc
+		return acc + item.subtotal
+	}, 0)
+	const subtotalMateriales = subtotalMaterialesCalculado > 0 ? subtotalMaterialesCalculado : subtotalGeneralMateriales
 	const subtotalManoObraCalculado = manoObra.reduce((acc, item) => {
 		const precioUnitario = Math.max(0, toNumber(item.precio_unitario, 0))
 		if (precioUnitario <= 0) return acc
@@ -264,6 +317,8 @@ const getNextNumero = async (client) => {
 }
 
 const getPresupuestoCompleto = async (id) => {
+	await ensurePresupuestosMonedaColumn()
+
 	const cabeceraQuery = await pool.query(
 		`
 			SELECT
@@ -309,6 +364,7 @@ const getPresupuestoCompleto = async (id) => {
 
 	return {
 		...cabeceraQuery.rows[0],
+		moneda: normalizeMoneda(cabeceraQuery.rows[0]?.moneda),
 		items: itemsQuery.rows,
 		items_info_interna: infoInternaItemsQuery.rows,
 	}
@@ -448,12 +504,17 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 		try {
 			const pdfMode = options?.mode === "materiales" ? "materiales" : "presupuesto"
 			const isMaterialesMode = pdfMode === "materiales"
+			const monedaPdf = normalizeMoneda(presupuesto?.moneda)
+			const formatoMonedaPdf = (valor) => formatoMoneda(valor, monedaPdf)
 			const mostrarManoObraEnPdf = !isMaterialesMode && Boolean(presupuesto.mostrar_mano_obra_pdf ?? true)
 			const mostrarMaterialesEnPdf = isMaterialesMode ? true : Boolean(presupuesto.mostrar_materiales_pdf ?? true)
 			const itemsMateriales = presupuesto.items.filter((item) => item.tipo === "material")
 			const itemsManoObra = presupuesto.items.filter((item) => item.tipo === "mano_obra")
+			const materialesTienePrecio = itemsMateriales.some((item) => Number(item.precio_unitario || 0) > 0)
 			const manoObraTienePrecio = itemsManoObra.some((item) => Number(item.precio_unitario || 0) > 0)
 			const manoObraTieneCantidad = itemsManoObra.some((item) => Number(item.cantidad || 0) > 1)
+			const modoMaterialesPdf = String(presupuesto.modo_materiales || "").trim() || (!materialesTienePrecio && Number(presupuesto.subtotal_materiales || 0) > 0 ? "subtotal" : "item")
+			const materialesModoSubtotal = modoMaterialesPdf === "subtotal"
 			const infoInternaItems = Array.isArray(presupuesto.items_info_interna) ? presupuesto.items_info_interna : []
 			const infoInternaVisible = []
 			const quienHizo = sanitizeDescripcion(presupuesto.info_interna_quien_hizo)
@@ -730,13 +791,13 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 					const precioUnitario = Number(item.precio_unitario || 0)
 					const subtotal = Number(item.subtotal || 0)
 					if (manoObraConCantidad) {
-						return [descripcion, String(cantidad || 1), formatoMoneda(precioUnitario), formatoMoneda(subtotal)]
+						return [descripcion, String(cantidad || 1), formatoMonedaPdf(precioUnitario), formatoMonedaPdf(subtotal)]
 					}
-					return [descripcion, formatoMoneda(precioUnitario)]
+					return [descripcion, formatoMonedaPdf(precioUnitario)]
 				})
 
 				const manoObraEmptyRow = manoObraDetalle
-					? (manoObraConCantidad ? [["Sin items", "0", formatoMoneda(0), formatoMoneda(0)]] : [["Sin items", formatoMoneda(0)]])
+					? (manoObraConCantidad ? [["Sin items", "0", formatoMonedaPdf(0), formatoMonedaPdf(0)]] : [["Sin items", formatoMonedaPdf(0)]])
 					: [["Sin items"]]
 
 				const construirBloquesManoObra = (items = []) => {
@@ -769,13 +830,13 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 							columns: columnasBloqueCantidad,
 							rows: manoRows.length ? manoRows : manoObraEmptyRow,
 							subtotalLabel: "Subtotal",
-							subtotalValue: formatoMoneda(subtotalBloque),
+							subtotalValue: formatoMonedaPdf(subtotalBloque),
 						})
 					})
 					y = drawSubtotalBand({
 						yStart: y,
 						label: "Subtotal mano de obra",
-						value: formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)),
+						value: formatoMonedaPdf(Number(presupuesto.subtotal_mano_obra || 0)),
 					})
 				} else {
 				const drawManoObraGrupo = (grupo) => {
@@ -794,7 +855,7 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 					y = drawSubtotalBand({
 						yStart: y,
 						label: "Subtotal mano de obra",
-						value: formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)),
+						value: formatoMonedaPdf(Number(presupuesto.subtotal_mano_obra || 0)),
 					})
 				} else {
 					const manoRows = gruposManoObra.flatMap((grupo) => manoObraRowsFromItems(grupo.items))
@@ -804,7 +865,7 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 						columns: manoObraColumns,
 						rows: manoRows.length ? manoRows : manoObraEmptyRow,
 						subtotalLabel: "Subtotal mano de obra",
-						subtotalValue: formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)),
+						subtotalValue: formatoMonedaPdf(Number(presupuesto.subtotal_mano_obra || 0)),
 					})
 				}
 				}
@@ -819,14 +880,22 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 					gruposMateriales.forEach((grupo) => {
 						y = sectionHeader(grupo.etapa, y)
 						const rowsGrupo = grupo.items.map((item, idx) => (
-							isMaterialesMode
-								? [`${idx + 1}. ${item.descripcion || "-"}`, String(Number(item.cantidad || 0))]
-								: [`${idx + 1}. ${item.descripcion || "-"}`, String(Number(item.cantidad || 0)), formatoMoneda(item.precio_unitario), formatoMoneda(item.subtotal)]
+								materialesModoSubtotal
+									? [`${idx + 1}. ${item.descripcion || "-"}`, String(Number(item.cantidad || 0))]
+									: (isMaterialesMode
+										? [`${idx + 1}. ${item.descripcion || "-"}`, String(Number(item.cantidad || 0))]
+									: [`${idx + 1}. ${item.descripcion || "-"}`, String(Number(item.cantidad || 0)), formatoMonedaPdf(item.precio_unitario), formatoMonedaPdf(item.subtotal)]
+								)
 						))
 						y = drawTable({
 							yStart: y,
 							sectionTitle: grupo.etapa,
-							columns: isMaterialesMode
+								columns: materialesModoSubtotal
+									? [
+										{ label: "Descripcion", width: width - 70 },
+										{ label: "Cant.", width: 70, align: "right" },
+									]
+									: (isMaterialesMode
 								? [
 									{ label: "Descripcion", width: width - 58 },
 									{ label: "Cant.", width: 58, align: "center" },
@@ -836,33 +905,43 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 									{ label: "Cant.", width: 60, align: "right" },
 									{ label: "P. unitario", width: 115, align: "right" },
 									{ label: "Subtotal", width: 115, align: "right" },
-								],
+								]),
 							rows: rowsGrupo.length
 								? rowsGrupo
-								: (isMaterialesMode
+									: (materialesModoSubtotal
+										? [["Sin items", "0"]]
+									: (isMaterialesMode
 									? [["Sin items", "0"]]
-									: [["Sin items", "0", formatoMoneda(0), formatoMoneda(0)]]),
+									: [["Sin items", "0", formatoMonedaPdf(0), formatoMonedaPdf(0)]])),
 						})
 					})
-					if (!isMaterialesMode) {
+						if (!isMaterialesMode || materialesModoSubtotal) {
 						y = drawSubtotalBand({
 							yStart: y,
 							label: "Subtotal materiales",
-							value: formatoMoneda(Number(presupuesto.subtotal_materiales || 0)),
+							value: formatoMonedaPdf(Number(presupuesto.subtotal_materiales || 0)),
 						})
 					}
 				} else {
 					const materialRows = gruposMateriales.flatMap((grupo) =>
 						grupo.items.map((item, idx) => (
-							isMaterialesMode
+							materialesModoSubtotal
 								? [`${idx + 1}. ${item.descripcion || "-"}`, String(Number(item.cantidad || 0))]
-								: [`${idx + 1}. ${item.descripcion || "-"}`, String(Number(item.cantidad || 0)), formatoMoneda(item.precio_unitario), formatoMoneda(item.subtotal)]
+								: (isMaterialesMode
+									? [`${idx + 1}. ${item.descripcion || "-"}`, String(Number(item.cantidad || 0))]
+								: [`${idx + 1}. ${item.descripcion || "-"}`, String(Number(item.cantidad || 0)), formatoMonedaPdf(item.precio_unitario), formatoMonedaPdf(item.subtotal)]
+								)
 						))
 					)
 					y = drawTable({
 						yStart: y,
 						sectionTitle: "Detalle materiales",
-						columns: isMaterialesMode
+						columns: materialesModoSubtotal
+							? [
+								{ label: "Descripcion", width: width - 70 },
+								{ label: "Cant.", width: 70, align: "right" },
+							]
+							: (isMaterialesMode
 							? [
 								{ label: "Descripcion", width: width - 58 },
 								{ label: "Cant.", width: 58, align: "center" },
@@ -872,14 +951,16 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 								{ label: "Cant.", width: 60, align: "right" },
 								{ label: "P. unitario", width: 115, align: "right" },
 								{ label: "Subtotal", width: 115, align: "right" },
-							],
+							]),
 						rows: materialRows.length
 							? materialRows
-							: (isMaterialesMode
+							: (materialesModoSubtotal
 								? [["Sin items", "0"]]
-								: [["Sin items", "0", formatoMoneda(0), formatoMoneda(0)]]),
-						subtotalLabel: isMaterialesMode ? null : "Subtotal materiales",
-						subtotalValue: isMaterialesMode ? null : formatoMoneda(Number(presupuesto.subtotal_materiales || 0)),
+								: (isMaterialesMode
+								? [["Sin items", "0"]]
+								: [["Sin items", "0", formatoMonedaPdf(0), formatoMonedaPdf(0)]])),
+						subtotalLabel: (isMaterialesMode && !materialesModoSubtotal) ? null : "Subtotal materiales",
+						subtotalValue: (isMaterialesMode && !materialesModoSubtotal) ? null : formatoMonedaPdf(Number(presupuesto.subtotal_materiales || 0)),
 					})
 				}
 			}
@@ -901,6 +982,7 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 
 			const aplicaIvaMaterialesPdf = Boolean(presupuesto.aplica_iva_materiales)
 			const aplicaIvaManoObraPdf = Boolean(presupuesto.aplica_iva_mano_obra)
+			const subtotalCombinadoPdf = Number(presupuesto.subtotal_mano_obra || 0) + Number(presupuesto.subtotal_materiales || 0)
 			let labelIva = `IVA ${Number(presupuesto.iva_porcentaje || 21)}%`
 			if (aplicaIvaMaterialesPdf && aplicaIvaManoObraPdf) labelIva += " (Mat. + M.O.)"
 			else if (aplicaIvaMaterialesPdf) labelIva += " (Mat.)"
@@ -908,15 +990,16 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 			else labelIva += " (No aplica)"
 
 			const summaryRowsBase = [
-				{ label: "Subtotal mano de obra", value: formatoMoneda(Number(presupuesto.subtotal_mano_obra || 0)), wrap: false },
-				{ label: "Subtotal materiales", value: formatoMoneda(Number(presupuesto.subtotal_materiales || 0)), wrap: false },
-				{ label: labelIva, value: formatoMoneda(ivaMonto), wrap: false },
+				{ label: "Subtotal mano de obra", value: formatoMonedaPdf(Number(presupuesto.subtotal_mano_obra || 0)), wrap: false },
+				{ label: "Subtotal materiales", value: formatoMonedaPdf(Number(presupuesto.subtotal_materiales || 0)), wrap: false },
+				{ label: "Subtotal (M.O + MAT)", value: formatoMonedaPdf(subtotalCombinadoPdf), wrap: false },
+				{ label: labelIva, value: formatoMonedaPdf(ivaMonto), wrap: false },
 			]
 
 			if (descuentoMontoPdf > 0) {
 				summaryRowsBase.push({
 					label: descuentoMotivoPdf,
-					value: `-${formatoMoneda(descuentoMontoPdf)}`,
+					value: `-${formatoMonedaPdf(descuentoMontoPdf)}`,
 					wrap: true,
 				})
 			}
@@ -1001,12 +1084,14 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 			}
 
 			if (!isMaterialesMode) {
+				let summaryEnNuevaPagina = false
 				if (y + summaryBoxH + 24 > pageBottomLimit) {
 					doc.addPage()
 					y = top + 2
+					summaryEnNuevaPagina = true
 				}
 
-				const ySummary = pageBottomLimit - summaryBoxH
+				const ySummary = summaryEnNuevaPagina ? y : (pageBottomLimit - summaryBoxH)
 				doc.rect(left, ySummary, summaryLeftW, summaryBoxH).lineWidth(0.8).strokeColor(lineColor).stroke()
 				doc.font("Helvetica-Bold").fontSize(8.8).fillColor("#111")
 				doc.text("Observaciones", left + 8, ySummary + 6)
@@ -1039,8 +1124,8 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 				const totalBandY = summaryY + totalGap - rowGap
 				doc.rect(sumX + 6, totalBandY, summaryRightW - 12, 21).fillAndStroke("#1f1f1f", lineColor)
 				doc.font("Helvetica-Bold").fontSize(9.8).fillColor("#ffffff")
-				doc.text("TOTAL", sumX + 12, totalBandY + 7)
-				doc.text(formatoMoneda(totalGeneral), valueX, totalBandY + 7, { width: valueW, align: "right", lineBreak: false })
+				doc.text("TOTAL:", sumX + 12, totalBandY + 7)
+				doc.text(formatoMonedaPdf(totalGeneral), valueX, totalBandY + 7, { width: valueW, align: "right", lineBreak: false })
 				y = ySummary + summaryBoxH + 10
 			}
 
@@ -1206,11 +1291,15 @@ router.put("/config/numero-siguiente", async (req, res) => {
 
 router.get("/", async (req, res) => {
 	try {
+		await ensurePresupuestosMonedaColumn()
+		await ensureMovimientosCajaPresupuestos()
+
 		const result = await pool.query(
 			`
 				SELECT
 					p.id,
 					p.numero,
+					p.moneda,
 					p.cliente_id,
 					p.obra_id,
 					p.fecha,
@@ -1244,10 +1333,13 @@ router.get("/", async (req, res) => {
 					GROUP BY presupuesto_id
 				) cert ON cert.presupuesto_id = p.id
 				LEFT JOIN (
-					SELECT presupuesto_id, SUM(monto_total) AS total_pagado_caja
-					FROM movimientos_caja
-					WHERE tipo = 'ingreso' AND presupuesto_id IS NOT NULL
-					GROUP BY presupuesto_id
+					SELECT
+						mcp.presupuesto_id,
+						SUM(COALESCE(NULLIF(mcp.monto_asignado, 0), mc.monto_total)) AS total_pagado_caja
+					FROM movimientos_caja_presupuestos mcp
+					INNER JOIN movimientos_caja mc ON mc.id = mcp.movimiento_id
+					WHERE mc.tipo = 'ingreso'
+					GROUP BY mcp.presupuesto_id
 				) pc ON pc.presupuesto_id = p.id
 				ORDER BY p.created_at DESC
 			`
@@ -1270,6 +1362,7 @@ router.get("/", async (req, res) => {
 
 			return {
 				...row,
+				moneda: normalizeMoneda(row.moneda),
 				total: totalConIva,
 				total_sin_iva: totalSinIva,
 				total_iva: totalIva,
@@ -1301,8 +1394,11 @@ router.post("/", async (req, res) => {
 	const client = await pool.connect()
 
 	try {
+		await ensurePresupuestosMonedaColumn()
+
 		const {
 			cliente_id,
+			moneda,
 			obra_id,
 			proyecto,
 			fecha,
@@ -1311,6 +1407,7 @@ router.post("/", async (req, res) => {
 			observaciones,
 			aplica_iva,
 			aplica_iva_mano_obra,
+			modo_materiales,
 			modo_mano_obra,
 			iva_porcentaje,
 			descuento_activo,
@@ -1319,6 +1416,7 @@ router.post("/", async (req, res) => {
 			descuento_valor,
 			descuento_monto,
 			descuento_motivo,
+			subtotal_general_materiales,
 			subtotal_general_mano_obra,
 			items_materiales,
 			items_mano_obra,
@@ -1342,6 +1440,7 @@ router.post("/", async (req, res) => {
 		}
 
 		const subtotalGeneralManoObra = Math.max(0, toNumber(subtotal_general_mano_obra, 0))
+		const subtotalGeneralMateriales = Math.max(0, toNumber(subtotal_general_materiales, 0))
 		const materiales = normalizeItems(items_materiales, "material")
 		const manoObra = normalizeItems(items_mano_obra, "mano_obra")
 		const infoInternaItems = normalizeInfoInternaItems(items_info_interna)
@@ -1349,6 +1448,7 @@ router.post("/", async (req, res) => {
 		const infoInternaQuienAprobo = sanitizeDescripcion(info_interna_quien_aprobo)
 		const descuentoMotivo = sanitizeDescripcion(descuento_motivo)
 		const proyectoPresupuesto = sanitizeDescripcion(proyecto)
+		const monedaNormalizada = normalizeMoneda(moneda)
 		const indiceCacBaseId = indice_cac_base_id ? Number(indice_cac_base_id) : null
 
 		if (materiales.length === 0 && manoObra.length === 0) {
@@ -1364,6 +1464,7 @@ router.post("/", async (req, res) => {
 			aplicaIvaMateriales,
 			aplicaIvaManoObra,
 			ivaPorcentaje,
+			subtotalGeneralMateriales,
 			subtotalGeneralManoObra,
 			descuentoActivo: Boolean(descuento_activo),
 			descuentoTipo: descuento_tipo,
@@ -1379,18 +1480,19 @@ router.post("/", async (req, res) => {
 		const insertPresupuesto = await client.query(
 			`
 				INSERT INTO presupuestos (
-					numero, cliente_id, obra_id, fecha, validez_dias, forma_pago, observaciones,
+					numero, cliente_id, moneda, obra_id, fecha, validez_dias, forma_pago, observaciones,
 					subtotal_materiales, subtotal_mano_obra, aplica_iva_materiales, aplica_iva_mano_obra, iva_porcentaje, iva_monto,
 					descuento_activo, descuento_tipo, descuento_modo, descuento_valor, descuento_monto, descuento_motivo, total,
 					mostrar_mano_obra_pdf, mostrar_materiales_pdf,
 					proyecto, info_interna_quien_hizo, info_interna_quien_hizo_pdf,
 					info_interna_quien_aprobo, info_interna_quien_aprobo_pdf, indice_cac_base_id
-				) VALUES ($1,$2,$3,COALESCE($4::date, CURRENT_DATE),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+				) VALUES ($1,$2,$3,$4,COALESCE($5::date, CURRENT_DATE),$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
 				RETURNING *
 			`,
 			[
 				numero,
 				validacionRelacion.clienteId,
+				monedaNormalizada,
 				validacionRelacion.obraId,
 				fecha || null,
 				Number(validez_dias) || 15,
@@ -1464,7 +1566,11 @@ router.post("/", async (req, res) => {
 
 		const completo = await getPresupuestoCompleto(presupuesto.id)
 		try {
-			const presupuestoPdf = { ...completo, modo_mano_obra: String(modo_mano_obra || "") }
+			const presupuestoPdf = {
+				...completo,
+				modo_materiales: String(modo_materiales || ""),
+				modo_mano_obra: String(modo_mano_obra || ""),
+			}
 			await syncPresupuestoPdfStorage(presupuestoPdf)
 			await syncPresupuestoPdfStorage(presupuestoPdf, null, "materiales")
 		} catch (storageError) {
@@ -1484,6 +1590,8 @@ router.put("/:id", async (req, res) => {
 	const client = await pool.connect()
 
 	try {
+		await ensurePresupuestosMonedaColumn()
+
 		const presupuestoId = Number(req.params.id)
 		if (!Number.isInteger(presupuestoId) || presupuestoId <= 0) {
 			return res.status(400).json({ error: "ID de presupuesto invalido" })
@@ -1492,6 +1600,7 @@ router.put("/:id", async (req, res) => {
 
 		const {
 			cliente_id,
+			moneda,
 			obra_id,
 			proyecto,
 			fecha,
@@ -1500,6 +1609,7 @@ router.put("/:id", async (req, res) => {
 			observaciones,
 			aplica_iva,
 			aplica_iva_mano_obra,
+			modo_materiales,
 			modo_mano_obra,
 			iva_porcentaje,
 			descuento_activo,
@@ -1508,6 +1618,7 @@ router.put("/:id", async (req, res) => {
 			descuento_valor,
 			descuento_monto,
 			descuento_motivo,
+			subtotal_general_materiales,
 			subtotal_general_mano_obra,
 			items_materiales,
 			items_mano_obra,
@@ -1531,6 +1642,7 @@ router.put("/:id", async (req, res) => {
 		}
 
 		const subtotalGeneralManoObra = Math.max(0, toNumber(subtotal_general_mano_obra, 0))
+		const subtotalGeneralMateriales = Math.max(0, toNumber(subtotal_general_materiales, 0))
 		const materiales = normalizeItems(items_materiales, "material")
 		const manoObra = normalizeItems(items_mano_obra, "mano_obra")
 		const infoInternaItems = normalizeInfoInternaItems(items_info_interna)
@@ -1538,6 +1650,7 @@ router.put("/:id", async (req, res) => {
 		const infoInternaQuienAprobo = sanitizeDescripcion(info_interna_quien_aprobo)
 		const descuentoMotivo = sanitizeDescripcion(descuento_motivo)
 		const proyectoPresupuesto = sanitizeDescripcion(proyecto)
+		const monedaNormalizada = normalizeMoneda(moneda)
 		const indiceCacBaseId = indice_cac_base_id ? Number(indice_cac_base_id) : null
 
 		if (materiales.length === 0 && manoObra.length === 0) {
@@ -1553,6 +1666,7 @@ router.put("/:id", async (req, res) => {
 			aplicaIvaMateriales,
 			aplicaIvaManoObra,
 			ivaPorcentaje,
+			subtotalGeneralMateriales,
 			subtotalGeneralManoObra,
 			descuentoActivo: Boolean(descuento_activo),
 			descuentoTipo: descuento_tipo,
@@ -1578,36 +1692,38 @@ router.put("/:id", async (req, res) => {
 				UPDATE presupuestos
 				SET
 					cliente_id = $1,
-					obra_id = $2,
-					fecha = COALESCE($3::date, fecha),
-					validez_dias = $4,
-					forma_pago = $5,
-					observaciones = $6,
-					subtotal_materiales = $7,
-					subtotal_mano_obra = $8,
-					aplica_iva_materiales = $9,
-					aplica_iva_mano_obra = $10,
-					iva_porcentaje = $11,
-					iva_monto = $12,
-					descuento_activo = $13,
-					descuento_tipo = $14,
-					descuento_modo = $15,
-					descuento_valor = $16,
-					descuento_monto = $17,
-					descuento_motivo = $18,
-					total = $19,
-					mostrar_mano_obra_pdf = $20,
-					mostrar_materiales_pdf = $21,
-					info_interna_quien_hizo = $22,
-					info_interna_quien_hizo_pdf = $23,
-					info_interna_quien_aprobo = $24,
-					info_interna_quien_aprobo_pdf = $25,
-					proyecto = $26,
-					indice_cac_base_id = $27
-				WHERE id = $28
+					moneda = $2,
+					obra_id = $3,
+					fecha = COALESCE($4::date, fecha),
+					validez_dias = $5,
+					forma_pago = $6,
+					observaciones = $7,
+					subtotal_materiales = $8,
+					subtotal_mano_obra = $9,
+					aplica_iva_materiales = $10,
+					aplica_iva_mano_obra = $11,
+					iva_porcentaje = $12,
+					iva_monto = $13,
+					descuento_activo = $14,
+					descuento_tipo = $15,
+					descuento_modo = $16,
+					descuento_valor = $17,
+					descuento_monto = $18,
+					descuento_motivo = $19,
+					total = $20,
+					mostrar_mano_obra_pdf = $21,
+					mostrar_materiales_pdf = $22,
+					info_interna_quien_hizo = $23,
+					info_interna_quien_hizo_pdf = $24,
+					info_interna_quien_aprobo = $25,
+					info_interna_quien_aprobo_pdf = $26,
+					proyecto = $27,
+					indice_cac_base_id = $28
+				WHERE id = $29
 			`,
 			[
 				validacionRelacion.clienteId,
+				monedaNormalizada,
 				validacionRelacion.obraId,
 				fecha || null,
 				Number(validez_dias) || 15,
@@ -1685,7 +1801,11 @@ router.put("/:id", async (req, res) => {
 
 		const completo = await getPresupuestoCompleto(presupuestoId)
 		try {
-			const presupuestoPdf = { ...completo, modo_mano_obra: String(modo_mano_obra || "") }
+			const presupuestoPdf = {
+				...completo,
+				modo_materiales: String(modo_materiales || ""),
+				modo_mano_obra: String(modo_mano_obra || ""),
+			}
 			await syncPresupuestoPdfStorage(presupuestoPdf, presupuestoPrevio)
 			await syncPresupuestoPdfStorage(presupuestoPdf, presupuestoPrevio, "materiales")
 		} catch (storageError) {

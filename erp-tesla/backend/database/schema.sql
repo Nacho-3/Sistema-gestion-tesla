@@ -550,7 +550,7 @@ END $$;
 CREATE TABLE IF NOT EXISTS detalles_medio_pago (
   id SERIAL PRIMARY KEY,
   movimiento_id INTEGER NOT NULL REFERENCES movimientos_caja(id) ON DELETE CASCADE,
-  medio_pago VARCHAR(30) NOT NULL CONSTRAINT chk_detalles_medio_pago_codigo CHECK (medio_pago IN ('efectivo', 'transferencia', 'cheque', 'echeq', 'retencion')),
+  medio_pago VARCHAR(30) NOT NULL CONSTRAINT chk_detalles_medio_pago_codigo CHECK (medio_pago IN ('efectivo', 'transferencia', 'banco', 'cheque', 'echeq', 'retencion')),
   monto NUMERIC(12,2) NOT NULL CONSTRAINT chk_detalles_medio_pago_monto CHECK (monto > 0),
   identificador TEXT,
   banco TEXT,
@@ -1069,7 +1069,7 @@ DELETE FROM detalles_medio_pago
 WHERE monto IS NULL
   OR monto <= 0
   OR medio_pago IS NULL
-  OR LOWER(BTRIM(medio_pago)) NOT IN ('efectivo', 'transferencia', 'cheque', 'echeq', 'retencion');
+  OR LOWER(BTRIM(medio_pago)) NOT IN ('efectivo', 'transferencia', 'banco', 'cheque', 'echeq', 'retencion');
 
 UPDATE detalles_medio_pago
 SET medio_pago = LOWER(BTRIM(medio_pago))
@@ -1146,6 +1146,15 @@ END $$;
 
 DO $$
 BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'chk_detalles_medio_pago_codigo'
+      AND conrelid = 'detalles_medio_pago'::regclass
+  ) THEN
+    ALTER TABLE detalles_medio_pago
+      DROP CONSTRAINT chk_detalles_medio_pago_codigo;
+  END IF;
+
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
     WHERE conname = 'chk_detalles_medio_pago_codigo'
@@ -1153,7 +1162,7 @@ BEGIN
   ) THEN
     ALTER TABLE detalles_medio_pago
       ADD CONSTRAINT chk_detalles_medio_pago_codigo
-      CHECK (medio_pago IN ('efectivo', 'transferencia', 'cheque', 'echeq', 'retencion'));
+      CHECK (medio_pago IN ('efectivo', 'transferencia', 'banco', 'cheque', 'echeq', 'retencion'));
   END IF;
 END $$;
 

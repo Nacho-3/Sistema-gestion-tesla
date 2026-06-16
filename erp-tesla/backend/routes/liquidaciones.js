@@ -333,7 +333,12 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
   
   const horasExtra100Cantidad = preferColumn(liq.horas_extra_100_cantidad, meta.horas_extra_100_cantidad, 0, { allowLegacyMetaWhenColumnZero: false })
   const feriadosCantidad = preferColumn(liq.feriados_cantidad, meta.feriados_cantidad)
-  const diasNoTrabajados = preferColumn(liq.dias_no_trabajados, meta.dias_no_trabajados)
+  const diasNoTrabajados8h = preferColumn(meta.dias_no_trabajados_8h, meta.dias_no_trabajados_8h, 0, { allowLegacyMetaWhenColumnZero: false })
+  const diasNoTrabajados9h = preferColumn(meta.dias_no_trabajados_9h, meta.dias_no_trabajados_9h, 0, { allowLegacyMetaWhenColumnZero: false })
+  const diasNoTrabajadosLegacy = preferColumn(liq.dias_no_trabajados, meta.dias_no_trabajados)
+  const diasNoTrabajados = (diasNoTrabajados8h > 0 || diasNoTrabajados9h > 0)
+    ? roundMoney(diasNoTrabajados8h + diasNoTrabajados9h)
+    : diasNoTrabajadosLegacy
   const diasEnfermedad = preferColumn(liq.dias_enfermedad, meta.dias_enfermedad)
   // Treat `adicional` as a standard column (fallback to 0). Do not prefer legacy meta.
   const adicional = roundMoney(liq.adicional ?? 0)
@@ -351,7 +356,7 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
     ? roundMoney(diasEnfermedad * 8 * valorHora)
     : roundMoney(Number(liq.importe_enfermedad ?? 0))
   const descuentoDiasNoTrabajados = valorHora > 0
-    ? roundMoney(diasNoTrabajados * 8 * valorHora)
+    ? roundMoney((((diasNoTrabajados8h > 0 || diasNoTrabajados9h > 0) ? diasNoTrabajados8h : diasNoTrabajados) * 8 + diasNoTrabajados9h * 9) * valorHora)
     : roundMoney(Number(liq.descuento_dias_no_trabajados ?? 0))
   const conceptosExtra = getConceptosExtrasFromLiquidacion(liq)
   const ajusteConceptosExtra = getConceptosExtrasTotal(conceptosExtra)
@@ -365,6 +370,8 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
     horas_extra_cantidad: horasExtraCantidad,
     horas_extra_100_cantidad: horasExtra100Cantidad,
     feriados_cantidad: feriadosCantidad,
+    dias_no_trabajados_8h: (diasNoTrabajados8h > 0 || diasNoTrabajados9h > 0) ? diasNoTrabajados8h : diasNoTrabajados,
+    dias_no_trabajados_9h: (diasNoTrabajados8h > 0 || diasNoTrabajados9h > 0) ? diasNoTrabajados9h : 0,
     dias_no_trabajados: diasNoTrabajados,
     dias_enfermedad: diasEnfermedad,
     importe_horas_extra: importeHorasExtra,
@@ -427,6 +434,8 @@ const mapLiquidacion = (liq, totalPagado = 0) => {
     horas_extra_registradas_50: horasRegistradas.horas_extra_registradas_50,
     horas_extra_registradas_100: horasRegistradas.horas_extra_registradas_100,
     feriados_cantidad: conceptos.feriados_cantidad,
+    dias_no_trabajados_8h: conceptos.dias_no_trabajados_8h,
+    dias_no_trabajados_9h: conceptos.dias_no_trabajados_9h,
     dias_no_trabajados: conceptos.dias_no_trabajados,
     dias_enfermedad: conceptos.dias_enfermedad,
     importe_feriados: conceptos.importe_feriados,
@@ -1144,6 +1153,8 @@ router.put("/:id", async (req, res) => {
       aguinaldo,
       vacaciones,
       feriados_cantidad,
+      dias_no_trabajados_8h,
+      dias_no_trabajados_9h,
       dias_no_trabajados,
       dias_enfermedad,
       adelantos,
@@ -1203,7 +1214,8 @@ router.put("/:id", async (req, res) => {
       aguinaldo: roundMoney(aguinaldo ?? conceptosActuales.aguinaldo),
       vacaciones: roundMoney(vacaciones ?? conceptosActuales.vacaciones),
       feriados_cantidad: roundMoney(feriados_cantidad ?? conceptosActuales.feriados_cantidad),
-      dias_no_trabajados: roundMoney(dias_no_trabajados ?? conceptosActuales.dias_no_trabajados),
+      dias_no_trabajados_8h: roundMoney(dias_no_trabajados_8h ?? conceptosActuales.dias_no_trabajados_8h ?? dias_no_trabajados ?? conceptosActuales.dias_no_trabajados),
+      dias_no_trabajados_9h: roundMoney(dias_no_trabajados_9h ?? conceptosActuales.dias_no_trabajados_9h ?? 0),
       dias_enfermedad: roundMoney(dias_enfermedad ?? conceptosActuales.dias_enfermedad ?? 0),
       adelantos: roundMoney(adelantos ?? conceptosActuales.adelantos),
       adicional: roundMoney(adicional ?? conceptosActuales.adicional ?? 0),
@@ -1216,7 +1228,8 @@ router.put("/:id", async (req, res) => {
     const importeHorasExtra100 = roundMoney(conceptos.horas_extra_100_cantidad * valorHoraCalculado * 2)
     const importeFeriados = roundMoney(conceptos.feriados_cantidad * 8 * valorHoraCalculado)
     const importeEnfermedad = roundMoney(conceptos.dias_enfermedad * 8 * valorHoraCalculado)
-    const descuentoDiasNoTrabajados = roundMoney(conceptos.dias_no_trabajados * 8 * valorHoraCalculado)
+    conceptos.dias_no_trabajados = roundMoney(conceptos.dias_no_trabajados_8h + conceptos.dias_no_trabajados_9h)
+    const descuentoDiasNoTrabajados = roundMoney((conceptos.dias_no_trabajados_8h * 8 + conceptos.dias_no_trabajados_9h * 9) * valorHoraCalculado)
 
     // Calcular total
     const total = roundMoney(
@@ -1251,6 +1264,8 @@ router.put("/:id", async (req, res) => {
         ? true
         : metaSanitized?.horas_extra_liquidacion_manual === true,
       conceptos_extra: conceptos.conceptos_extra,
+      dias_no_trabajados_8h: conceptos.dias_no_trabajados_8h,
+      dias_no_trabajados_9h: conceptos.dias_no_trabajados_9h,
     })
 
     const { data: pagosExistentes } = await db

@@ -42,6 +42,7 @@ const newManoObraCantidadBloque = () => ({ uid: Date.now() + Math.random(), subt
 const createEmptyForm = () => {
   return {
     cliente_id: "",
+    moneda: "ARS",
     obra_id: "",
     proyecto: "",
     fecha: new Date().toISOString().slice(0, 10),
@@ -49,6 +50,7 @@ const createEmptyForm = () => {
     forma_pago: "Contado",
     aplica_iva: true,
     aplica_iva_mano_obra: false,
+    modo_materiales: "item",
     modo_mano_obra: "subtotal",
     iva_porcentaje: 21,
     descuento_activo: false,
@@ -57,6 +59,7 @@ const createEmptyForm = () => {
     descuento_valor: 0,
     descuento_monto: 0,
     descuento_motivo: "",
+    subtotal_general_materiales: 0,
     subtotal_general_mano_obra: 0,
     observaciones: "",
     mostrar_mano_obra_pdf: true,
@@ -132,14 +135,22 @@ const subtotalManoObraCalculado = computed(() =>
       }, 0)
 )
 
+const subtotalMaterialesCalculado = computed(() =>
+  form.value.modo_materiales === "subtotal"
+    ? 0
+    : materialRowsValidas.value.reduce((acc, item) => {
+      const cantidad = Number(item.cantidad) || 0
+      const unitarioBase = Number(item.precio_unitario) || 0
+      const ganancia = Math.max(0, Number(item.ganancia_porcentaje) || 0)
+      const unitarioConGanancia = unitarioBase * (1 + ganancia / 100)
+      return acc + cantidad * unitarioConGanancia
+    }, 0)
+)
+
 const subtotalMateriales = computed(() =>
-  materialRowsValidas.value.reduce((acc, item) => {
-    const cantidad = Number(item.cantidad) || 0
-    const unitarioBase = Number(item.precio_unitario) || 0
-    const ganancia = Math.max(0, Number(item.ganancia_porcentaje) || 0)
-    const unitarioConGanancia = unitarioBase * (1 + ganancia / 100)
-    return acc + cantidad * unitarioConGanancia
-  }, 0)
+  subtotalMaterialesCalculado.value > 0
+    ? subtotalMaterialesCalculado.value
+    : Number(form.value.subtotal_general_materiales) || 0
 )
 
 const subtotalManoObra = computed(() =>
@@ -386,11 +397,12 @@ const subtotalMaterialRowConGanancia = (row) => {
   return cantidad * precioUnitarioConGanancia(row)
 }
 
-const formatMoney = (value) => {
+const formatMoney = (value, moneda = "ARS") => {
   const n = Number(value) || 0
+  const currency = String(moneda || "").toUpperCase() === "USD" ? "USD" : "ARS"
   return new Intl.NumberFormat("es-AR", {
     style: "currency",
-    currency: "ARS",
+    currency,
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(n)
@@ -467,6 +479,10 @@ const setModoManoObra = (modo) => {
     ...item,
     bloque_uid: null,
   }))
+}
+
+const setModoMateriales = (modo) => {
+  form.value.modo_materiales = modo
 }
 
 const addEtapaMaterial = () => {
@@ -601,7 +617,11 @@ const editPresupuesto = async (id) => {
     const { grupos: etapasMateriales, mapa: mapaEtapasMateriales } = buildEtapasDesdeItems(materiales)
     const { grupos: etapasManoObra, mapa: mapaEtapasManoObra } = buildEtapasDesdeItems(manoObra)
     const manoObraTienePrecio = manoObra.some((item) => Number(item.precio_unitario || 0) > 0)
+    const materialesTienePrecio = materiales.some((item) => Number(item.precio_unitario || 0) > 0)
     const manoObraTieneCantidad = manoObra.some((item) => Number(item.cantidad || 0) > 1)
+    const modoMateriales = !materialesTienePrecio && Number(data.subtotal_materiales || 0) > 0
+      ? "subtotal"
+      : "item"
     const modoManoObra = !manoObraTienePrecio && Number(data.subtotal_mano_obra || 0) > 0
       ? "subtotal"
       : (manoObraTieneCantidad ? "cantidad" : "item")
@@ -613,6 +633,7 @@ const editPresupuesto = async (id) => {
     editingNumero.value = data.numero
     form.value = {
       cliente_id: data.cliente_id || "",
+      moneda: String(data.moneda || "ARS").toUpperCase() === "USD" ? "USD" : "ARS",
       obra_id: data.obra_id || "",
       proyecto: data.proyecto || "",
       fecha: data.fecha ? String(data.fecha).slice(0, 10) : new Date().toISOString().slice(0, 10),
@@ -620,6 +641,7 @@ const editPresupuesto = async (id) => {
       forma_pago: data.forma_pago || "Contado",
       aplica_iva: Boolean(data.aplica_iva_materiales ?? (Number(data.iva_monto || 0) > 0 && Number(data.subtotal_materiales || 0) > 0)),
       aplica_iva_mano_obra: Boolean(data.aplica_iva_mano_obra),
+      modo_materiales: modoMateriales,
       modo_mano_obra: modoManoObra,
       iva_porcentaje: Number(data.iva_porcentaje) || 21,
       descuento_activo: Boolean(data.descuento_activo),
@@ -628,6 +650,7 @@ const editPresupuesto = async (id) => {
       descuento_valor: Math.max(0, Number(data.descuento_valor) || 0),
       descuento_monto: Math.max(0, Number(data.descuento_monto) || 0),
       descuento_motivo: String(data.descuento_motivo || ""),
+      subtotal_general_materiales: Number(data.subtotal_materiales) || 0,
       subtotal_general_mano_obra: Number(data.subtotal_mano_obra) || 0,
       observaciones: data.observaciones || "",
       mostrar_mano_obra_pdf: Boolean(data.mostrar_mano_obra_pdf ?? true),
@@ -794,6 +817,7 @@ const savePresupuesto = async () => {
 
   const payload = {
     cliente_id: Number(form.value.cliente_id),
+    moneda: String(form.value.moneda || "ARS").toUpperCase() === "USD" ? "USD" : "ARS",
     obra_id: form.value.obra_id ? Number(form.value.obra_id) : null,
     proyecto: String(form.value.proyecto || "").trim(),
     fecha: form.value.fecha,
@@ -801,6 +825,7 @@ const savePresupuesto = async () => {
     forma_pago: form.value.forma_pago,
     aplica_iva: Boolean(form.value.aplica_iva),
     aplica_iva_mano_obra: Boolean(form.value.aplica_iva_mano_obra),
+    modo_materiales: String(form.value.modo_materiales || "item"),
     modo_mano_obra: String(form.value.modo_mano_obra || "subtotal"),
     iva_porcentaje: Number(form.value.iva_porcentaje) || 0,
     descuento_activo: Boolean(form.value.descuento_activo),
@@ -809,6 +834,7 @@ const savePresupuesto = async () => {
     descuento_valor: Math.max(0, Number(form.value.descuento_valor) || 0),
     descuento_monto: Math.max(0, Number(form.value.descuento_monto) || 0),
     descuento_motivo: String(form.value.descuento_motivo || "").trim(),
+    subtotal_general_materiales: Number(form.value.subtotal_general_materiales) || 0,
     subtotal_general_mano_obra: Number(form.value.subtotal_general_mano_obra) || 0,
     observaciones: form.value.observaciones,
     mostrar_mano_obra_pdf: Boolean(form.value.mostrar_mano_obra_pdf),
@@ -817,8 +843,8 @@ const savePresupuesto = async () => {
       etapa: getEtapaLabelByUid(item.etapa_uid, form.value.etapas_materiales),
       descripcion: String(item.descripcion || "").trim(),
       cantidad: Number(item.cantidad) || 0,
-      ganancia_porcentaje: Math.max(0, Number(item.ganancia_porcentaje) || 0),
-      precio_unitario: Number(item.precio_unitario) || 0,
+      ganancia_porcentaje: form.value.modo_materiales === "subtotal" ? 0 : Math.max(0, Number(item.ganancia_porcentaje) || 0),
+      precio_unitario: form.value.modo_materiales === "subtotal" ? 0 : (Number(item.precio_unitario) || 0),
     })),
     items_mano_obra: construirItemsManoObraPayload(),
     info_interna_quien_hizo: String(form.value.info_interna_quien_hizo || "").trim(),
@@ -852,7 +878,7 @@ const savePresupuesto = async () => {
 }
 
 const buildWhatsappMessage = (presupuesto) => {
-  const totalTexto = formatMoney(presupuesto.total)
+  const totalTexto = formatMoney(presupuesto.total, presupuesto.moneda)
   return `Hola, te compartimos el presupuesto Nro ${presupuesto.numero} de Tesla Montajes Electricos. Total: ${totalTexto}.`
 }
 
@@ -1147,21 +1173,21 @@ onUnmounted(() => {
 
                 <div class="presupuesto-total-block">
                   <span>Totales del presupuesto</span>
-                  <strong>{{ formatMoney(p.total) }}</strong>
-                  <small>Sin IVA: {{ formatMoney(p.total_sin_iva) }} · IVA: {{ formatMoney(p.total_iva) }}</small>
-                  <small>Pagado por caja: {{ formatMoney(p.total_pagado_caja) }}</small>
+                  <strong>{{ formatMoney(p.total, p.moneda) }}</strong>
+                  <small>Sin IVA: {{ formatMoney(p.total_sin_iva, p.moneda) }} · IVA: {{ formatMoney(p.total_iva, p.moneda) }}</small>
+                  <small>Pagado por caja: {{ formatMoney(p.total_pagado_caja, p.moneda) }}</small>
                   <small v-if="p.deuda_computable">
-                    Saldo pendiente: {{ formatMoney(p.saldo_pendiente_cobro) }}
+                    Saldo pendiente: {{ formatMoney(p.saldo_pendiente_cobro, p.moneda) }}
                     <span :class="cobroStatusClass(p.estado_cobro)">{{ cobroStatusLabel(p.estado_cobro) }}</span>
                   </small>
                   <small v-if="p.deuda_computable && Number(p.saldo_a_favor_cobro || 0) > 0">
-                    Saldo a favor: {{ formatMoney(p.saldo_a_favor_cobro) }}
+                    Saldo a favor: {{ formatMoney(p.saldo_a_favor_cobro, p.moneda) }}
                   </small>
                   <small v-if="!p.deuda_computable">
                     Estado comercial sin deuda activa (solo computa en aceptados).
                   </small>
                   <small v-if="Number(p.cantidad_certificados || 0) > 0">
-                    Certificado: {{ formatMoney(p.total_certificado_con_iva) }} · Pagado: {{ formatMoney(p.total_pagado_certificados) }}
+                    Certificado: {{ formatMoney(p.total_certificado_con_iva, p.moneda) }} · Pagado: {{ formatMoney(p.total_pagado_certificados, p.moneda) }}
                   </small>
                 </div>
               </div>
@@ -1216,7 +1242,7 @@ onUnmounted(() => {
               </div>
               <div class="summary-pill">
                 <span>Total estimado</span>
-                <strong>{{ formatMoney(total) }}</strong>
+                <strong>{{ formatMoney(total, form.moneda) }}</strong>
               </div>
             </div>
 
@@ -1259,6 +1285,14 @@ onUnmounted(() => {
                 <div class="field-card">
                   <label>Validez (dias)</label>
                   <input v-model.number="form.validez_dias" type="number" min="1" />
+                </div>
+
+                <div class="field-card">
+                  <label>Moneda</label>
+                  <select v-model="form.moneda">
+                    <option value="ARS">ARS</option>
+                    <option value="USD">USD</option>
+                  </select>
                 </div>
 
                 <div class="field-card">
@@ -1346,7 +1380,7 @@ onUnmounted(() => {
                     <tr v-for="row in getItemsManoObraPorEtapa(null)" :key="row.uid">
                       <td><input v-model="row.descripcion" type="text" placeholder="Detalle de tarea" /></td>
                       <td v-if="form.modo_mano_obra === 'item'"><input v-model.number="row.precio_unitario" type="number" min="0" step="0.01" /></td>
-                      <td v-if="form.modo_mano_obra === 'item'">{{ formatMoney(Number(row.precio_unitario) || 0) }}</td>
+                      <td v-if="form.modo_mano_obra === 'item'">{{ formatMoney(Number(row.precio_unitario) || 0, form.moneda) }}</td>
                       <td><button type="button" class="btn-link danger" @click="removeManoObraRow(row.uid)">Quitar</button></td>
                     </tr>
                   </tbody>
@@ -1373,7 +1407,7 @@ onUnmounted(() => {
                       <tr v-for="row in getItemsManoObraPorEtapa(etapa.uid)" :key="row.uid">
                         <td><input v-model="row.descripcion" type="text" placeholder="Detalle de tarea" /></td>
                         <td v-if="form.modo_mano_obra === 'item'"><input v-model.number="row.precio_unitario" type="number" min="0" step="0.01" /></td>
-                        <td v-if="form.modo_mano_obra === 'item'">{{ formatMoney(Number(row.precio_unitario) || 0) }}</td>
+                        <td v-if="form.modo_mano_obra === 'item'">{{ formatMoney(Number(row.precio_unitario) || 0, form.moneda) }}</td>
                         <td><button type="button" class="btn-link danger" @click="removeManoObraRow(row.uid)">Quitar</button></td>
                       </tr>
                     </tbody>
@@ -1382,7 +1416,7 @@ onUnmounted(() => {
                 </template>
                 <div v-if="form.modo_mano_obra === 'cantidad'" class="subtotal-general-box">
                   <label>Subtotal mano de obra (suma de bloques)</label>
-                  <div class="subtotal-general-display">{{ formatMoney(subtotalManoObra) }}</div>
+                  <div class="subtotal-general-display">{{ formatMoney(subtotalManoObra, form.moneda) }}</div>
                   <small>Cada bloque tiene su propio subtotal. Podés crear bloques nuevos para continuar.</small>
                 </div>
                 <div v-if="form.modo_mano_obra === 'subtotal'" class="subtotal-general-box">
@@ -1405,6 +1439,10 @@ onUnmounted(() => {
                     <h4>Materiales</h4>
                   </div>
                   <div class="section-head-actions">
+                    <select :value="form.modo_materiales" class="mano-obra-modo-select" @change="(e) => setModoMateriales(e.target.value)">
+                      <option value="item">Precio por item</option>
+                      <option value="subtotal">Subtotal manual</option>
+                    </select>
                     <label class="section-pdf-check">
                       <input v-model="form.mostrar_materiales_pdf" type="checkbox" />
                       <span>Mostrar en PDF</span>
@@ -1414,26 +1452,41 @@ onUnmounted(() => {
                   </div>
                 </div>
                 <div class="materials-table-wrap" v-if="getItemsMaterialesPorEtapa(null).length > 0 || form.etapas_materiales.length === 0">
-                  <table class="materials-table">
+                  <table :class="['materials-table', { 'materials-table-subtotal': form.modo_materiales === 'subtotal' }]">
                     <thead>
                       <tr>
                         <th>Descripcion</th>
-                        <th>Cantidad</th>
-                        <th>Precio unitario</th>
-                        <th>Ganancia % (interno)</th>
-                        <th>P. c/ganancia</th>
-                        <th>Subtotal</th>
+                        <th v-if="form.modo_materiales === 'item' || form.modo_materiales === 'subtotal'">Cantidad</th>
+                        <th v-if="form.modo_materiales === 'item'">Precio unitario</th>
+                        <th v-if="form.modo_materiales === 'item'">Ganancia % (interno)</th>
+                        <th v-if="form.modo_materiales === 'item'">P. c/ganancia</th>
+                        <th v-if="form.modo_materiales === 'item'">Subtotal</th>
                         <th></th>
                       </tr>
                     </thead>
                     <tbody>
                       <tr v-for="row in getItemsMaterialesPorEtapa(null)" :key="row.uid">
-                        <td><input v-model="row.descripcion" type="text" placeholder="Material" /></td>
-                        <td><input v-model.number="row.cantidad" type="number" min="0" step="0.01" /></td>
-                        <td><input v-model.number="row.precio_unitario" type="number" min="0" step="0.01" /></td>
-                        <td><input v-model.number="row.ganancia_porcentaje" type="number" min="0" step="0.01" /></td>
-                        <td>{{ formatMoney(precioUnitarioConGanancia(row)) }}</td>
-                        <td>{{ formatMoney(subtotalMaterialRowConGanancia(row)) }}</td>
+                        <td>
+                          <input
+                            v-model="row.descripcion"
+                            :class="{ 'material-descripcion-subtotal': form.modo_materiales === 'subtotal' }"
+                            type="text"
+                            placeholder="Material"
+                          />
+                        </td>
+                        <td v-if="form.modo_materiales === 'item' || form.modo_materiales === 'subtotal'">
+                          <input
+                            v-model.number="row.cantidad"
+                            :class="{ 'material-cantidad-subtotal': form.modo_materiales === 'subtotal' }"
+                            type="number"
+                            min="0"
+                            step="0.01"
+                          />
+                        </td>
+                        <td v-if="form.modo_materiales === 'item'"><input v-model.number="row.precio_unitario" type="number" min="0" step="0.01" /></td>
+                        <td v-if="form.modo_materiales === 'item'"><input v-model.number="row.ganancia_porcentaje" type="number" min="0" step="0.01" /></td>
+                        <td v-if="form.modo_materiales === 'item'">{{ formatMoney(precioUnitarioConGanancia(row), form.moneda) }}</td>
+                        <td v-if="form.modo_materiales === 'item'">{{ formatMoney(subtotalMaterialRowConGanancia(row), form.moneda) }}</td>
                         <td><button type="button" class="btn-link danger" @click="removeMaterialRow(row.uid)">Quitar</button></td>
                       </tr>
                     </tbody>
@@ -1449,47 +1502,73 @@ onUnmounted(() => {
                     </div>
                   </div>
                   <div class="materials-table-wrap">
-                    <table class="materials-table">
+                    <table :class="['materials-table', { 'materials-table-subtotal': form.modo_materiales === 'subtotal' }]">
                       <thead>
                         <tr>
                           <th>Descripcion</th>
-                          <th>Cantidad</th>
-                          <th>Precio unitario</th>
-                          <th>Ganancia % (interno)</th>
-                          <th>P. c/ganancia</th>
-                          <th>Subtotal</th>
+                          <th v-if="form.modo_materiales === 'item' || form.modo_materiales === 'subtotal'">Cantidad</th>
+                          <th v-if="form.modo_materiales === 'item'">Precio unitario</th>
+                          <th v-if="form.modo_materiales === 'item'">Ganancia % (interno)</th>
+                          <th v-if="form.modo_materiales === 'item'">P. c/ganancia</th>
+                          <th v-if="form.modo_materiales === 'item'">Subtotal</th>
                           <th></th>
                         </tr>
                       </thead>
                       <tbody>
                         <tr v-for="row in getItemsMaterialesPorEtapa(etapa.uid)" :key="row.uid">
-                          <td><input v-model="row.descripcion" type="text" placeholder="Material" /></td>
-                          <td><input v-model.number="row.cantidad" type="number" min="0" step="0.01" /></td>
-                          <td><input v-model.number="row.precio_unitario" type="number" min="0" step="0.01" /></td>
-                          <td><input v-model.number="row.ganancia_porcentaje" type="number" min="0" step="0.01" /></td>
-                          <td>{{ formatMoney(precioUnitarioConGanancia(row)) }}</td>
-                          <td>{{ formatMoney(subtotalMaterialRowConGanancia(row)) }}</td>
+                          <td>
+                            <input
+                              v-model="row.descripcion"
+                              :class="{ 'material-descripcion-subtotal': form.modo_materiales === 'subtotal' }"
+                              type="text"
+                              placeholder="Material"
+                            />
+                          </td>
+                            <td v-if="form.modo_materiales === 'item' || form.modo_materiales === 'subtotal'">
+                              <input
+                                v-model.number="row.cantidad"
+                                :class="{ 'material-cantidad-subtotal': form.modo_materiales === 'subtotal' }"
+                                type="number"
+                                min="0"
+                                step="0.01"
+                              />
+                            </td>
+                          <td v-if="form.modo_materiales === 'item'"><input v-model.number="row.precio_unitario" type="number" min="0" step="0.01" /></td>
+                          <td v-if="form.modo_materiales === 'item'"><input v-model.number="row.ganancia_porcentaje" type="number" min="0" step="0.01" /></td>
+                          <td v-if="form.modo_materiales === 'item'">{{ formatMoney(precioUnitarioConGanancia(row), form.moneda) }}</td>
+                          <td v-if="form.modo_materiales === 'item'">{{ formatMoney(subtotalMaterialRowConGanancia(row), form.moneda) }}</td>
                           <td><button type="button" class="btn-link danger" @click="removeMaterialRow(row.uid)">Quitar</button></td>
                         </tr>
                       </tbody>
                     </table>
                   </div>
                 </div>
+                <div v-if="form.modo_materiales === 'subtotal'" class="subtotal-general-box subtotal-materiales-manual-box">
+                  <label>Subtotal general materiales</label>
+                  <input
+                    v-model.number="form.subtotal_general_materiales"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="Se usa si no asignas precio a los items"
+                  />
+                  <small>Si cargás precio/cantidad en uno o más items, el subtotal se calcula automáticamente por fila.</small>
+                </div>
               </section>
             </div>
 
             <div class="descuento-actions-row">
               <button type="button" class="btn-secondary" @click="showDiscountModal = true">Aplicar descuento</button>
-              <small v-if="form.descuento_activo">Descuento activo: {{ formatMoney(descuentoMontoAplicado) }}</small>
+              <small v-if="form.descuento_activo">Descuento activo: {{ formatMoney(descuentoMontoAplicado, form.moneda) }}</small>
               <small v-else>Sin descuento aplicado</small>
             </div>
 
             <div class="resumen-card">
-              <div class="resumen-line"><span>Subtotal mano de obra</span><strong>{{ formatMoney(subtotalManoObra) }}</strong></div>
-              <div class="resumen-line"><span>Subtotal materiales</span><strong>{{ formatMoney(subtotalMateriales) }}</strong></div>
-              <div class="resumen-line"><span>IVA</span><strong>{{ formatMoney(ivaMonto) }}</strong></div>
-              <div class="resumen-line" v-if="form.descuento_activo"><span>Descuento</span><strong>-{{ formatMoney(descuentoMontoAplicado) }}</strong></div>
-              <div class="total">TOTAL: {{ formatMoney(total) }}</div>
+              <div class="resumen-line"><span>Subtotal mano de obra</span><strong>{{ formatMoney(subtotalManoObra, form.moneda) }}</strong></div>
+              <div class="resumen-line"><span>Subtotal materiales</span><strong>{{ formatMoney(subtotalMateriales, form.moneda) }}</strong></div>
+              <div class="resumen-line"><span>IVA</span><strong>{{ formatMoney(ivaMonto, form.moneda) }}</strong></div>
+              <div class="resumen-line" v-if="form.descuento_activo"><span>Descuento</span><strong>-{{ formatMoney(descuentoMontoAplicado, form.moneda) }}</strong></div>
+              <div class="total">TOTAL: {{ formatMoney(total, form.moneda) }}</div>
             </div>
 
             <div class="observaciones-block">
@@ -1645,9 +1724,9 @@ onUnmounted(() => {
             </div>
 
             <div class="resumen-card descuento-preview">
-              <div class="resumen-line"><span>Base con IVA</span><strong>{{ formatMoney(subtotalConIva) }}</strong></div>
-              <div class="resumen-line"><span>Descuento aplicado</span><strong>-{{ formatMoney(descuentoMontoAplicado) }}</strong></div>
-              <div class="total">Total final: {{ formatMoney(total) }}</div>
+              <div class="resumen-line"><span>Base con IVA</span><strong>{{ formatMoney(subtotalConIva, form.moneda) }}</strong></div>
+              <div class="resumen-line"><span>Descuento aplicado</span><strong>-{{ formatMoney(descuentoMontoAplicado, form.moneda) }}</strong></div>
+              <div class="total">Total final: {{ formatMoney(total, form.moneda) }}</div>
             </div>
 
             <div class="actions modal-actions">
@@ -1674,7 +1753,7 @@ onUnmounted(() => {
               <p>¿Querés eliminar definitivamente el presupuesto #{{ presupuestoAEliminar.numero }}?</p>
               <div class="confirmacion-resumen">
                 <span>{{ presupuestoAEliminar.cliente || getClienteNombre(presupuestoAEliminar.cliente_id) }}</span>
-                <strong>{{ formatMoney(presupuestoAEliminar.total) }}</strong>
+                <strong>{{ formatMoney(presupuestoAEliminar.total, presupuestoAEliminar.moneda) }}</strong>
                 <small>{{ presupuestoAEliminar.obra || getObraNombre(presupuestoAEliminar.obra_id) }}</small>
               </div>
             </div>
@@ -1974,7 +2053,7 @@ textarea:focus {
 
 .estado-board {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  grid-template-columns: 1fr;
   gap: 12px;
   align-items: start;
 }
@@ -2032,6 +2111,7 @@ textarea:focus {
 
 .presupuesto-stack {
   display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -2616,6 +2696,33 @@ table {
   min-width: 0;
 }
 
+.materials-table.materials-table-subtotal {
+  min-width: 100%;
+}
+
+.materials-table.materials-table-subtotal td:first-child,
+.materials-table.materials-table-subtotal th:first-child {
+  width: 72%;
+}
+
+.materials-table.materials-table-subtotal td:nth-child(2),
+.materials-table.materials-table-subtotal th:nth-child(2) {
+  width: 28%;
+}
+
+.material-descripcion-subtotal {
+  min-height: 46px;
+  font-size: 1.08rem;
+  font-weight: 600;
+}
+
+.material-cantidad-subtotal {
+  min-height: 46px;
+  font-size: 1.02rem;
+  font-weight: 700;
+  text-align: right;
+}
+
 th,
 td {
   padding: 9px 8px;
@@ -2635,6 +2742,13 @@ th {
   gap: 6px;
   padding-top: 8px;
   border-top: 1px dashed var(--line-strong);
+}
+
+.subtotal-materiales-manual-box input {
+  width: min(100%, 420px);
+  min-height: 46px;
+  font-size: 1.12rem;
+  font-weight: 700;
 }
 
 .descuento-actions-row {
@@ -2843,6 +2957,10 @@ th {
     grid-template-columns: 1fr;
   }
 
+  .presupuesto-stack {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .presupuesto-card-main {
     grid-template-columns: 1fr;
   }
@@ -2874,6 +2992,7 @@ th {
 
   .stats-grid,
   .estado-board,
+  .presupuesto-stack,
   .grid-form {
     grid-template-columns: 1fr;
   }
