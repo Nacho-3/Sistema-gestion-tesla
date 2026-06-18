@@ -577,7 +577,7 @@ const asignacionesDraftValidas = computed(() => {
   const idsDraft = (asignacionesDraft.value || []).map((item) => String(item.presupuesto_id || ""))
   const sinRepetidos = new Set(idsDraft).size === idsDraft.length
   const mismosIds = idsSeleccionados.every((id) => idsDraft.includes(String(id))) && idsDraft.every((id) => idsSeleccionados.includes(String(id)))
-  return sinRepetidos && mismosIds && Math.abs(Number(diferenciaAsignacionesDraft.value || 0)) < 0.01
+  return sinRepetidos && mismosIds && Number(diferenciaAsignacionesDraft.value || 0) >= -0.01
 })
 
 const chequesTransferibles = computed(() => {
@@ -1073,7 +1073,7 @@ const abrirModalAsignacionesPresupuestos = () => {
 
 const aplicarAsignacionesPresupuestos = () => {
   if (!asignacionesDraftValidas.value) {
-    error.value = "La suma asignada debe coincidir exactamente con el monto total del movimiento"
+    error.value = "La suma asignada no puede superar el monto total del movimiento"
     return
   }
 
@@ -1356,7 +1356,7 @@ const payloadMovimiento = () => ({
   destinatario: form.value.tipo === "egreso"
     ? String(form.value.destinatario || form.value.endosado_a_cheques || "").trim()
     : null,
-  cliente_id: form.value.tipo === "ingreso" ? (form.value.cliente_id || null) : null,
+  cliente_id: form.value.cliente_id || null,
   presupuesto_id: form.value.tipo === "ingreso"
     ? ((form.value.presupuesto_ids || []).length > 0 ? Number(form.value.presupuesto_ids[0]) : (form.value.presupuesto_id || null))
     : null,
@@ -1482,8 +1482,8 @@ const guardarMovimiento = async () => {
   if (form.value.tipo === "ingreso" && Array.isArray(form.value.presupuesto_ids) && form.value.presupuesto_ids.length > 1) {
     sincronizarAsignacionesConSeleccion()
     const totalAsignado = (form.value.presupuestos_asignaciones || []).reduce((acc, item) => acc + Number(item?.monto_asignado || 0), 0)
-    if (Math.abs(Number(form.value.monto_total || 0) - totalAsignado) > 0.01) {
-      error.value = "La imputacion por presupuesto debe sumar el monto total del movimiento"
+    if (totalAsignado - Number(form.value.monto_total || 0) > 0.01) {
+      error.value = "La imputacion por presupuesto no puede superar el monto total del movimiento"
       return
     }
   }
@@ -1705,9 +1705,9 @@ watch(semanaActiva, () => {
 watch(() => form.value.tipo, (tipo) => {
   if (tipo === "egreso") {
     form.value.categoria = ""
-    form.value.cliente_id = ""
     form.value.presupuesto_id = ""
     form.value.presupuesto_ids = []
+    form.value.presupuestos_asignaciones = []
     return
   }
 
@@ -2469,7 +2469,7 @@ onUnmounted(() => {
         <div class="modal-header-copy">
           <span class="section-kicker">Imputacion</span>
           <h3>Asignar monto por presupuesto</h3>
-          <p>La suma de las asignaciones debe ser igual al monto total del movimiento.</p>
+          <p>Podes asignar menos que el monto total. La diferencia queda como saldo a favor del cliente.</p>
         </div>
         <button type="button" class="btn-close" aria-label="Cerrar modal" @click="mostrarModalAsignaciones = false">×</button>
       </div>
@@ -2496,7 +2496,7 @@ onUnmounted(() => {
 
         <div class="asignaciones-resumen">
           <span>Total asignado: <strong>{{ formatoMoneda(totalAsignadoPresupuestosDraft || 0) }}</strong></span>
-          <span :class="Math.abs(diferenciaAsignacionesDraft || 0) < 0.01 ? 'ok' : 'warn'">
+          <span :class="Number(diferenciaAsignacionesDraft || 0) >= -0.01 ? 'ok' : 'warn'">
             Diferencia: {{ formatoMoneda(diferenciaAsignacionesDraft || 0) }}
           </span>
         </div>
@@ -2606,7 +2606,7 @@ onUnmounted(() => {
             <input v-model="form.destinatario" type="text" placeholder="Persona o empresa que recibe el pago" required />
           </label>
 
-          <div v-if="esIngreso" class="form-row form-row-secondary">
+          <div class="form-row form-row-secondary">
             <label class="form-group form-card-field">
               <span>Cliente (opcional)</span>
               <select v-model="form.cliente_id">
@@ -2616,7 +2616,7 @@ onUnmounted(() => {
                 </option>
               </select>
             </label>
-            <div v-if="form.cliente_id" class="form-group form-card-field">
+            <div v-if="esIngreso && form.cliente_id" class="form-group form-card-field">
               <span>Presupuestos (opcional)</span>
               <div v-if="presupuestosDisponibles.length" class="presupuestos-checklist">
                 <label v-for="pres in presupuestosDisponibles" :key="pres.id" class="presupuesto-check-item">

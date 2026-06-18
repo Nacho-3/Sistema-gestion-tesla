@@ -38,6 +38,7 @@ let detallesSchemaCache = null
 let libroChequesSchemaReady = false
 let movimientosCajaPresupuestosSchemaReady = false
 let detallesMedioPagoConstraintReady = false
+let movimientosCajaRulesSchemaReady = false
 
 const roundMoney = (valor) => Math.round((Number(valor) || 0) * 100) / 100
 
@@ -125,6 +126,47 @@ async function ensureMovimientosCajaPresupuestosSchema() {
   await pool.query("CREATE INDEX IF NOT EXISTS idx_movimientos_caja_presupuestos_presupuesto_id ON movimientos_caja_presupuestos(presupuesto_id);")
 
   movimientosCajaPresupuestosSchemaReady = true
+}
+
+async function ensureMovimientosCajaRulesSchema() {
+  if (movimientosCajaRulesSchemaReady) return
+
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF to_regclass('movimientos_caja') IS NULL THEN
+        RETURN;
+      END IF;
+
+      IF EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'chk_movimientos_reglas_tipo'
+          AND conrelid = 'movimientos_caja'::regclass
+      ) THEN
+        ALTER TABLE movimientos_caja DROP CONSTRAINT chk_movimientos_reglas_tipo;
+      END IF;
+
+      ALTER TABLE movimientos_caja
+        ADD CONSTRAINT chk_movimientos_reglas_tipo CHECK (
+          (
+            tipo = 'ingreso'
+            AND categoria IN ('mano_obra', 'materiales', 'varios')
+            AND NULLIF(BTRIM(COALESCE(destinatario, '')), '') IS NULL
+            AND (presupuesto_id IS NULL OR cliente_id IS NOT NULL)
+          )
+          OR
+          (
+            tipo = 'egreso'
+            AND categoria IS NULL
+            AND presupuesto_id IS NULL
+            AND NULLIF(BTRIM(COALESCE(destinatario, '')), '') IS NOT NULL
+          )
+        );
+    END $$;
+  `)
+
+  movimientosCajaRulesSchemaReady = true
 }
 
 async function ensureDetallesMedioPagoConstraint() {
@@ -1067,8 +1109,8 @@ function construirAsignacionesPresupuestos({ presupuestosIds = [], asignacionesR
   }
 
   const totalAsignado = roundMoney(asignaciones.reduce((acc, item) => acc + Number(item.monto_asignado || 0), 0))
-  if (Math.abs(totalAsignado - totalEsperado) > 0.01) {
-    throw new Error(`La suma de imputaciones (${totalAsignado}) no coincide con el monto total (${totalEsperado})`)
+  if (totalAsignado - totalEsperado > 0.01) {
+    throw new Error(`La suma de imputaciones (${totalAsignado}) no puede superar el monto total (${totalEsperado})`)
   }
 
   return asignaciones
@@ -2524,6 +2566,7 @@ router.post("/", async (req, res) => {
     const detalleColumn = await getDetalleColumn()
     const detallesSchema = await getDetallesSchema()
     await ensureLibroChequesSchema()
+    await ensureMovimientosCajaRulesSchema()
     const cajaCodigoNormalizada = String(caja_codigo || "").toLowerCase()
     const tipoNormalizado = String(tipo || "").toLowerCase()
     const destinatarioNormalizado = String(destinatario || "").trim()
@@ -2620,7 +2663,7 @@ router.post("/", async (req, res) => {
           categoria: tipoNormalizado === "ingreso" ? (categoria || null) : null,
           con_iva: normalizarBoolean(con_iva, true),
           destinatario: tipoNormalizado === "egreso" ? destinatarioNormalizado : null,
-          cliente_id: tipoNormalizado === "ingreso" ? (cliente_id || null) : null,
+          cliente_id: cliente_id || null,
           presupuesto_id: tipoNormalizado === "ingreso" ? (presupuestoIdsFinal[0] || null) : null,
         }
       ])
@@ -2773,6 +2816,7 @@ router.put("/:id", async (req, res) => {
     const detalleColumn = await getDetalleColumn()
     const detallesSchema = await getDetallesSchema()
     await ensureLibroChequesSchema()
+    await ensureMovimientosCajaRulesSchema()
     const cajaCodigoNormalizada = caja_codigo !== undefined ? String(caja_codigo || "").toLowerCase() : undefined
     const tipoNormalizado = tipo !== undefined ? String(tipo || "").toLowerCase() : undefined
     const destinatarioNormalizado = destinatario !== undefined ? String(destinatario || "").trim() : undefined
@@ -2859,14 +2903,13 @@ router.put("/:id", async (req, res) => {
     if (categoria !== undefined) actualizaciones.categoria = tipoFinal === "ingreso" ? (categoria || null) : null
     if (con_iva !== undefined) actualizaciones.con_iva = normalizarBoolean(con_iva, true)
     if (destinatario !== undefined) actualizaciones.destinatario = tipoFinal === "egreso" ? destinatarioNormalizado : null
-    if (cliente_id !== undefined) actualizaciones.cliente_id = tipoFinal === "ingreso" ? (cliente_id || null) : null
+    if (cliente_id !== undefined) actualizaciones.cliente_id = cliente_id || null
     if (presupuesto_ids !== undefined || presupuesto_id !== undefined) {
       actualizaciones.presupuesto_id = tipoFinal === "ingreso" ? (presupuestoIdsFinal[0] || null) : null
     }
 
     if (tipo !== undefined && tipoFinal === "egreso") {
       actualizaciones.categoria = null
-      if (cliente_id === undefined) actualizaciones.cliente_id = null
       if (presupuesto_id === undefined && presupuesto_ids === undefined) actualizaciones.presupuesto_id = null
     }
 

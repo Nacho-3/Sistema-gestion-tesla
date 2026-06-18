@@ -136,11 +136,15 @@ const labelEstadoCobro = (estado) => {
 const claseEstadoCobro = (estado) => `estado-cobro estado-cobro-${String(estado || "sin_deuda").toLowerCase()}`
 
 const pagosImputados = computed(() =>
-  (movimientosCajaCliente.value || []).filter((m) => Number(m.presupuesto_id) > 0)
+  (movimientosCajaCliente.value || []).filter((m) => m.tipo === "ingreso" && Number(m.presupuesto_id) > 0)
 )
 
 const pagosNoImputados = computed(() =>
-  (movimientosCajaCliente.value || []).filter((m) => !Number(m.presupuesto_id))
+  (movimientosCajaCliente.value || []).filter((m) => m.tipo === "ingreso" && !Number(m.presupuesto_id))
+)
+
+const egresosCliente = computed(() =>
+  (movimientosCajaCliente.value || []).filter((m) => m.tipo === "egreso")
 )
 
 const pagosImputadosPorPresupuesto = computed(() => {
@@ -203,7 +207,10 @@ const totalCargosPresupuestosCliente = computed(() =>
 )
 
 const totalPagosCajaCliente = computed(() =>
-  roundMoney((movimientosCajaCliente.value || []).reduce((acc, mov) => acc + (Number(mov.monto_total) || 0), 0))
+  roundMoney((movimientosCajaCliente.value || []).reduce((acc, mov) => {
+    const monto = Number(mov.monto_total) || 0
+    return acc + (mov.tipo === "egreso" ? -monto : monto)
+  }, 0))
 )
 
 const saldoPendienteFinalCliente = computed(() =>
@@ -242,11 +249,27 @@ const movimientosCuentaCorriente = computed(() => {
     const presupuestoNumero = Number(mov.presupuesto_id) > 0
       ? (presupuestosPorId.value.get(Number(mov.presupuesto_id))?.numero || mov.presupuesto_id)
       : null
+    const monto = roundMoney(mov.monto_total)
+    if (mov.tipo === "egreso") {
+      const detalle = String(mov.detalle || "Egreso en caja")
+      const destinatario = String(mov.destinatario || "Devolucion al cliente").trim()
+
+      rows.push({
+        tipo: "egreso",
+        fechaRaw: mov.fecha,
+        fecha: formatDateAr(mov.fecha),
+        referencia: `${detalle} - ${destinatario}`,
+        debe: monto,
+        haber: 0,
+        impacto: monto,
+      })
+      continue
+    }
+
     const detalle = String(mov.detalle || "Cobro en caja")
     const referencia = presupuestoNumero
       ? `${detalle} - Presupuesto #${presupuestoNumero}`
       : `${detalle} - Pago sin imputar`
-    const monto = roundMoney(mov.monto_total)
 
     rows.push({
       tipo: "pago",
@@ -263,7 +286,7 @@ const movimientosCuentaCorriente = computed(() => {
     const aKey = String(toDateInputValue(a.fechaRaw || "1900-01-01"))
     const bKey = String(toDateInputValue(b.fechaRaw || "1900-01-01"))
     if (aKey !== bKey) return aKey.localeCompare(bKey)
-    const order = { saldo_inicial: 0, presupuesto: 1, pago: 2 }
+    const order = { saldo_inicial: 0, presupuesto: 1, pago: 2, egreso: 3 }
     return (order[a.tipo] ?? 99) - (order[b.tipo] ?? 99)
   })
 
@@ -319,7 +342,7 @@ const verFicha = async (cliente) => {
   try {
     const [resObras, resMovimientos] = await Promise.all([
       api.getObras(),
-      api.getMovimientosCaja(null, null, "ingreso", null, null)
+      api.getMovimientosCaja(null, null, null, null, null)
     ])
     obrasCliente.value = resObras.data?.filter(o => o.cliente_id === cliente.id) || []
 
@@ -807,8 +830,12 @@ onUnmounted(() => {
                 <tr v-for="(mov, idx) in movimientosCuentaCorriente" :key="`${mov.tipo}-${idx}`">
                   <td>{{ mov.fecha }}</td>
                   <td>
-                    <span class="estado-cobro" :class="mov.tipo === 'pago' ? 'estado-cobro-pagado' : (mov.tipo === 'presupuesto' ? 'estado-cobro-pendiente' : 'estado-cobro-sin_deuda')">
-                      {{ mov.tipo === 'saldo_inicial' ? 'Saldo inicial' : (mov.tipo === 'presupuesto' ? 'Presupuesto' : 'Pago') }}
+                    <span class="estado-cobro" :class="mov.tipo === 'pago'
+                      ? 'estado-cobro-pagado'
+                      : (mov.tipo === 'egreso' ? 'estado-cobro-egreso' : (mov.tipo === 'presupuesto' ? 'estado-cobro-pendiente' : 'estado-cobro-sin_deuda'))">
+                      {{ mov.tipo === 'saldo_inicial'
+                        ? 'Saldo inicial'
+                        : (mov.tipo === 'presupuesto' ? 'Presupuesto' : (mov.tipo === 'egreso' ? 'Egreso' : 'Pago')) }}
                     </span>
                   </td>
                   <td>{{ mov.referencia }}</td>
@@ -858,19 +885,21 @@ onUnmounted(() => {
               <tbody>
                 <tr v-for="mov in movimientosCajaCliente" :key="mov.id">
                   <td>{{ new Date(mov.fecha).toLocaleDateString('es-AR') }}</td>
-                  <td>{{ mov.detalle }}</td>
+                  <td>{{ mov.tipo === 'egreso' ? `${mov.detalle} (egreso)` : mov.detalle }}</td>
                   <td>
-                    <span v-if="Number(mov.presupuesto_id) > 0">
+                    <span v-if="mov.tipo === 'ingreso' && Number(mov.presupuesto_id) > 0">
                       #{{ presupuestosPorId.get(Number(mov.presupuesto_id))?.numero || mov.presupuesto_id }}
                     </span>
                     <span v-else>-</span>
                   </td>
                   <td>
-                    <span :class="Number(mov.presupuesto_id) > 0 ? 'estado-cobro estado-cobro-parcial' : 'estado-cobro estado-cobro-sin_deuda'">
-                      {{ Number(mov.presupuesto_id) > 0 ? 'Imputado' : 'No imputado' }}
+                    <span :class="mov.tipo === 'egreso'
+                      ? 'estado-cobro estado-cobro-pendiente'
+                      : (Number(mov.presupuesto_id) > 0 ? 'estado-cobro estado-cobro-parcial' : 'estado-cobro estado-cobro-sin_deuda')">
+                      {{ mov.tipo === 'egreso' ? 'Devolucion' : (Number(mov.presupuesto_id) > 0 ? 'Imputado' : 'No imputado') }}
                     </span>
                   </td>
-                  <td>{{ formatMoney(mov.monto_total) }}</td>
+                  <td>{{ mov.tipo === 'egreso' ? `-${formatMoney(mov.monto_total)}` : formatMoney(mov.monto_total) }}</td>
                   <td>{{ mov.observaciones || '-' }}</td>
                 </tr>
               </tbody>
@@ -1849,6 +1878,11 @@ td {
 .estado-cobro-pagado {
   background: rgba(34, 197, 94, 0.18);
   color: #bbf7d0;
+}
+
+.estado-cobro-egreso {
+  background: rgba(239, 68, 68, 0.16);
+  color: #fecaca;
 }
 
 .estado-cobro-a_favor {

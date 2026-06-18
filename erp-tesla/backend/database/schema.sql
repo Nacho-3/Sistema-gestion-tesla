@@ -447,7 +447,6 @@ CREATE TABLE IF NOT EXISTS movimientos_caja (
     (
       tipo = 'egreso'
       AND categoria IS NULL
-      AND cliente_id IS NULL
       AND presupuesto_id IS NULL
       AND NULLIF(BTRIM(COALESCE(destinatario, '')), '') IS NOT NULL
     )
@@ -1047,7 +1046,6 @@ WHERE mc.presupuesto_id = p.id
 
 UPDATE movimientos_caja
 SET categoria = NULL,
-    cliente_id = NULL,
     presupuesto_id = NULL,
     destinatario = NULLIF(BTRIM(COALESCE(destinatario, '')), '')
 WHERE tipo = 'egreso';
@@ -1107,7 +1105,6 @@ BEGIN
       (
         tipo = 'egreso'
         AND categoria IS NULL
-        AND cliente_id IS NULL
         AND presupuesto_id IS NULL
         AND NULLIF(BTRIM(COALESCE(destinatario, '')), '') IS NOT NULL
       )
