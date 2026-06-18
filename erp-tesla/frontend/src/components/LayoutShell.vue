@@ -126,8 +126,8 @@ onUnmounted(() => {
       <div class="sidebar-header">
         <div class="sidebar-brand-mark">T</div>
         <div class="sidebar-brand-copy">
-          <span class="sidebar-title">ERP TESLA</span>
-          <span class="sidebar-subtitle">Panel operativo central</span>
+          <span class="sidebar-title">ERP TESLA LAB</span>
+          <span class="sidebar-subtitle">Panel de cambios y pruebas</span>
         </div>
       </div>
 

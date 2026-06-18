@@ -546,9 +546,10 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 
 			const left = 45
 			const pageWidth = doc.page.width
+			const pageHeight = doc.page.height
 			const right = pageWidth - 45
 			const width = right - left
-			const top = 34
+			const top = 22
 			const lineColor = "#1f1f1f"
 			const muted = "#5b5b5b"
 
@@ -601,7 +602,9 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 				return nextY + 19
 			}
 
-			const pageBottomLimit = doc.page.height - 98
+			const footerLineY = pageHeight - 62
+			const pageBottomLimit = pageHeight - 98
+			const summaryBottomLimit = footerLineY - 8
 			const drawSubtotalBand = ({ yStart, label, value }) => {
 				let yBand = yStart
 				if (yBand + 18 > pageBottomLimit) {
@@ -708,15 +711,15 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 			const logoToUse = existsSync(LOGO_PRESUPUESTO_PATH) ? LOGO_PRESUPUESTO_PATH : LOGO_PATH
 			let y = top
 
-			doc.strokeColor(lineColor).lineWidth(1).moveTo(left, y + 58).lineTo(right, y + 58).stroke()
-			doc.strokeColor("#7a7a7a").lineWidth(0.6).moveTo(left, y + 62).lineTo(right, y + 62).stroke()
-			doc.font("Helvetica-Bold").fontSize(isMaterialesMode ? 26 : 34).fillColor("#111")
-			doc.text(isMaterialesMode ? "LISTADO DE MATERIALES" : "PRESUPUESTO", left, y + 19, { width, align: "center" })
+			doc.strokeColor(lineColor).lineWidth(1).moveTo(left, y + 50).lineTo(right, y + 50).stroke()
+			doc.strokeColor("#7a7a7a").lineWidth(0.6).moveTo(left, y + 54).lineTo(right, y + 54).stroke()
+			doc.font("Helvetica-Bold").fontSize(isMaterialesMode ? 24 : 28).fillColor("#111")
+			doc.text(isMaterialesMode ? "LISTADO DE MATERIALES" : "PRESUPUESTO", left, y + 14, { width, align: "center" })
 
-			y += 74
+			y += 64
 			const blockGap = 12
 			const blockW = (width - blockGap) / 2
-			const blockH = 108
+			const blockH = 102
 			const logoBandW = 82
 
 			doc.rect(left, y, blockW, blockH).lineWidth(0.8).strokeColor(lineColor).stroke()
@@ -743,8 +746,8 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 			doc.text(`Direccion: ${clienteDireccion}`, rightBoxX + 8, y + 60, { width: blockW - 16, lineBreak: false })
 			doc.text(`Telefono: ${clienteTelefono}`, rightBoxX + 8, y + 73, { width: blockW - 16, lineBreak: false })
 
-			y += blockH + 10
-			const boxDatosH = 46
+			y += blockH + 8
+			const boxDatosH = 42
 			doc.rect(left, y, width, boxDatosH).lineWidth(0.8).strokeColor(lineColor).stroke()
 			doc.strokeColor("#d0d0d0").lineWidth(0.5).moveTo(left, y + 23).lineTo(right, y + 23).stroke()
 			doc.font("Helvetica").fontSize(8.6).fillColor(muted)
@@ -758,7 +761,7 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 			doc.text(formatoFecha(presupuesto.fecha), left + 58, y + 30, { width: width - 232, lineBreak: false })
 			doc.text(validezTexto, right - 70, y + 30, { width: 62, align: "right", lineBreak: false })
 
-			y += boxDatosH + 12
+			y += boxDatosH + 8
 
 			if (mostrarManoObraEnPdf) {
 				y = sectionHeader("Detalle mano de obra", y)
@@ -1091,7 +1094,7 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 					summaryEnNuevaPagina = true
 				}
 
-				const ySummary = summaryEnNuevaPagina ? y : (pageBottomLimit - summaryBoxH)
+				const ySummary = summaryEnNuevaPagina ? y : (summaryBottomLimit - summaryBoxH)
 				doc.rect(left, ySummary, summaryLeftW, summaryBoxH).lineWidth(0.8).strokeColor(lineColor).stroke()
 				doc.font("Helvetica-Bold").fontSize(8.8).fillColor("#111")
 				doc.text("Observaciones", left + 8, ySummary + 6)

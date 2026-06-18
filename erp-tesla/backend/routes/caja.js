@@ -391,6 +391,23 @@ async function obtenerChequesSalidaPorMovimiento(movimientoId) {
   return result.rows || []
 }
 
+async function obtenerChequesIngresoPorMovimiento(movimientoId) {
+  const id = Number(movimientoId || 0)
+  if (!Number.isInteger(id) || id <= 0) return []
+
+  const result = await pool.query(
+    `
+      SELECT id, medio_pago, importe, numero_cheque, banco, librador_endosante, fecha_cheque, fecha_entrada
+      FROM libro_cheques_caja
+      WHERE movimiento_entrada_id = $1
+      ORDER BY id ASC
+    `,
+    [id]
+  )
+
+  return result.rows || []
+}
+
 async function validarIngresoEliminable({ client, movimientoId }) {
   const res = await client.query(
     `
@@ -932,7 +949,7 @@ function construirDetallesPago({ desglose = {}, detalles_medio_pago = [] } = {})
         banco: String(item?.banco || "").trim() || null,
         fecha_cobro: item?.fecha_cobro || null,
         librador_endosante: String(item?.librador_endosante || "").trim() || null,
-        numero_cheque: String(item?.numero_cheque || "").trim() || String(item?.identificador || "").trim() || null,
+        numero_cheque: String(item?.numero_cheque || "").trim() || null,
         fecha_cheque: item?.fecha_cheque || null,
         fecha_entrada: item?.fecha_entrada || null,
         endosado_a: String(item?.endosado_a || "").trim() || null,
@@ -2471,6 +2488,8 @@ router.get("/:id", async (req, res) => {
         movimiento.fecha_salida_cheques = normalizarFechaISO(chequesSalida[0]?.fecha_salida) || null
         movimiento.endosado_a_cheques = String(chequesSalida[0]?.endosado_a || "").trim() || null
       }
+    } else if (String(movimiento?.tipo || "").toLowerCase() === "ingreso") {
+      movimiento.cheques_ingreso_detalle = await obtenerChequesIngresoPorMovimiento(movimiento.id)
     }
 
     res.json(movimiento)

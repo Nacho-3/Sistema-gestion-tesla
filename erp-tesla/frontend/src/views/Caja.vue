@@ -1133,6 +1133,7 @@ const normalizarDesglose = (detalles = []) => {
   const base = {
     efectivo: 0,
     transferencia: 0,
+    banco: 0,
     retencion: 0
   }
 
@@ -1153,7 +1154,7 @@ const normalizarCheques = (detalles = []) => {
       medio_pago: String(item?.medio_pago || "").toLowerCase(),
       monto: parseFloat(item?.monto || 0) || 0,
       identificador: String(item?.identificador || "").trim(),
-      numero_cheque: String(item?.numero_cheque || item?.identificador || "").trim(),
+      numero_cheque: String(item?.numero_cheque || "").trim(),
       librador_endosante: String(item?.librador_endosante || "").trim(),
       banco: String(item?.banco || "").trim(),
       fecha_cheque: String(item?.fecha_cheque || "").split("T")[0],
@@ -1199,6 +1200,9 @@ const abrirEdicion = async (movimiento) => {
     const detalleChequesSalida = Array.isArray(movimientoCompleto.cheques_salida_detalle)
       ? movimientoCompleto.cheques_salida_detalle
       : []
+    const detalleChequesIngreso = Array.isArray(movimientoCompleto.cheques_ingreso_detalle)
+      ? movimientoCompleto.cheques_ingreso_detalle
+      : []
     const chequesSalidaIdsBackend = Array.isArray(movimientoCompleto.cheques_salida_ids)
       ? movimientoCompleto.cheques_salida_ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
       : []
@@ -1240,6 +1244,69 @@ const abrirEdicion = async (movimiento) => {
         fecha_entrada: String(item?.fecha_salida || movimientoCompleto.fecha || "").split("T")[0],
         libro_cheque_id: libroId,
       })
+    })
+
+    const usedChequeRows = new Set()
+    const completarChequeDesdeLibro = (cheque, item) => {
+      const libroId = Number(item?.id || 0)
+      const numero = String(item?.numero_cheque || "").trim()
+      const importe = Number(item?.importe || 0)
+
+      if (Number.isInteger(libroId) && libroId > 0) cheque.libro_cheque_id = libroId
+      if (!String(cheque.numero_cheque || "").trim()) cheque.numero_cheque = numero
+      if (!String(cheque.librador_endosante || "").trim()) cheque.librador_endosante = String(item?.librador_endosante || "").trim()
+      if (!String(cheque.banco || "").trim()) cheque.banco = String(item?.banco || "").trim()
+      if (!String(cheque.fecha_cheque || "").trim()) cheque.fecha_cheque = String(item?.fecha_cheque || "").split("T")[0]
+      if (!String(cheque.fecha_entrada || "").trim()) cheque.fecha_entrada = String(item?.fecha_entrada || movimientoCompleto.fecha || "").split("T")[0]
+      if (!(Number(cheque.monto || 0) > 0) && importe > 0) cheque.monto = importe
+    }
+
+    detalleChequesIngreso.forEach((item) => {
+      const libroId = Number(item?.id || 0)
+      const numero = String(item?.numero_cheque || "").trim()
+      const importe = Number(item?.importe || 0)
+
+      let existente = chequesMovimiento.find((cheque, idx) => {
+        if (usedChequeRows.has(idx)) return false
+        return Number(cheque?.libro_cheque_id || 0) === libroId && Number.isInteger(libroId) && libroId > 0
+      })
+
+      if (!existente) {
+        existente = chequesMovimiento.find((cheque, idx) => {
+          if (usedChequeRows.has(idx)) return false
+          const numeroCheque = String(cheque?.numero_cheque || "").trim()
+          return Boolean(numero && numeroCheque && numeroCheque === numero)
+        })
+      }
+
+      if (!existente) {
+        existente = chequesMovimiento.find((cheque, idx) => {
+          if (usedChequeRows.has(idx)) return false
+          const montoCheque = Number(cheque?.monto || 0)
+          return importe > 0 && montoCheque > 0 && Math.abs(montoCheque - importe) < 0.01
+        })
+      }
+
+      if (existente) {
+        const idx = chequesMovimiento.indexOf(existente)
+        if (idx >= 0) usedChequeRows.add(idx)
+        completarChequeDesdeLibro(existente, item)
+        return
+      }
+
+      const nuevo = {
+        medio_pago: String(item?.medio_pago || "cheque").toLowerCase(),
+        monto: importe,
+        identificador: "",
+        numero_cheque: numero,
+        librador_endosante: String(item?.librador_endosante || "").trim(),
+        banco: String(item?.banco || "").trim(),
+        fecha_cheque: String(item?.fecha_cheque || "").split("T")[0],
+        fecha_entrada: String(item?.fecha_entrada || movimientoCompleto.fecha || "").split("T")[0],
+        libro_cheque_id: Number.isInteger(libroId) && libroId > 0 ? libroId : null,
+      }
+      chequesMovimiento.push(nuevo)
+      usedChequeRows.add(chequesMovimiento.length - 1)
     })
 
     form.value = {
@@ -1316,8 +1383,8 @@ const payloadMovimiento = () => ({
     .map((item) => ({
       medio_pago: item.medio_pago,
       monto: parseFloat(item.monto) || 0,
-      identificador: String(item.identificador || item.numero_cheque || "").trim(),
-      numero_cheque: String(item.numero_cheque || item.identificador || "").trim(),
+      identificador: String(item.identificador || "").trim(),
+      numero_cheque: String(item.numero_cheque || "").trim(),
       librador_endosante: String(item.librador_endosante || "").trim(),
       banco: String(item.banco || "").trim(),
       fecha_cheque: item.fecha_cheque || null,
@@ -1395,10 +1462,10 @@ const sincronizarChequesSalidaSeleccionados = () => {
   form.value.cheques = seleccionados.map((item) => ({
     medio_pago: String(item.medio_pago || "cheque").toLowerCase(),
     monto: Number(item.importe || item.monto || 0),
-    identificador: String(item.identificador || item.numero_cheque || ""),
-    numero_cheque: String(item.numero_cheque || item.identificador || ""),
-    librador_endosante: String(item.librador_endosante || ""),
-    banco: String(item.banco || ""),
+    identificador: String(item.identificador || "").trim(),
+    numero_cheque: String(item.numero_cheque || "").trim(),
+    librador_endosante: String(item.librador_endosante || "").trim(),
+    banco: String(item.banco || "").trim(),
     fecha_cheque: String(item.fecha_cheque || "").split("T")[0],
     fecha_entrada: String(item.fecha_entrada || item.fecha_salida || "").split("T")[0],
     libro_cheque_id: Number(item.libro_cheque_id || item.id || 0) || null,
