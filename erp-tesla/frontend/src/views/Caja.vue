@@ -49,6 +49,7 @@ const libroCheques = ref([])
 const chequesDisponibles = ref([])
 const loadingLibroCheques = ref(false)
 const filtroBusquedaLibroCheques = ref("")
+const filtroSemanaLibroCheques = ref("global")
 const libroChequesExpandido = ref(true)
 const noDisponiblesExpandido = ref(false)
 const movimientosExpandido = ref(true)
@@ -346,6 +347,32 @@ const semanaActiva = computed(() => {
   return semanaActual.value || semanasCajaVisibles.value[0] || null
 })
 
+const claveSemanaLibro = (semana) => {
+  const inicio = String(semana?.fecha_inicio || "")
+  const fin = String(semana?.fecha_fin || "")
+  if (!inicio || !fin) return ""
+  return `${inicio}|${fin}`
+}
+
+const etiquetaSemanaLibro = (semana) => {
+  if (!semana?.fecha_inicio || !semana?.fecha_fin) return "Semana"
+  const inicio = new Date(`${semana.fecha_inicio}T00:00:00`).toLocaleDateString("es-AR")
+  const fin = new Date(`${semana.fecha_fin}T00:00:00`).toLocaleDateString("es-AR")
+  return `${inicio} al ${fin}`
+}
+
+const semanaLibroChequesActiva = computed(() => {
+  if (String(filtroSemanaLibroCheques.value || "").toLowerCase() === "global") return null
+  return semanasCajaVisibles.value.find((semana) => claveSemanaLibro(semana) === String(filtroSemanaLibroCheques.value)) || null
+})
+
+const opcionesSemanaLibroCheques = computed(() => {
+  return semanasCajaVisibles.value.map((semana) => ({
+    id: claveSemanaLibro(semana),
+    label: etiquetaSemanaLibro(semana),
+  })).filter((semana) => Boolean(semana.id))
+})
+
 const subtitleCaja = computed(() => {
   return `${cajaActiva.value.label} - Movimientos de ingresos y egresos`
 })
@@ -375,7 +402,10 @@ const libroChequesFiltrado = computed(() => {
 
 const libroChequesDisponibles = computed(() => {
   return libroChequesFiltrado.value
-    .filter((item) => String(item.estado || "").toLowerCase() === "disponible")
+    .filter((item) => {
+      const estadoVista = String(item.estado_vista || item.estado || "").toLowerCase()
+      return estadoVista === "disponible"
+    })
     .sort((a, b) => {
       const fechaA = String(a?.fecha_cheque || "")
       const fechaB = String(b?.fecha_cheque || "")
@@ -386,7 +416,10 @@ const libroChequesDisponibles = computed(() => {
 
 const libroChequesNoDisponibles = computed(() => {
   return libroChequesFiltrado.value
-    .filter((item) => String(item.estado || "").toLowerCase() !== "disponible")
+    .filter((item) => {
+      const estadoVista = String(item.estado_vista || item.estado || "").toLowerCase()
+      return estadoVista !== "disponible"
+    })
     .sort((a, b) => {
       const fechaA = String(a?.fecha_salida || a?.fecha_cheque || "")
       const fechaB = String(b?.fecha_salida || b?.fecha_cheque || "")
@@ -704,6 +737,13 @@ const cargarSemanasCaja = async (mantenerSeleccion = true) => {
     }
 
     semanaSeleccionadaId.value = semanaActual.value?.id ? String(semanaActual.value.id) : (semanasCaja.value[0]?.id ? String(semanasCaja.value[0].id) : "")
+
+    if (String(filtroSemanaLibroCheques.value || "").toLowerCase() !== "global") {
+      const existeSemanaLibro = opcionesSemanaLibroCheques.value.some((semana) => String(semana.id) === String(filtroSemanaLibroCheques.value))
+      if (!existeSemanaLibro) {
+        filtroSemanaLibroCheques.value = "global"
+      }
+    }
   } catch (err) {
     console.error("Error al cargar semanas de caja:", err)
     if (!mantenerSeleccion && semanaActual.value?.id) {
@@ -970,10 +1010,12 @@ const abrirModalPdfCheques = () => {
 
 const descargarLibroChequesPdf = async () => {
   const listado = String(opcionPdfCheques.value || "disponibles")
+  const fechaInicio = semanaLibroChequesActiva.value?.fecha_inicio || ""
+  const fechaFin = semanaLibroChequesActiva.value?.fecha_fin || ""
 
   try {
     generandoPdfCheques.value = true
-    const res = await api.getLibroChequesPdf(filtroCaja.value, listado, filtroBusquedaLibroCheques.value)
+    const res = await api.getLibroChequesPdf(filtroCaja.value, listado, filtroBusquedaLibroCheques.value, fechaInicio, fechaFin)
     const blob = new Blob([res.data], { type: "application/pdf" })
     const url = window.URL.createObjectURL(blob)
     const link = document.createElement("a")
@@ -981,7 +1023,8 @@ const descargarLibroChequesPdf = async () => {
 
     const hoy = new Date()
     const fecha = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, "0")}-${String(hoy.getDate()).padStart(2, "0")}`
-    link.download = `Libro cheques ${textoCajaFiltro()} ${listado} ${fecha}.pdf`
+    const sufijo = fechaInicio ? ` semana ${fechaInicio}` : ""
+    link.download = `Libro cheques ${textoCajaFiltro()} ${listado}${sufijo} ${fecha}.pdf`
 
     link.click()
     window.URL.revokeObjectURL(url)
@@ -1406,7 +1449,15 @@ const payloadMovimiento = () => ({
 const cargarLibroCheques = async () => {
   try {
     loadingLibroCheques.value = true
-    const res = await api.getLibroChequesCaja(filtroCaja.value, "", filtroBusquedaLibroCheques.value)
+    const fechaInicio = semanaLibroChequesActiva.value?.fecha_inicio || ""
+    const fechaFin = semanaLibroChequesActiva.value?.fecha_fin || ""
+    const res = await api.getLibroChequesCaja(
+      filtroCaja.value,
+      "",
+      filtroBusquedaLibroCheques.value,
+      fechaInicio,
+      fechaFin,
+    )
     libroCheques.value = res.data || []
   } catch (err) {
     console.error("Error al cargar libro de cheques:", err)
@@ -1689,6 +1740,7 @@ const formatearFechaLibro = (valor) => {
 
 watch(filtroCaja, () => {
   semanaSeleccionadaId.value = ""
+  filtroSemanaLibroCheques.value = "global"
   semanasCaja.value = []
   semanaActual.value = null
   refrescarCaja({ mantenerSeleccion: false })
@@ -1752,6 +1804,10 @@ watch(() => form.value.monto_total, () => {
 })
 
 watch(() => filtroBusquedaLibroCheques.value, () => {
+  cargarLibroCheques()
+})
+
+watch(() => filtroSemanaLibroCheques.value, () => {
   cargarLibroCheques()
 })
 
@@ -2056,6 +2112,15 @@ onUnmounted(() => {
             <label class="toolbar-search-label toolbar-search">
               <span>Buscar cheque</span>
               <input v-model="filtroBusquedaLibroCheques" type="text" class="input-sm input-search" placeholder="Numero, banco, librador, endosado..." />
+            </label>
+            <label class="toolbar-filter-label">
+              <span>Semana</span>
+              <select v-model="filtroSemanaLibroCheques" class="select-sm">
+                <option value="global">Global</option>
+                <option v-for="semana in opcionesSemanaLibroCheques" :key="`libro-semana-${semana.id}`" :value="semana.id">
+                  {{ semana.label }}
+                </option>
+              </select>
             </label>
           </div>
 

@@ -21,6 +21,7 @@ const obrasCliente = ref([])
 const presupuestosCliente = ref([])
 const presupuestosAceptados = ref([])
 const downloadingPdf = ref(false)
+const downloadingHistoricoPdf = ref(false)
 const filtroBusqueda = ref("")
 const filtroIva = ref("")
 
@@ -515,6 +516,39 @@ const descargarFichaPdf = async () => {
   }
 }
 
+const descargarFichaHistoricaPdf = async () => {
+  if (!clienteSeleccionado.value) return
+
+  downloadingHistoricoPdf.value = true
+  error.value = ""
+
+  try {
+    const res = await api.getClienteFichaHistoricaPdf(clienteSeleccionado.value.id)
+    const blob = new Blob([res.data], { type: "application/pdf" })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement("a")
+
+    const fecha = new Date().toLocaleDateString("es-AR").replace(/\//g, "-")
+    const nombreCliente = (clienteSeleccionado.value.razon_social || "Cliente")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[\\/:*?"<>|]/g, "")
+      .trim()
+
+    link.href = url
+    link.download = `Ficha historica ${nombreCliente} actualizada ${fecha}.pdf`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.URL.revokeObjectURL(url)
+  } catch (err) {
+    error.value = extractApiErrorMessage(err, "Error al generar la ficha histórica PDF")
+    console.error(err)
+  } finally {
+    downloadingHistoricoPdf.value = false
+  }
+}
+
 onMounted(() => {
   loadClientes()
   socket.on('clientes:changed', loadClientes)
@@ -813,7 +847,12 @@ onUnmounted(() => {
         </div>
 
         <div class="ficha-seccion">
-          <h3>📚 Cuenta corriente cronológica</h3>
+          <div class="ficha-seccion-header">
+            <h3>📚 Cuenta corriente cronológica</h3>
+            <button class="btn-pdf" :disabled="downloadingHistoricoPdf" @click="descargarFichaHistoricaPdf">
+              {{ downloadingHistoricoPdf ? "Generando historial..." : "🖨️ Cuenta Corriente PDF" }}
+            </button>
+          </div>
           <div class="tabla-shell">
             <table class="tabla">
               <thead>
@@ -1594,6 +1633,11 @@ td {
   .modal-actions {
     flex-direction: column;
   }
+
+  .ficha-seccion-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 
 /* Ficha del Cliente */
@@ -1660,6 +1704,18 @@ td {
   color: #e2e8f0;
   font-size: 1.125rem;
   font-weight: 600;
+}
+
+.ficha-seccion-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.8rem;
+  margin-bottom: 1.1rem;
+}
+
+.ficha-seccion-header h3 {
+  margin-bottom: 0;
 }
 
 .datos-principales {

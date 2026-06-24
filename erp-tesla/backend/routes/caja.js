@@ -1346,9 +1346,20 @@ router.get("/libro-cheques", async (req, res) => {
     const cajaCodigo = String(req.query.caja_codigo || "tesla").toLowerCase()
     const estado = String(req.query.estado || "").toLowerCase().trim()
     const busqueda = String(req.query.busqueda || "").trim().toLowerCase()
+    const fechaInicio = normalizarFechaISO(req.query.fecha_inicio)
+    const fechaFin = normalizarFechaISO(req.query.fecha_fin)
+    const filtroSemanal = Boolean(fechaInicio && fechaFin)
 
     if (!CAJAS_DISPONIBLES.includes(cajaCodigo)) {
       return res.status(400).json({ error: "Caja inválida" })
+    }
+
+    if ((req.query.fecha_inicio && !fechaInicio) || (req.query.fecha_fin && !fechaFin)) {
+      return res.status(400).json({ error: "Rango semanal inválido" })
+    }
+
+    if (filtroSemanal && fechaInicio > fechaFin) {
+      return res.status(400).json({ error: "Rango semanal inválido" })
     }
 
     const params = [cajaCodigo]
@@ -1358,8 +1369,11 @@ router.get("/libro-cheques", async (req, res) => {
       if (!ESTADOS_LIBRO_CHEQUES.includes(estado)) {
         return res.status(400).json({ error: "Estado de cheque inválido" })
       }
-      params.push(estado)
-      where.push(`l.estado = $${params.length}`)
+
+      if (!filtroSemanal) {
+        params.push(estado)
+        where.push(`l.estado = $${params.length}`)
+      }
     }
 
     if (busqueda) {
@@ -1386,7 +1400,50 @@ router.get("/libro-cheques", async (req, res) => {
     `
 
     const result = await pool.query(query, params)
-    res.json(result.rows || [])
+    const rows = result.rows || []
+
+    if (!filtroSemanal) {
+      res.json(rows)
+      return
+    }
+
+    const rowsSemana = rows
+      .map((row) => {
+        const fechaEntradaCheque = normalizarFechaISO(row.fecha_entrada)
+        const fechaSalidaCheque = normalizarFechaISO(row.fecha_salida)
+        const estadoActual = String(row.estado || "").toLowerCase()
+
+        if (estadoActual === "anulado") return null
+
+        const disponibleAlCorte = Boolean(
+          fechaEntradaCheque
+          && fechaEntradaCheque <= fechaFin
+          && (!fechaSalidaCheque || fechaSalidaCheque > fechaFin)
+        )
+
+        const salioEnSemana = Boolean(
+          fechaSalidaCheque
+          && fechaSalidaCheque >= fechaInicio
+          && fechaSalidaCheque <= fechaFin
+        )
+
+        if (!disponibleAlCorte && !salioEnSemana) return null
+
+        const estadoVista = disponibleAlCorte ? "disponible" : "no_disponible"
+        return {
+          ...row,
+          estado_vista: estadoVista,
+          semana_inicio: fechaInicio,
+          semana_fin: fechaFin,
+        }
+      })
+      .filter(Boolean)
+
+    const filtradosPorEstado = estado
+      ? rowsSemana.filter((row) => row.estado_vista === (estado === "disponible" ? "disponible" : "no_disponible"))
+      : rowsSemana
+
+    res.json(filtradosPorEstado)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -1426,6 +1483,9 @@ router.get("/libro-cheques/pdf", async (req, res) => {
     const cajaCodigo = String(req.query.caja_codigo || "tesla").toLowerCase()
     const listado = String(req.query.listado || "ambos").toLowerCase().trim()
     const busqueda = String(req.query.busqueda || "").trim().toLowerCase()
+    const fechaInicio = normalizarFechaISO(req.query.fecha_inicio)
+    const fechaFin = normalizarFechaISO(req.query.fecha_fin)
+    const filtroSemanal = Boolean(fechaInicio && fechaFin)
 
     if (!CAJAS_DISPONIBLES.includes(cajaCodigo)) {
       return res.status(400).json({ error: "Caja inválida" })
@@ -1459,33 +1519,78 @@ router.get("/libro-cheques/pdf", async (req, res) => {
       params
     )
 
-    const rows = result.rows || []
-    const disponibles = rows
-      .filter((row) => String(row.estado || "").toLowerCase() === "disponible")
-      .sort((a, b) => {
-        const fechaA = normalizarFechaISO(a.fecha_cheque) || ""
-        const fechaB = normalizarFechaISO(b.fecha_cheque) || ""
-        if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
-        return String(a.numero_cheque || "").localeCompare(String(b.numero_cheque || ""))
-      })
+    const allRows = result.rows || []
 
-    const noDisponibles = rows
-      .filter((row) => String(row.estado || "").toLowerCase() !== "disponible")
-      .sort((a, b) => {
-        const fechaA = normalizarFechaISO(a.fecha_salida || a.fecha_cheque) || ""
-        const fechaB = normalizarFechaISO(b.fecha_salida || b.fecha_cheque) || ""
-        if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
-        return String(a.numero_cheque || "").localeCompare(String(b.numero_cheque || ""))
-      })
+    let disponibles, noDisponibles
 
-    const totalImporte = (listado === "disponibles" ? disponibles : listado === "no_disponibles" ? noDisponibles : rows)
-      .reduce((acc, row) => acc + Number(row.importe || 0), 0)
+    if (filtroSemanal) {
+      // Mismo cálculo que /libro-cheques: disponibles al corte y salidos en semana
+      const rowsSemana = allRows
+        .filter((row) => String(row.estado || "").toLowerCase() !== "anulado")
+        .map((row) => {
+          const fechaEntradaCheque = normalizarFechaISO(row.fecha_entrada)
+          const fechaSalidaCheque = normalizarFechaISO(row.fecha_salida)
+          const disponibleAlCorte = Boolean(
+            fechaEntradaCheque
+            && fechaEntradaCheque <= fechaFin
+            && (!fechaSalidaCheque || fechaSalidaCheque > fechaFin)
+          )
+          const salioEnSemana = Boolean(
+            fechaSalidaCheque
+            && fechaSalidaCheque >= fechaInicio
+            && fechaSalidaCheque <= fechaFin
+          )
+          if (!disponibleAlCorte && !salioEnSemana) return null
+          return { ...row, estado_vista: disponibleAlCorte ? "disponible" : "no_disponible" }
+        })
+        .filter(Boolean)
+
+      disponibles = rowsSemana
+        .filter((row) => row.estado_vista === "disponible")
+        .sort((a, b) => {
+          const fechaA = normalizarFechaISO(a.fecha_cheque) || ""
+          const fechaB = normalizarFechaISO(b.fecha_cheque) || ""
+          if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
+          return String(a.numero_cheque || "").localeCompare(String(b.numero_cheque || ""))
+        })
+
+      noDisponibles = rowsSemana
+        .filter((row) => row.estado_vista === "no_disponible")
+        .sort((a, b) => {
+          const fechaA = normalizarFechaISO(a.fecha_salida || a.fecha_cheque) || ""
+          const fechaB = normalizarFechaISO(b.fecha_salida || b.fecha_cheque) || ""
+          if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
+          return String(a.numero_cheque || "").localeCompare(String(b.numero_cheque || ""))
+        })
+    } else {
+      disponibles = allRows
+        .filter((row) => String(row.estado || "").toLowerCase() === "disponible")
+        .sort((a, b) => {
+          const fechaA = normalizarFechaISO(a.fecha_cheque) || ""
+          const fechaB = normalizarFechaISO(b.fecha_cheque) || ""
+          if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
+          return String(a.numero_cheque || "").localeCompare(String(b.numero_cheque || ""))
+        })
+
+      noDisponibles = allRows
+        .filter((row) => String(row.estado || "").toLowerCase() !== "disponible")
+        .sort((a, b) => {
+          const fechaA = normalizarFechaISO(a.fecha_salida || a.fecha_cheque) || ""
+          const fechaB = normalizarFechaISO(b.fecha_salida || b.fecha_cheque) || ""
+          if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
+          return String(a.numero_cheque || "").localeCompare(String(b.numero_cheque || ""))
+        })
+    }
+
+    const rowsParaTotal = listado === "disponibles" ? disponibles : listado === "no_disponibles" ? noDisponibles : [...disponibles, ...noDisponibles]
+    const totalImporte = rowsParaTotal.reduce((acc, row) => acc + Number(row.importe || 0), 0)
 
     const doc = new PDFDocument({ size: "A4", margin: 45 })
     const chunks = []
     const pageWidth = doc.page.width
     const fechaArchivo = new Date().toISOString().slice(0, 10)
-    const nombreArchivo = `Libro cheques ${LABEL_CAJA[cajaCodigo]} ${listado} ${fechaArchivo}.pdf`
+    const sufijoPdf = filtroSemanal ? ` semana ${fechaInicio}` : ""
+    const nombreArchivo = `Libro cheques ${LABEL_CAJA[cajaCodigo]} ${listado}${sufijoPdf} ${fechaArchivo}.pdf`
 
     doc.on("data", (chunk) => chunks.push(chunk))
     doc.on("end", () => {
@@ -1503,10 +1608,14 @@ router.get("/libro-cheques/pdf", async (req, res) => {
         ? "Cheques no disponibles"
         : "Cheques disponibles y no disponibles"
 
+    const etiquetaSemana = filtroSemanal
+      ? ` · Semana ${new Date(`${fechaInicio}T00:00:00`).toLocaleDateString("es-AR")} al ${new Date(`${fechaFin}T00:00:00`).toLocaleDateString("es-AR")}`
+      : ""
+
     const headerBottom = drawPremiumHeader(doc, {
       title: "TESLA MONTAJES ELECTRICOS",
       subtitle: `Libro de cheques - ${LABEL_CAJA[cajaCodigo]}`,
-      accentText: etiquetaListado,
+      accentText: `${etiquetaListado}${etiquetaSemana}`,
       logoPath: LOGO_PATH,
     })
 
@@ -1516,14 +1625,30 @@ router.get("/libro-cheques/pdf", async (req, res) => {
     const resumenLeft = 45
     const resumenW = pageWidth - 90
 
-    doc.roundedRect(resumenLeft, resumenY, resumenW, resumenH, 6).fill(PDF_COLORS.card)
+    const esAmbos = listado === "ambos"
+    const totalDisponibles = disponibles.reduce((acc, row) => acc + Number(row.importe || 0), 0)
+    const totalNoDisponibles = noDisponibles.reduce((acc, row) => acc + Number(row.importe || 0), 0)
+    const resumenHAjustado = esAmbos ? 80 : 56
+
+    doc.roundedRect(resumenLeft, resumenY, resumenW, resumenHAjustado, 6).fill(PDF_COLORS.card)
     doc.fillColor(PDF_COLORS.navy).font("Helvetica-Bold").fontSize(10)
     doc.text("Resumen", resumenLeft + 13, resumenY + 8, { width: 120 })
     doc.fillColor(PDF_COLORS.ink).font("Helvetica-Bold").fontSize(10.4)
-    const cantidadTotal = listado === "disponibles" ? disponibles.length : listado === "no_disponibles" ? noDisponibles.length : rows.length
-    doc.text(`Cantidad de cheques: ${cantidadTotal}`, resumenLeft + 13, resumenY + 26, { width: 250 })
-    doc.text(`Importe total: ${formatoMoneda(totalImporte)}`, resumenLeft + 260, resumenY + 26, { width: resumenW - 273, align: "right" })
-    doc.y = resumenY + resumenH + 14
+
+    if (esAmbos) {
+      const col1W = resumenW / 2
+      doc.text(`Disponibles: ${disponibles.length} cheque(s)`, resumenLeft + 13, resumenY + 28, { width: col1W - 13 })
+      doc.text(`Total disponible: ${formatoMoneda(totalDisponibles)}`, resumenLeft + col1W, resumenY + 28, { width: col1W - 13, align: "right" })
+      doc.moveTo(resumenLeft + 13, resumenY + 48).lineTo(resumenLeft + resumenW - 13, resumenY + 48).strokeColor(PDF_COLORS.line).lineWidth(0.5).stroke()
+      doc.text(`No disponibles: ${noDisponibles.length} cheque(s)`, resumenLeft + 13, resumenY + 56, { width: col1W - 13 })
+      doc.text(`Total salido: ${formatoMoneda(totalNoDisponibles)}`, resumenLeft + col1W, resumenY + 56, { width: col1W - 13, align: "right" })
+    } else {
+      const cantidadTotal = listado === "disponibles" ? disponibles.length : noDisponibles.length
+      doc.text(`Cantidad de cheques: ${cantidadTotal}`, resumenLeft + 13, resumenY + 26, { width: 250 })
+      doc.text(`Importe total: ${formatoMoneda(totalImporte)}`, resumenLeft + 260, resumenY + 26, { width: resumenW - 273, align: "right" })
+    }
+
+    doc.y = resumenY + resumenHAjustado + 14
 
     const ensureRowSpace = (alturaRequerida = 50, onNewPage = null) => {
       if (doc.y + alturaRequerida > doc.page.height - 72) {
@@ -1638,7 +1763,6 @@ router.get("/libro-cheques/pdf", async (req, res) => {
       sectionRows.forEach((row, idx) => {
         const currentRowH = showSalida ? rowH + detailH : rowH
         ensureRowSpace(currentRowH + 6, () => {
-          drawSectionTitleCentered(title)
           drawGridHeader()
         })
 
@@ -1697,11 +1821,23 @@ router.get("/libro-cheques/pdf", async (req, res) => {
       doc.fillColor(PDF_COLORS.ink)
     }
 
+    const drawSectionHeader = (title) => {
+      ensureRowSpace(34)
+      const hY = doc.y + 6
+      doc.rect(45, hY, pageWidth - 90, 24).fill(PDF_COLORS.navy)
+      doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(11)
+      doc.text(title, 58, hY + 6, { width: pageWidth - 116 })
+      doc.fillColor(PDF_COLORS.ink)
+      doc.y = hY + 24 + 6
+    }
+
     if (listado === "disponibles" || listado === "ambos") {
+      if (esAmbos) drawSectionHeader("Cheques disponibles")
       drawSection("Cheques disponibles", disponibles, { showSalida: false })
     }
 
     if (listado === "no_disponibles" || listado === "ambos") {
+      if (esAmbos) { doc.moveDown(0.8); drawSectionHeader("Cheques no disponibles") }
       drawSection("Cheques no disponibles", noDisponibles, { showSalida: true })
     }
 

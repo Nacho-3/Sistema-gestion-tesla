@@ -126,12 +126,12 @@ onUnmounted(() => {
       <div class="sidebar-header">
         <div class="sidebar-brand-mark">T</div>
         <div class="sidebar-brand-copy">
-          <span class="sidebar-title">ERP TESLA LAB</span>
-          <span class="sidebar-subtitle">Panel de cambios y pruebas</span>
+          <span class="sidebar-title">ERP TESLA</span>
+          <span class="sidebar-subtitle">Panel de gestión</span>
         </div>
       </div>
 
-      <div class="sidebar-section-label">Navegacion principal</div>
+      <div class="sidebar-section-label">Navegación principal</div>
 
       <nav class="sidebar-nav">
         <button
@@ -148,7 +148,7 @@ onUnmounted(() => {
       </nav>
 
       <div class="sidebar-footer-card">
-        <span class="sidebar-footer-kicker">Modulo actual</span>
+        <span class="sidebar-footer-kicker">Módulo actual</span>
         <strong>{{ currentMenuItem?.label || props.title }}</strong>
         <small>Navegá entre áreas desde este panel sin salir de la operación activa.</small>
       </div>

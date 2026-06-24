@@ -5,11 +5,12 @@ import { getIo } from '../socket.js'
 import PDFDocument from "pdfkit"
 import path from "path"
 import { fileURLToPath } from "url"
-import { drawPremiumHeader, setupPremiumFooter, sanitizeFileText, PDF_COLORS } from "../pdf/premiumTheme.js"
+import { setupPremiumFooter, sanitizeFileText, PDF_COLORS } from "../pdf/premiumTheme.js"
+import { existsSync } from "fs"
 import fs from "fs/promises";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const LOGO_PATH = path.join(__dirname, "..", "assets", "logo.png")
+const LOGO_PATH = path.join(__dirname, "..", "assets", "logo_presupuesto.png")
 
 const router = express.Router()
 
@@ -159,7 +160,6 @@ router.get("/:id/ficha-pdf", async (req, res) => {
     const ahora = new Date()
     const fechaTexto = ahora.toLocaleDateString("es-AR")
     const fechaArchivo = ahora.toISOString().slice(0, 10)
-    const nombreEmpresa = sanitizeFileText(cliente.empresa || "-")
     const nombreCliente = sanitizeFileText(cliente.razon_social || "Cliente")
     const nombreArchivo = `Ficha ${nombreCliente} ${fechaArchivo}.pdf`
 
@@ -180,18 +180,21 @@ router.get("/:id/ficha-pdf", async (req, res) => {
     const pageWidth = doc.page.width
     setupPremiumFooter(doc, { leftText: "Tesla Montajes Electricos - Documento interno" })
 
-    // Mostrar la empresa como título principal
-    const headerBottom = drawPremiumHeader(doc, {
-      title: cliente.empresa || "-",
-      subtitle: "Ficha de cliente",
-      accentText: cliente.razon_social || "",
-      logoPath: LOGO_PATH,
-    })
-
+    const topHeaderY = 45
     doc.fillColor(PDF_COLORS.ink)
-    doc.font("Helvetica-Bold")
-      .fontSize(11)
-      .text(`Actualizada al ${fechaTexto}`, 45, headerBottom + 8, { align: "right", width: pageWidth - 90 })
+      .font("Helvetica-Bold")
+      .fontSize(18)
+      .text("FICHA DE CLIENTE", 45, topHeaderY, { align: "center", width: pageWidth - 90 })
+
+    if (existsSync(LOGO_PATH)) {
+      doc.image(LOGO_PATH, pageWidth - 45 - 60, 10, { fit: [56, 56] })
+    }
+
+    const headerLineY = topHeaderY + 32
+    doc.moveTo(45, headerLineY).lineTo(pageWidth - 45, headerLineY).strokeColor(PDF_COLORS.line).lineWidth(0.9).stroke()
+
+    doc.fillColor(PDF_COLORS.ink).font("Helvetica-Bold").fontSize(11)
+    doc.text(`Actualizada al ${fechaTexto}`, 45, headerLineY + 10, { align: "right", width: pageWidth - 90 })
 
     // Datos asociados
     const { data: obras, error: obrasError } = await db
@@ -203,7 +206,6 @@ router.get("/:id/ficha-pdf", async (req, res) => {
     if (obrasError) throw obrasError
 
     const presupuestosTieneIvaMonto = await hasTableColumn("presupuestos", "iva_monto")
-    const columnaDetalleMovimiento = await getFirstExistingColumn("movimientos_caja", ["detalle", "descripcion"]) || "detalle"
     const movimientosTienePresupuestoId = await hasTableColumn("movimientos_caja", "presupuesto_id")
 
     const selectPresupuestos = ["id", "numero", "fecha", "estado", "total", "obra_id"]
@@ -219,60 +221,29 @@ router.get("/:id/ficha-pdf", async (req, res) => {
 
     if (presupuestosError) throw presupuestosError
 
-    const selectMovimientos = ["id", "fecha", columnaDetalleMovimiento, "monto_total", "observaciones"]
+    const selectMovimientos = ["id", "fecha", "monto_total", "tipo"]
     if (movimientosTienePresupuestoId) {
       selectMovimientos.push("presupuesto_id")
     }
 
-    const { data: movimientosCaja, error: movimientosCajaError } = await db
-      .from("movimientos_caja")
-      .select(selectMovimientos.join(", "))
-      .eq("cliente_id", id)
-      .eq("tipo", "ingreso")
-      .order("fecha", { ascending: true })
-
-    if (movimientosCajaError) throw movimientosCajaError
+    const columnList = selectMovimientos.join(", ")
+    const result = await pool.query(
+      `SELECT ${columnList} FROM movimientos_caja WHERE cliente_id = $1 AND tipo IN ('ingreso', 'egreso') ORDER BY fecha ASC`,
+      [id]
+    )
+    const movimientosCaja = result.rows
 
     const obrasList = obras || []
     const presupuestosList = presupuestos || []
     const movimientosList = (movimientosCaja || []).map((mov) => ({
       ...mov,
-      detalle: mov?.[columnaDetalleMovimiento] || mov?.detalle || "-",
       presupuesto_id: movimientosTienePresupuestoId ? mov?.presupuesto_id ?? null : null,
     }))
-
-    const mediosPorMovimiento = new Map()
-    const movimientoIds = movimientosList
-      .map((mov) => Number(mov.id || 0))
-      .filter((movId) => Number.isInteger(movId) && movId > 0)
-
-    if (movimientoIds.length > 0) {
-      const detallesPagosRes = await pool.query(
-        `
-          SELECT movimiento_id, medio_pago
-          FROM detalles_medio_pago
-          WHERE movimiento_id = ANY($1::int[])
-        `,
-        [movimientoIds]
-      )
-
-      for (const row of detallesPagosRes.rows || []) {
-        const movId = Number(row.movimiento_id)
-        const actual = mediosPorMovimiento.get(movId) || new Set()
-        actual.add(labelMedioPago(row.medio_pago))
-        mediosPorMovimiento.set(movId, actual)
-      }
-    }
 
     const obraNombrePorId = new Map(obrasList.map((obra) => [Number(obra.id), obra.nombre || "Sin obra"]))
     const isAceptado = (p) => ["aprobado", "aceptado"].includes(String(p.estado || "").toLowerCase())
     const saldoInicialArrastre = roundMoney(cliente?.saldo_inicial_arrastre)
-    const fechaSaldoInicial = normalizeDateOnly(cliente?.fecha_saldo_inicial_arrastre) || "0000-00-00"
-    const notaSaldoInicial = String(cliente?.nota_saldo_inicial_arrastre || "").trim()
-
     const presupuestosAceptadosList = presupuestosList.filter(isAceptado)
-    const presupuestoById = new Map(presupuestosList.map((p) => [Number(p.id), p]))
-
     const pagosImputadosPorPresupuesto = new Map()
     const pagosNoImputadosList = []
     movimientosList.forEach((mov) => {
@@ -313,76 +284,7 @@ router.get("/:id/ficha-pdf", async (req, res) => {
     const totalNoImputado = roundMoney(pagosNoImputadosList.reduce((acc, mov) => acc + roundMoney(mov.monto_total), 0))
     const saldoPendienteFinal = roundMoney(saldoInicialArrastre + totalCargosPresupuestos - totalPagosCaja)
 
-    const ledgerRows = []
-    ledgerRows.push({
-      kind: "saldo_inicial",
-      sortDate: fechaSaldoInicial,
-      nro: "SI",
-      fecha: fechaSaldoInicial !== "0000-00-00" ? new Date(fechaSaldoInicial).toLocaleDateString("es-AR") : "-",
-      obra: notaSaldoInicial || "Arrastre sistema anterior",
-      importe_sin_iva: "",
-      iva: "",
-      total: formatSignedMoneyAr(saldoInicialArrastre),
-      medio: "ARRASTRE",
-      signedAmount: saldoInicialArrastre,
-    })
-
-    for (const p of presupuestosAceptadosList) {
-      const total = roundMoney(p.total)
-      const iva = roundMoney(p.iva_monto)
-      const sinIva = roundMoney(total - iva)
-      const obra = obraNombrePorId.get(Number(p.obra_id)) || "Sin obra"
-      ledgerRows.push({
-        kind: "cargo",
-        sortDate: p.fecha || "0000-00-00",
-        nro: String(p.numero || "-"),
-        fecha: p.fecha ? new Date(p.fecha).toLocaleDateString("es-AR") : "-",
-        obra,
-        importe_sin_iva: formatMoneyAr(sinIva),
-        iva: formatMoneyAr(iva),
-        total: formatMoneyAr(total),
-        medio: "",
-        signedAmount: total,
-      })
-    }
-
-    for (const mov of movimientosList) {
-      const monto = roundMoney(mov.monto_total)
-      const presupuestoRef = Number(mov.presupuesto_id || 0) > 0 ? presupuestoById.get(Number(mov.presupuesto_id)) : null
-      const obra = presupuestoRef ? (obraNombrePorId.get(Number(presupuestoRef.obra_id)) || "Sin obra") : "PAGO C/CHEQS"
-      const nroFc = presupuestoRef ? String(presupuestoRef.numero || "-") : "-"
-      const medios = [...(mediosPorMovimiento.get(Number(mov.id || 0)) || new Set())]
-      ledgerRows.push({
-        kind: "pago",
-        sortDate: mov.fecha || "0000-00-00",
-        nro: nroFc,
-        fecha: mov.fecha ? new Date(mov.fecha).toLocaleDateString("es-AR") : "-",
-        obra,
-        importe_sin_iva: "",
-        iva: "",
-        total: `- ${formatMoneyAr(monto)}`,
-        medio: medios.join("/") || "-",
-        signedAmount: -monto,
-      })
-    }
-
-    ledgerRows.sort((a, b) => {
-      const aDateKey = toSortableDateKey(a.sortDate)
-      const bDateKey = toSortableDateKey(b.sortDate)
-      if (aDateKey !== bDateKey) return aDateKey.localeCompare(bDateKey)
-      const order = { saldo_inicial: 0, cargo: 1, pago: 2 }
-      return (order[a.kind] ?? 99) - (order[b.kind] ?? 99)
-    })
-
-    let pendienteAcumulado = 0
-    ledgerRows.forEach((row) => {
-      pendienteAcumulado = roundMoney(pendienteAcumulado + row.signedAmount)
-      row.pendiente = formatMoneyAr(pendienteAcumulado)
-      row.pendienteColor = pendienteAcumulado > 0 ? "#b91c1c" : "#065f46"
-    })
-
-    // start content a bit lower to avoid overlapping long headers
-    let cursorY = headerBottom + 48
+    let cursorY = headerLineY + 24
 
     const footerSafe = 80
     const ensureSpace = (requiredHeight = 30) => {
@@ -541,11 +443,244 @@ router.get("/:id/ficha-pdf", async (req, res) => {
         estado: p.estado_cobro,
       })),
       emptyText: "No hay presupuestos aceptados para estado de cuenta.",
-      rowHeight: 20,
+      rowHeight: 24,
       useGrid: true,
     })
 
-    drawSectionTitle("CUENTA CORRIENTE HISTORICA")
+    doc.end()
+  } catch (err) {
+    return handleInternalError(res, err, "ficha_pdf_cliente")
+  }
+})
+
+// Descargar ficha de cuenta corriente histórica del cliente en PDF
+router.get("/:id/ficha-historica-pdf", async (req, res) => {
+  try {
+    const { id } = req.params
+
+    const { data: cliente, error: clienteError } = await db
+      .from("clientes")
+      .select("razon_social, empresa, cuit, direccion, telefono, email, iva, saldo_inicial_arrastre, fecha_saldo_inicial_arrastre, nota_saldo_inicial_arrastre")
+      .eq("id", id)
+      .single()
+
+    if (clienteError || !cliente) {
+      return res.status(404).json({ error: "Cliente no encontrado" })
+    }
+
+    const ahora = new Date()
+    const fechaTexto = ahora.toLocaleDateString("es-AR")
+    const fechaArchivo = ahora.toISOString().slice(0, 10)
+    const nombreCliente = sanitizeFileText(cliente.razon_social || "Cliente")
+    const nombreArchivo = `Ficha Historica ${nombreCliente} ${fechaArchivo}.pdf`
+
+    const doc = new PDFDocument({ size: "A4", margin: 45 })
+    const chunks = []
+    doc.on("data", (chunk) => chunks.push(chunk))
+    doc.on("end", async () => {
+      const pdfBuffer = Buffer.concat(chunks)
+      await saveFileToClientFolder(nombreCliente, nombreArchivo, pdfBuffer, cliente)
+      res.setHeader("Content-Type", "application/pdf")
+      res.setHeader("Content-Disposition", `attachment; filename="${nombreArchivo}"`)
+      res.send(pdfBuffer)
+    })
+
+    const pageWidth = doc.page.width
+    setupPremiumFooter(doc, { leftText: "Tesla Montajes Electricos - Documento interno" })
+
+    const topHeaderY = 45
+    doc.fillColor(PDF_COLORS.ink)
+      .font("Helvetica-Bold")
+      .fontSize(16)
+      .text("CUENTA CORRIENTE CRONOLOGICA", 45, topHeaderY, { align: "center", width: pageWidth - 90 })
+
+    if (existsSync(LOGO_PATH)) {
+      doc.image(LOGO_PATH, pageWidth - 45 - 60, 10, { fit: [56, 56] })
+    }
+
+    const headerLineY = topHeaderY + 30
+    doc.moveTo(45, headerLineY).lineTo(pageWidth - 45, headerLineY).strokeColor(PDF_COLORS.line).lineWidth(0.9).stroke()
+
+    doc.fillColor(PDF_COLORS.ink).font("Helvetica-Bold").fontSize(11)
+    doc.text(`Actualizada al ${fechaTexto}`, 45, headerLineY + 10, { align: "right", width: pageWidth - 90 })
+
+    const { data: obras, error: obrasError } = await db
+      .from("obras")
+      .select("id, nombre")
+      .eq("cliente_id", id)
+
+    if (obrasError) throw obrasError
+
+    const columnaDetalleMovimiento = await getFirstExistingColumn("movimientos_caja", ["detalle", "descripcion"]) || "detalle"
+    const movimientosTienePresupuestoId = await hasTableColumn("movimientos_caja", "presupuesto_id")
+
+    const presupuestosTieneIvaMonto = await hasTableColumn("presupuestos", "iva_monto")
+    const selectPresupuestos = ["id", "numero", "fecha", "estado", "total", "obra_id"]
+    if (presupuestosTieneIvaMonto) {
+      selectPresupuestos.push("iva_monto")
+    }
+
+    const { data: presupuestos, error: presupuestosError } = await db
+      .from("presupuestos")
+      .select(selectPresupuestos.join(", "))
+      .eq("cliente_id", id)
+
+    if (presupuestosError) throw presupuestosError
+
+    const selectMovimientos = ["id", "fecha", columnaDetalleMovimiento, "monto_total", "observaciones", "tipo"]
+    if (movimientosTienePresupuestoId) {
+      selectMovimientos.push("presupuesto_id")
+    }
+
+    const columnList = selectMovimientos.join(", ")
+    const result = await pool.query(
+      `SELECT ${columnList} FROM movimientos_caja WHERE cliente_id = $1 AND tipo IN ('ingreso', 'egreso') ORDER BY fecha ASC`,
+      [id]
+    )
+    const movimientosCaja = result.rows
+
+    const obrasList = obras || []
+    const presupuestosList = presupuestos || []
+    const movimientosList = (movimientosCaja || []).map((mov) => ({
+      ...mov,
+      detalle: mov?.[columnaDetalleMovimiento] || mov?.detalle || "-",
+      presupuesto_id: movimientosTienePresupuestoId ? mov?.presupuesto_id ?? null : null,
+    }))
+
+    const obraNombrePorId = new Map(obrasList.map((obra) => [Number(obra.id), obra.nombre || "Sin obra"]))
+    const presupuestoById = new Map(presupuestosList.map((p) => [Number(p.id), p]))
+    const isAceptado = (p) => ["aprobado", "aceptado"].includes(String(p.estado || "").toLowerCase())
+    const presupuestosAceptadosList = presupuestosList.filter(isAceptado)
+
+    const mediosPorMovimiento = new Map()
+    const movimientoIds = movimientosList
+      .map((mov) => Number(mov.id || 0))
+      .filter((movId) => Number.isInteger(movId) && movId > 0)
+
+    if (movimientoIds.length > 0) {
+      const detallesPagosRes = await pool.query(
+        `
+          SELECT movimiento_id, medio_pago
+          FROM detalles_medio_pago
+          WHERE movimiento_id = ANY($1::int[])
+        `,
+        [movimientoIds]
+      )
+
+      for (const row of detallesPagosRes.rows || []) {
+        const movId = Number(row.movimiento_id)
+        const actual = mediosPorMovimiento.get(movId) || new Set()
+        actual.add(labelMedioPago(row.medio_pago))
+        mediosPorMovimiento.set(movId, actual)
+      }
+    }
+
+    const saldoInicialArrastre = roundMoney(cliente?.saldo_inicial_arrastre)
+    const fechaSaldoInicial = normalizeDateOnly(cliente?.fecha_saldo_inicial_arrastre) || "0000-00-00"
+    const notaSaldoInicial = String(cliente?.nota_saldo_inicial_arrastre || "").trim()
+
+    const ledgerRows = []
+    ledgerRows.push({
+      kind: "saldo_inicial",
+      sortDate: fechaSaldoInicial,
+      nro: "SI",
+      fecha: fechaSaldoInicial !== "0000-00-00" ? new Date(fechaSaldoInicial).toLocaleDateString("es-AR") : "-",
+      obra: notaSaldoInicial || "Arrastre sistema anterior",
+      importe_sin_iva: "",
+      iva: "",
+      total: formatSignedMoneyAr(saldoInicialArrastre),
+      medio: "ARRASTRE",
+      signedAmount: saldoInicialArrastre,
+    })
+
+    for (const p of presupuestosAceptadosList) {
+      const total = roundMoney(p.total)
+      const iva = roundMoney(p.iva_monto)
+      const sinIva = roundMoney(total - iva)
+      const obra = obraNombrePorId.get(Number(p.obra_id)) || "Sin obra"
+      ledgerRows.push({
+        kind: "cargo",
+        sortDate: p.fecha || "0000-00-00",
+        nro: String(p.numero || "-"),
+        fecha: p.fecha ? new Date(p.fecha).toLocaleDateString("es-AR") : "-",
+        obra,
+        importe_sin_iva: formatMoneyAr(sinIva),
+        iva: formatMoneyAr(iva),
+        total: formatMoneyAr(total),
+        medio: "",
+        signedAmount: total,
+      })
+    }
+
+    for (const mov of movimientosList) {
+      const monto = roundMoney(mov.monto_total)
+      
+      if (String(mov.tipo || "").toLowerCase() === "egreso") {
+        // Egresos (efectivo que nosotros damos al cliente, reduce su saldo a favor)
+        const detalleEgreso = mov[columnaDetalleMovimiento] || mov.detalle || "EGRESO"
+        ledgerRows.push({
+          kind: "egreso",
+          sortDate: mov.fecha || "0000-00-00",
+          nro: "-",
+          fecha: mov.fecha ? new Date(mov.fecha).toLocaleDateString("es-AR") : "-",
+          obra: detalleEgreso,
+          importe_sin_iva: "",
+          iva: "",
+          total: `- ${formatMoneyAr(monto)}`,
+          medio: "-",
+          signedAmount: monto,
+        })
+      } else {
+        // Ingresos (pagos)
+        const presupuestoRef = Number(mov.presupuesto_id || 0) > 0 ? presupuestoById.get(Number(mov.presupuesto_id)) : null
+        const obra = presupuestoRef ? (obraNombrePorId.get(Number(presupuestoRef.obra_id)) || "Sin obra") : "PAGO C/CHEQS"
+        const nroFc = presupuestoRef ? String(presupuestoRef.numero || "-") : "-"
+        const medios = [...(mediosPorMovimiento.get(Number(mov.id || 0)) || new Set())]
+        ledgerRows.push({
+          kind: "pago",
+          sortDate: mov.fecha || "0000-00-00",
+          nro: nroFc,
+          fecha: mov.fecha ? new Date(mov.fecha).toLocaleDateString("es-AR") : "-",
+          obra,
+          importe_sin_iva: "",
+          iva: "",
+          total: `- ${formatMoneyAr(monto)}`,
+          medio: medios.join("/") || "-",
+          signedAmount: -monto,
+        })
+      }
+    }
+
+    ledgerRows.sort((a, b) => {
+      const aDateKey = toSortableDateKey(a.sortDate)
+      const bDateKey = toSortableDateKey(b.sortDate)
+      if (aDateKey !== bDateKey) return aDateKey.localeCompare(bDateKey)
+      const order = { saldo_inicial: 0, cargo: 1, pago: 2, egreso: 3 }
+      return (order[a.kind] ?? 99) - (order[b.kind] ?? 99)
+    })
+
+    let pendienteAcumulado = 0
+    ledgerRows.forEach((row) => {
+      pendienteAcumulado = roundMoney(pendienteAcumulado + row.signedAmount)
+      row.pendiente = formatMoneyAr(pendienteAcumulado)
+      row.pendienteColor = pendienteAcumulado > 0 ? "#b91c1c" : "#065f46"
+    })
+
+    const footerSafe = 80
+    let cursorY = headerLineY + 24
+
+    const ensureSpace = (requiredHeight = 30) => {
+      if (cursorY + requiredHeight <= doc.page.height - footerSafe) return
+      doc.addPage()
+      cursorY = 60
+    }
+
+    doc.fillColor(PDF_COLORS.ink).font("Helvetica-Bold").fontSize(10)
+    doc.text(`Cliente: ${cliente.razon_social || "-"}`, 45, cursorY)
+    cursorY += 14
+    doc.font("Helvetica").fontSize(9)
+    doc.text(`CUIT: ${cliente.cuit || "-"}    IVA: ${cliente.iva || "-"}`, 45, cursorY)
+    cursorY += 16
 
     const drawLedgerHeader = () => {
       ensureSpace(26)
@@ -609,12 +744,11 @@ router.get("/:id/ficha-pdf", async (req, res) => {
 
         cursorY += 18
       })
-      cursorY += 10
     }
 
     doc.end()
   } catch (err) {
-    return handleInternalError(res, err, "ficha_pdf_cliente")
+    return handleInternalError(res, err, "ficha_historica_pdf_cliente")
   }
 })
 

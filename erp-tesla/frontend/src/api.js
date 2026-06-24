@@ -1,19 +1,29 @@
 import axios from "axios"
+
 import { clearStoredSession } from "./session"
 
-// Detectamos si estamos en la consola de laboratorio (puerto 5174)
-const isLaboratorio = window.location.port === "5174"
 
-// Si es laboratorio va al 5001. Si es el dev común (producción local), va al 3000.
-const DEFAULT_API_BASE_URL = isLaboratorio
-  ? `${window.location.protocol}//${window.location.hostname}:5001`
-  : `${window.location.protocol}//${window.location.hostname}:3000`
+
+const isViteDevServer = window.location.port === "5173"
+
+const DEFAULT_API_BASE_URL = isViteDevServer
+
+  ? `${window.location.protocol}//${window.location.hostname}:3000`
+
+  : "/api"
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL
 
+
+
 const api = axios.create({
+
   baseURL: API_BASE_URL,
+
   withCredentials: true,
-  timeout: 10000 
+
+  timeout: 10000 // 10 segundos
+
 })
 
 api.interceptors.response.use(
@@ -110,6 +120,10 @@ export default {
 
   getClienteFichaPdf(id) {
     return api.get(`/clientes/${id}/ficha-pdf`, { responseType: "blob" })
+  },
+
+  getClienteFichaHistoricaPdf(id) {
+    return api.get(`/clientes/${id}/ficha-historica-pdf`, { responseType: "blob" })
   },
 
   // Obras
@@ -379,11 +393,13 @@ export default {
     return api.post(`/caja/semanas/${id}/saldos`, payload)
   },
 
-  getLibroChequesCaja(caja_codigo, estado, busqueda) {
+  getLibroChequesCaja(caja_codigo, estado, busqueda, fecha_inicio, fecha_fin) {
     const params = new URLSearchParams()
     if (caja_codigo) params.append("caja_codigo", caja_codigo)
     if (estado) params.append("estado", estado)
     if (busqueda) params.append("busqueda", busqueda)
+    if (fecha_inicio) params.append("fecha_inicio", fecha_inicio)
+    if (fecha_fin) params.append("fecha_fin", fecha_fin)
     return api.get(`/caja/libro-cheques?${params.toString()}`)
   },
 
@@ -393,11 +409,13 @@ export default {
     return api.get(`/caja/libro-cheques/disponibles?${params.toString()}`)
   },
 
-  getLibroChequesPdf(caja_codigo, listado = "ambos", busqueda) {
+  getLibroChequesPdf(caja_codigo, listado = "ambos", busqueda, fecha_inicio, fecha_fin) {
     const params = new URLSearchParams()
     if (caja_codigo) params.append("caja_codigo", caja_codigo)
     if (listado) params.append("listado", listado)
     if (busqueda) params.append("busqueda", busqueda)
+    if (fecha_inicio) params.append("fecha_inicio", fecha_inicio)
+    if (fecha_fin) params.append("fecha_fin", fecha_fin)
     return api.get(`/caja/libro-cheques/pdf?${params.toString()}`, { responseType: "blob" })
   },
 
