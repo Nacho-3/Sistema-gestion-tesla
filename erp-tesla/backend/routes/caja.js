@@ -3654,23 +3654,26 @@ router.delete("/:id", async (req, res) => {
       return res.status(404).json({ error: "Movimiento no encontrado" })
     }
 
-    // Verificar si existe un recibo generado para este movimiento
-    if (String(movimientoActual.tipo || "") === "ingreso") {
-      const recibo = await db.query(
-        `SELECT id FROM recibos_caja WHERE movimiento_caja_id = $1`,
-        [id]
-      )
-      if (recibo.rows && recibo.rows.length > 0) {
-        return res.status(400).json({ 
-          error: "No se puede eliminar este movimiento porque tiene un recibo generado. Primero anula y elimina el recibo." 
-        })
-      }
+    // Bloquear solo si existe un recibo emitido activo.
+    // Si todos los recibos están anulados, se permite borrar el movimiento.
+    const recibosMovimiento = await db.query(
+      `SELECT id, estado FROM recibos_caja WHERE movimiento_caja_id = $1`,
+      [id]
+    )
+    const recibosEmitidos = (recibosMovimiento.rows || []).filter(
+      (row) => String(row?.estado || "").toLowerCase() === "emitido"
+    )
+    if (recibosEmitidos.length > 0) {
+      return res.status(400).json({
+        error: "No se puede eliminar este movimiento porque tiene un recibo emitido activo. Primero anulá el recibo."
+      })
     }
 
     const client = await pool.connect()
     try {
       if (String(movimientoActual.tipo || "") === "ingreso") {
         await validarIngresoEliminable({ client, movimientoId: id })
+        await client.query("DELETE FROM recibos_caja WHERE movimiento_caja_id = $1", [id])
         await client.query("DELETE FROM libro_cheques_caja WHERE movimiento_entrada_id = $1", [id])
       } else {
         await revertirSalidaChequesPorMovimiento({ client, movimientoId: id })

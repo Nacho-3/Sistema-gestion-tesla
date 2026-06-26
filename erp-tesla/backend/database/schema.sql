@@ -1017,9 +1017,6 @@ CREATE TRIGGER trg_certificados_updated_at BEFORE UPDATE ON certificados FOR EAC
 DROP TRIGGER IF EXISTS trg_app_config_updated_at ON app_config;
 CREATE TRIGGER trg_app_config_updated_at BEFORE UPDATE ON app_config FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
-DROP TRIGGER IF EXISTS trg_recibos_caja_updated_at ON recibos_caja;
-CREATE TRIGGER trg_recibos_caja_updated_at BEFORE UPDATE ON recibos_caja FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
 
 -- =========================
 -- INTEGRIDAD REFERENCIAL
@@ -1338,3 +1335,6 @@ CREATE INDEX IF NOT EXISTS idx_recibos_caja_fecha_emision
 
 CREATE INDEX IF NOT EXISTS idx_recibos_caja_estado
   ON recibos_caja(estado);
+
+DROP TRIGGER IF EXISTS trg_recibos_caja_updated_at ON recibos_caja;
+CREATE TRIGGER trg_recibos_caja_updated_at BEFORE UPDATE ON recibos_caja FOR EACH ROW EXECUTE FUNCTION set_updated_at();

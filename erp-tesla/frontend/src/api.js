@@ -1,19 +1,29 @@
 import axios from "axios"
+
 import { clearStoredSession } from "./session"
 
-// Detectamos si estamos en la consola de laboratorio (puerto 5174)
-const isLaboratorio = window.location.port === "5174"
 
-// Si es laboratorio va al 5001. Si es el dev común (producción local), va al 3000.
-const DEFAULT_API_BASE_URL = isLaboratorio
-  ? `${window.location.protocol}//${window.location.hostname}:5001`
-  : `${window.location.protocol}//${window.location.hostname}:3000`
+
+const isViteDevServer = window.location.port === "5173"
+
+const DEFAULT_API_BASE_URL = isViteDevServer
+
+  ? `${window.location.protocol}//${window.location.hostname}:3000`
+
+  : "/api"
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL
 
+
+
 const api = axios.create({
+
   baseURL: API_BASE_URL,
+
   withCredentials: true,
-  timeout: 10000 
+
+  timeout: 10000 // 10 segundos
+
 })
 
 api.interceptors.response.use(
