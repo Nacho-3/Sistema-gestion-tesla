@@ -1,29 +1,19 @@
 import axios from "axios"
-
 import { clearStoredSession } from "./session"
 
+// Detectamos si estamos en la consola de laboratorio (puerto 5174)
+const isLaboratorio = window.location.port === "5174"
 
-
-const isViteDevServer = window.location.port === "5173"
-
-const DEFAULT_API_BASE_URL = isViteDevServer
-
-  ? `${window.location.protocol}//${window.location.hostname}:3000`
-
-  : "/api"
-
+// Si es laboratorio va al 5001. Si es el dev común (producción local), va al 3000.
+const DEFAULT_API_BASE_URL = isLaboratorio
+  ? `${window.location.protocol}//${window.location.hostname}:5001`
+  : `${window.location.protocol}//${window.location.hostname}:3000`
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL
 
-
-
 const api = axios.create({
-
   baseURL: API_BASE_URL,
-
   withCredentials: true,
-
-  timeout: 10000 // 10 segundos
-
+  timeout: 10000 
 })
 
 api.interceptors.response.use(
@@ -325,7 +315,7 @@ export default {
     return api.get(`/caja?${params.toString()}`)
   },
 
-  getResumenCajaPdf(fecha_inicio, fecha_fin, tipo, caja_codigo, resumen_modo = "general", busqueda) {
+  getResumenCajaPdf(fecha_inicio, fecha_fin, tipo, caja_codigo, resumen_modo = "general", busqueda, medio_pago, categoria_id) {
       const params = new URLSearchParams()
       if (fecha_inicio) params.append("fecha_inicio", fecha_inicio)
       if (fecha_fin) params.append("fecha_fin", fecha_fin)
@@ -333,6 +323,10 @@ export default {
       if (caja_codigo) params.append("caja_codigo", caja_codigo)
       if (resumen_modo) params.append("resumen_modo", resumen_modo)
       if (busqueda) params.append("busqueda", busqueda)
+      if (medio_pago) params.append("medio_pago", medio_pago)
+      if (categoria_id !== undefined && categoria_id !== null && String(categoria_id).trim() !== "") {
+        params.append("categoria_id", String(categoria_id))
+      }
       return api.get(`/caja/resumen/pdf?${params.toString()}` , { responseType: "blob" })
     },
 
@@ -422,6 +416,33 @@ export default {
   transferirChequesCaja(payload) {
     return api.post("/caja/libro-cheques/transferir", payload)
   },
+
+  // Recibos
+
+  createReciboCaja(payload) {
+    return api.post("/recibos", payload)
+  },
+
+  getReciboCaja(id) {
+    return api.get(`/recibos/${id}`)
+  },
+
+  getReciboCajaPorMovimiento(movimientoId) {
+    return api.get(`/recibos/por-movimiento/${movimientoId}`)
+  },
+
+  getReciboCajaPdf(id) {
+    return api.get(`/recibos/${id}/pdf`, { responseType: "blob" })
+  },
+
+  deleteReciboCaja(id) {
+    return api.delete(`/recibos/${id}`)
+  },
+
+  anularReciboCaja(id, motivo_anulacion) {
+    return api.post(`/recibos/${id}/anular`, { motivo_anulacion })
+  },
+
 
   // Presupuestos
   getPresupuestos() {
@@ -541,3 +562,12 @@ export default {
   deleteGasto: (id) =>
     api.delete(`/gastos/${id}`),
 }
+
+  // Categorias de Caja
+
+  export const getCategoriasCaja = (tipo = "") => api.get("/caja/categorias", {
+    params: tipo ? { tipo } : undefined,
+  })
+  export const createCategoria = (payload) => api.post("/caja/categorias", payload)
+  export const updateCategoria = (id, payload) => api.put(`/caja/categorias/${id}`, payload)
+  export const deleteCategoria = (id) => api.delete(`/caja/categorias/${id}`)

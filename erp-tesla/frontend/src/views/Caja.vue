@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, computed, watch } from "vue"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
+import * as API from "../api.js"
 
 const CAJAS_DISPONIBLES = [
   { id: "tesla", label: "Caja Tesla" },
@@ -65,17 +66,86 @@ const transferenciaChequesForm = ref({
   observaciones: "",
 })
 
+const reciboMovimiento = ref(null)
+const recibosMovimiento = ref([])
+const loadingRecibo = ref(false)
+const emitiendoRecibo = ref(false)
+const descargandoRecibo = ref(false)
+const anulandoRecibo = ref(false)
+const mostrarModalRecibo = ref(false)
+const presupuestosMovimiento = ref([])
+const formRecibo = ref({
+  pagador_nombre: "",
+  concepto_publico: "",
+  conceptoTipo: "manual", // "manual" o "presupuestos"
+  presupuestosSeleccionados: [],
+  observaciones_publicas: "",
+})
+
+const recibosAnuladosMovimiento = computed(() => {
+  return (Array.isArray(recibosMovimiento.value) ? recibosMovimiento.value : [])
+    .filter((item) => String(item?.estado || "") === "anulado")
+    .sort((a, b) => Number(b?.numero || 0) - Number(a?.numero || 0))
+})
+// categorias
+
+const mostrarModalCategorias = ref(false)
+const categorias = ref([])
+const formCategoria = ref({ nombre: "", descripcion: "", tipo: "ingreso" })
+const editandoCategoria = ref(null)
+const guardandoCategoria = ref(false)
+const eliminandoCategoria = ref(false)
+const NUEVA_CATEGORIA_OPTION = "__nueva_categoria__"
+
+const normalizarTipoCategoria = (tipo) => {
+  const tipoNormalizado = String(tipo || "").trim().toLowerCase()
+  return tipoNormalizado === "egreso" ? "egreso" : "ingreso"
+}
+
+const categoriasFormulario = computed(() => {
+  const tipo = normalizarTipoCategoria(form.value.tipo)
+  return (categorias.value || []).filter((cat) => normalizarTipoCategoria(cat?.tipo) === tipo)
+})
+
+const categoriasFiltro = computed(() => {
+  const tipo = String(filtroTipo.value || "").trim().toLowerCase()
+  if (!tipo) return categorias.value || []
+  return (categorias.value || []).filter((cat) => normalizarTipoCategoria(cat?.tipo) === tipo)
+})
+
+const categoriasModal = computed(() => {
+  return [...(categorias.value || [])].sort((a, b) => {
+    const tipoA = normalizarTipoCategoria(a?.tipo)
+    const tipoB = normalizarTipoCategoria(b?.tipo)
+    if (tipoA !== tipoB) return tipoA.localeCompare(tipoB)
+    return String(a?.nombre || "").localeCompare(String(b?.nombre || ""), "es")
+  })
+})
+
+const categoriasModalIngreso = computed(() => {
+  return categoriasModal.value.filter((cat) => normalizarTipoCategoria(cat?.tipo) === "ingreso")
+})
+
+const categoriasModalEgreso = computed(() => {
+  return categoriasModal.value.filter((cat) => normalizarTipoCategoria(cat?.tipo) === "egreso")
+})
+
+
 // Filtros
 const filtroFechaInicio = ref("")
 const filtroFechaFin = ref("")
 const filtroTipo = ref("")
+const filtroMedioPago = ref("")
+const filtroCategoria = ref("")
+const FILTRO_SIN_CATEGORIA = "__sin_categoria__"
 
 // Formulario
 const form = ref({
   fecha: new Date().toISOString().split('T')[0],
   caja_codigo: "tesla",
   tipo: "ingreso",
-  categoria: "mano_obra",
+  categoria: "",
+  categoria_id: "",
   con_iva: true,
   destinatario: "",
   cliente_id: "",
@@ -453,10 +523,6 @@ const esFormularioValido = computed(() => {
     return false
   }
 
-  if (form.value.tipo === "ingreso" && !form.value.categoria) {
-    return false
-  }
-
   if (
     form.value.tipo === "egreso"
     && !String(form.value.destinatario || form.value.endosado_a_cheques || "").trim()
@@ -521,6 +587,28 @@ const movimientosFiltrados = computed(() => {
 
   if (filtroTipo.value) {
     resultado = resultado.filter(m => m.tipo === filtroTipo.value)
+  }
+
+  if (filtroMedioPago.value){
+    resultado = resultado.filter((movimiento) =>{
+      if (!movimiento.detalles_medio_pago || movimiento.detalles_medio_pago.length === 0) return false
+      return movimiento.detalles_medio_pago.some((detalle) =>
+        String(detalle.medio_pago || "").toLowerCase() === String(filtroMedioPago.value || "").toLowerCase()
+      )
+    })
+  }
+
+  if (filtroCategoria.value) {
+    if (filtroCategoria.value === FILTRO_SIN_CATEGORIA) {
+      resultado = resultado.filter((movimiento) => {
+        const categoriaId = Number(movimiento?.categoria_id || 0)
+        const tieneCategoriaId = Number.isInteger(categoriaId) && categoriaId > 0
+        const categoriaTexto = String(movimiento?.categoria || "").trim()
+        return !tieneCategoriaId && !categoriaTexto
+      })
+    } else {
+      resultado = resultado.filter((movimiento) => String(movimiento?.categoria_id || "") === String(filtroCategoria.value))
+    }
   }
 
   if (filtroBusqueda.value.trim()) {
@@ -882,9 +970,33 @@ const confirmarCerrarSemana = async () => {
 }
 
 const textoTipoFiltro = () => {
-  if (filtroTipo.value === "ingreso") return "solo ingresos"
-  if (filtroTipo.value === "egreso") return "solo egresos"
-  return "ingresos y egresos"
+  let texto = ""
+  if (filtroTipo.value === "ingreso") texto = "solo ingresos"
+  else if (filtroTipo.value === "egreso") texto = "solo egresos"
+  else texto = "ingresos y egresos"
+  
+  // Agregar medio de pago si está filtrado
+  const etiquetaMedioPago = {
+    "efectivo": "efectivo",
+    "transferencia": "transferencias",
+    "banco": "banco",
+    "cheque": "cheques",
+    "echeq": "e-cheques",
+    "retencion": "retenciones"
+  }
+  
+  if (filtroMedioPago.value) {
+    texto += ` - ${etiquetaMedioPago[filtroMedioPago.value] || filtroMedioPago.value}`
+  }
+
+  if (filtroCategoria.value === FILTRO_SIN_CATEGORIA) {
+    texto += " - sin categoria"
+  } else if (filtroCategoria.value) {
+    const categoriaFiltro = categorias.value.find((item) => String(item?.id || "") === String(filtroCategoria.value))
+    texto += ` - categoria: ${categoriaFiltro?.nombre || filtroCategoria.value}`
+  }
+  
+  return texto
 }
 
 const textoCajaFiltro = () => cajaActiva.value.label
@@ -918,7 +1030,9 @@ const descargarResumenPdf = async () => {
       filtroTipo.value,
       filtroCaja.value,
       "general",
-      filtroBusqueda.value
+      filtroBusqueda.value,
+      filtroMedioPago.value,
+      filtroCategoria.value
     )
 
     const blob = new Blob([res.data], { type: "application/pdf" })
@@ -1003,6 +1117,222 @@ const descargarMovimientoPdf = async () => {
   }
 }
 
+const resetReciboMovimiento = () => {
+  reciboMovimiento.value = null
+  recibosMovimiento.value = []
+}
+
+const descargarBlobPdf = (blob, fileName) => {
+  const url = window.URL.createObjectURL(blob)
+  const link = document.createElement("a")
+  link.href = url
+  link.download = fileName
+  link.click()
+  window.URL.revokeObjectURL(url)
+}
+
+const cargarReciboPorMovimiento = async (movimientoId) => {
+  const id = Number(movimientoId)
+  if (!Number.isInteger(id) || id <= 0) {
+    reciboMovimiento.value = null
+    recibosMovimiento.value = []
+    return
+  }
+
+  try {
+    loadingRecibo.value = true
+    const res = await api.getReciboCajaPorMovimiento(id)
+    reciboMovimiento.value = res.data?.recibo || null
+    recibosMovimiento.value = Array.isArray(res.data?.recibos) ? res.data.recibos : (res.data?.recibo ? [res.data.recibo] : [])
+  } catch (err) {
+    reciboMovimiento.value = null
+    recibosMovimiento.value = []
+    error.value = `Error al consultar recibo: ${err.response?.data?.error || err.message}`
+  } finally {
+    loadingRecibo.value = false
+  }
+}
+
+const pedirTextoRecibo = (label, valorInicial = "", obligatorio = false) => {
+  const valor = window.prompt(label, valorInicial)
+  if (valor === null) return null
+  const limpio = String(valor || "").trim()
+  if (obligatorio && !limpio) {
+    error.value = "Completa el dato requerido para emitir el recibo"
+    return null
+  }
+  return limpio
+}
+
+const abrirModalRecibo = async () => {
+  if (!movimientoSeleccionado.value?.id) return
+  if (movimientoSeleccionado.value?.tipo !== "ingreso") {
+    error.value = "Solo se pueden emitir recibos para ingresos"
+    return
+  }
+
+  // Cargar presupuestos asociados al movimiento
+  let presupuestosAsociados = []
+  const idsPresupuestos = new Set()
+
+  // Prioridad 1: lista completa de presupuestos asociados
+  if (Array.isArray(movimientoSeleccionado.value?.presupuestos_ids) && movimientoSeleccionado.value.presupuestos_ids.length > 0) {
+    movimientoSeleccionado.value.presupuestos_ids
+      .map((id) => Number(id))
+      .filter((id) => Number.isInteger(id) && id > 0)
+      .forEach((id) => idsPresupuestos.add(id))
+  }
+
+  // Prioridad 2: ids presentes en asignaciones
+  if (idsPresupuestos.size === 0 && movimientoSeleccionado.value?.presupuestos_asignaciones?.length > 0) {
+    movimientoSeleccionado.value.presupuestos_asignaciones
+      .map((a) => Number(a?.presupuesto_id))
+      .filter((id) => Number.isInteger(id) && id > 0)
+      .forEach((id) => idsPresupuestos.add(id))
+  }
+
+  // Prioridad 3: presupuesto_id legacy (uno solo)
+  if (idsPresupuestos.size === 0 && movimientoSeleccionado.value?.presupuesto_id) {
+    const presupuestoId = Number(movimientoSeleccionado.value.presupuesto_id)
+    if (Number.isInteger(presupuestoId) && presupuestoId > 0) {
+      idsPresupuestos.add(presupuestoId)
+    }
+  }
+
+  if (idsPresupuestos.size > 0) {
+    presupuestosAsociados = presupuestos.value.filter((p) => idsPresupuestos.has(Number(p.id)))
+  } else {
+    // Si no hay asociaciones, traer todos del cliente
+    presupuestosAsociados = presupuestos.value.filter((p) => {
+      return Number(p.cliente_id) === Number(movimientoSeleccionado.value?.cliente_id)
+    })
+  }
+  
+  presupuestosMovimiento.value = presupuestosAsociados
+
+  // Resetear formulario - dejar que el usuario elija si quiere manual o presupuestos
+  formRecibo.value = {
+    pagador_nombre: movimientoSeleccionado.value?.cliente || "",
+    concepto_publico: movimientoSeleccionado.value?.detalle || "",
+    conceptoTipo: "manual", // Siempre comenzar en manual para que el usuario elija
+    presupuestosSeleccionados: [],
+    observaciones_publicas: "",
+  }
+
+  mostrarModalRecibo.value = true
+}
+
+const guardarRecibo = async () => {
+  if (!formRecibo.value.pagador_nombre?.trim()) {
+    error.value = "El nombre del pagador es obligatorio"
+    return
+  }
+
+  let conceptoFinal = ""
+  if (formRecibo.value.conceptoTipo === "manual") {
+    if (!formRecibo.value.concepto_publico?.trim()) {
+      error.value = "El concepto es obligatorio"
+      return
+    }
+    conceptoFinal = formRecibo.value.concepto_publico
+  } else if (formRecibo.value.conceptoTipo === "presupuestos") {
+    if (!formRecibo.value.presupuestosSeleccionados.length) {
+      error.value = "Debe seleccionar al menos un presupuesto"
+      return
+    }
+    // Obtener números de presupuestos seleccionados
+    const presupuestosTexto = formRecibo.value.presupuestosSeleccionados
+      .map((id) => {
+        const presupuesto = presupuestosMovimiento.value.find((p) => p.id === id)
+        return presupuesto ? `- Presupuesto #${presupuesto.numero}` : null
+      })
+      .filter(Boolean)
+      .join("\n")
+    conceptoFinal = presupuestosTexto
+  }
+
+  try {
+    emitiendoRecibo.value = true
+    const res = await api.createReciboCaja({
+      movimiento_id: Number(movimientoSeleccionado.value.id),
+      pagador_nombre: formRecibo.value.pagador_nombre,
+      concepto_publico: conceptoFinal,
+      observaciones_publicas: formRecibo.value.observaciones_publicas,
+    })
+    reciboMovimiento.value = res.data
+    await cargarReciboPorMovimiento(Number(movimientoSeleccionado.value.id))
+    mostrarModalRecibo.value = false
+    await descargarReciboPdf()
+  } catch (err) {
+    error.value = `Error al emitir recibo: ${err.response?.data?.error || err.message}`
+  } finally {
+    emitiendoRecibo.value = false
+  }
+}
+
+const generarConceptoPresupuestos = () => {
+  if (formRecibo.value.presupuestosSeleccionados.length === 0) return ""
+  
+  const presupuestosTexto = formRecibo.value.presupuestosSeleccionados
+    .map((id) => {
+      const presupuesto = presupuestosMovimiento.value.find((p) => p.id === id)
+      return presupuesto ? `- Presupuesto #${presupuesto.numero}` : null
+    })
+    .filter(Boolean)
+    .join("\n")
+  
+  return presupuestosTexto
+}
+
+const emitirRecibo = abrirModalRecibo
+
+const descargarReciboPdf = async () => {
+  if (!reciboMovimiento.value?.id) return
+
+  await descargarReciboPdfPorId(reciboMovimiento.value.id, reciboMovimiento.value.numero)
+}
+
+const descargarReciboPdfPorId = async (reciboId, numeroRecibo = null) => {
+  const id = Number(reciboId)
+  if (!Number.isInteger(id) || id <= 0) return
+
+  try {
+    descargandoRecibo.value = true
+    const res = await api.getReciboCajaPdf(id)
+    const blob = new Blob([res.data], { type: "application/pdf" })
+    const numero = String(numeroRecibo || reciboMovimiento.value?.numero || 0).padStart(6, "0")
+    descargarBlobPdf(blob, `Recibo-${numero}.pdf`)
+  } catch (err) {
+    error.value = `Error al descargar recibo: ${err.response?.data?.error || err.message}`
+  } finally {
+    descargandoRecibo.value = false
+  }
+}
+
+const anularRecibo = async () => {
+  if (!reciboMovimiento.value?.id) return
+
+  if (reciboMovimiento.value?.estado === "anulado") {
+    error.value = "El recibo ya está anulado. Podés descargarlo para conservar constancia."
+  } else {
+    // Si esta emitido, permitir anular
+    const motivo = window.prompt("Ingresa el motivo de anulacion del recibo:")
+    if (!motivo || !String(motivo).trim()) return
+
+    try {
+      anulandoRecibo.value = true
+      const res = await api.anularReciboCaja(Number(reciboMovimiento.value.id), String(motivo).trim())
+      reciboMovimiento.value = res.data
+      await cargarReciboPorMovimiento(Number(movimientoSeleccionado.value.id))
+      error.value = ""
+    } catch (err) {
+      error.value = `Error al anular recibo: ${err.response?.data?.error || err.message}`
+    } finally {
+      anulandoRecibo.value = false
+    }
+  }
+}
+
 const abrirModalPdfCheques = () => {
   opcionPdfCheques.value = "disponibles"
   mostrarModalPdfCheques.value = true
@@ -1040,7 +1370,8 @@ const crearFormularioVacio = () => ({
   fecha: new Date().toISOString().split('T')[0],
   caja_codigo: filtroCaja.value || "tesla",
   tipo: "ingreso",
-  categoria: "mano_obra",
+  categoria: "",
+  categoria_id: "",
   con_iva: true,
   destinatario: "",
   cliente_id: "",
@@ -1214,6 +1545,7 @@ const cerrarFormulario = () => {
 
 const abrirFormulario = async () => {
   await cargarReferencias()
+  await cargarCategorias()
   form.value = crearFormularioVacio()
   editandoMovimientoId.value = null
   error.value = ""
@@ -1236,6 +1568,7 @@ const eliminarCheque = (index) => {
 const abrirEdicion = async (movimiento) => {
   try {
     loading.value = true
+    await cargarCategorias()
     const res = await api.getMovimientoCaja(movimiento.id)
     const movimientoCompleto = res?.data || movimiento
 
@@ -1356,7 +1689,8 @@ const abrirEdicion = async (movimiento) => {
       fecha: String(movimientoCompleto.fecha || "").split("T")[0],
       caja_codigo: movimientoCompleto.caja_codigo || filtroCaja.value || "tesla",
       tipo: movimientoCompleto.tipo || "ingreso",
-      categoria: movimientoCompleto.categoria || "mano_obra",
+      categoria: movimientoCompleto.categoria || "",
+      categoria_id: movimientoCompleto.categoria_id ? String(movimientoCompleto.categoria_id) : "",
       con_iva: movimientoCompleto.con_iva !== false,
       destinatario: movimientoCompleto.destinatario || "",
       cliente_id: movimientoCompleto.cliente_id || "",
@@ -1394,7 +1728,10 @@ const payloadMovimiento = () => ({
   fecha: form.value.fecha,
   caja_codigo: form.value.caja_codigo,
   tipo: form.value.tipo,
-  categoria: form.value.tipo === "ingreso" ? form.value.categoria : null,
+  categoria: form.value.tipo === "ingreso" ? (form.value.categoria || null) : null,
+  categoria_id: Number.isInteger(Number(form.value.categoria_id)) && Number(form.value.categoria_id) > 0
+    ? Number(form.value.categoria_id)
+    : null,
   con_iva: form.value.con_iva,
   destinatario: form.value.tipo === "egreso"
     ? String(form.value.destinatario || form.value.endosado_a_cheques || "").trim()
@@ -1556,22 +1893,16 @@ const guardarMovimiento = async () => {
   }
 }
 
-const verDetalle = async (movimiento) => {
-  try {
-    loading.value = true
-    const res = await api.getMovimientoCaja(movimiento.id)
-    movimientoSeleccionado.value = res.data
-    vistaActual.value = "detalle"
-  } catch (err) {
-    error.value = `Error al cargar detalle: ${err.response?.data?.error || err.message}`
-  } finally {
-    loading.value = false
-  }
+const verDetalle = async (mov) => {
+  movimientoSeleccionado.value = mov
+  vistaActual.value = "detalle"
+  await cargarReciboPorMovimiento(mov.id)
 }
 
 const volverALista = () => {
   vistaActual.value = "lista"
   movimientoSeleccionado.value = null
+  resetReciboMovimiento()
 }
 
 const confirmarEliminar = (movimiento) => {
@@ -1653,11 +1984,26 @@ const aplicarMontoPresupuestoEnDraft = (presupuestoId, modo = "pendiente") => {
   fila.monto_asignado = Math.max(0, Number(monto || 0))
 }
 
-const getLabelCategoria = (categoria) => {
+const getLabelCategoria = (categoria, categoriaId = null) => {
+  const categoriaIdNumero = Number(categoriaId || 0)
+  if (Number.isInteger(categoriaIdNumero) && categoriaIdNumero > 0) {
+    const categoriaDinamica = categorias.value.find((item) => Number(item?.id) === categoriaIdNumero)
+    if (categoriaDinamica?.nombre) return categoriaDinamica.nombre
+  }
   if (categoria === "mano_obra") return "Mano de obra"
   if (categoria === "materiales") return "Materiales"
   if (categoria === "varios") return "Varios"
   return "-"
+}
+
+const getLabelTipoCategoria = (tipo) => {
+  return normalizarTipoCategoria(tipo) === "egreso" ? "Egreso" : "Ingreso"
+}
+
+const getEtiquetaCategoriaFiltro = (categoria) => {
+  const nombre = String(categoria?.nombre || "-")
+  if (String(filtroTipo.value || "").trim()) return nombre
+  return `${nombre} (${getLabelTipoCategoria(categoria?.tipo)})`
 }
 
 const getChequesMovimiento = (movimiento) => {
@@ -1738,6 +2084,94 @@ const formatearFechaLibro = (valor) => {
   return fecha.toLocaleDateString("es-AR", { timeZone: "UTC" })
 }
 
+const cargarCategorias = async () => {
+  try {
+    const {data} = await API.getCategoriasCaja()
+    categorias.value = Array.isArray(data) ? data : []
+  } catch (err) {
+    console.error("Error al cargar categorias:", err)
+    categorias.value = []
+  }
+}
+
+const abrirModalCategorias = () => {
+  formCategoria.value.tipo = normalizarTipoCategoria(form.value.tipo)
+  cargarCategorias()
+  mostrarModalCategorias.value = true
+}
+
+const onCategoriaSelectChange = () => {
+  if (String(form.value.categoria_id) !== NUEVA_CATEGORIA_OPTION) return
+  form.value.categoria_id = ""
+  abrirModalCategorias()
+}
+
+const guardarCategoria = async (categoria) =>{
+  if (!formCategoria.value.nombre.trim()){
+    alert("El nombre de la categoría no puede estar vacío")
+    return
+  }
+
+  formCategoria.value.tipo = normalizarTipoCategoria(formCategoria.value.tipo)
+
+  guardandoCategoria.value = true
+  try {
+    let categoriaGuardada = null
+    if(editandoCategoria.value){
+      const { data } = await API.updateCategoria(editandoCategoria.value, formCategoria.value)
+      categoriaGuardada = data || null
+    } else {
+      const { data } = await API.createCategoria(formCategoria.value)
+      categoriaGuardada = data || null
+    }
+    formCategoria.value = { nombre: "" , descripcion: "", tipo: normalizarTipoCategoria(form.value.tipo) }
+    editandoCategoria.value = null
+    await cargarCategorias()
+    if (showForm.value && categoriaGuardada?.id && normalizarTipoCategoria(form.value.tipo) === normalizarTipoCategoria(categoriaGuardada?.tipo)) {
+      form.value.categoria_id = String(categoriaGuardada.id)
+    }
+  } catch (err) {
+    const mensaje = err.response?.data?.error || "Error al guardar categoría"
+    alert(mensaje)
+  } finally {
+    guardandoCategoria.value = false
+  }
+}
+
+const editarCategoria = (cat) => {
+  formCategoria.value = {nombre: cat.nombre || "", descripcion: cat.descripcion || "", tipo: normalizarTipoCategoria(cat?.tipo)}
+  editandoCategoria.value = cat.id
+}
+
+const cancelarEdicionCategoria = () => {
+  formCategoria.value = { nombre: "" , descripcion: "", tipo: normalizarTipoCategoria(form.value.tipo) }
+  editandoCategoria.value = null
+}
+
+const eliminarCategoria = async (cat) => {
+  const categoriaId = Number(cat?.id)
+  const categoriaNombre = cat?.nombre || "esta categoría"
+
+  if (!Number.isFinite(categoriaId)) {
+    alert("No se pudo identificar la categoría a eliminar")
+    return
+  }
+
+  if (!confirm(`¿Estás seguro de eliminar la categoría "${categoriaNombre}"?`)) return
+
+  eliminandoCategoria.value = true
+  try {
+    await API.deleteCategoria(categoriaId)
+    await cargarCategorias()
+  } catch (err) {
+    const mensaje = err.response?.data?.error || "Error al eliminar categoría"
+    alert(mensaje)
+  } finally {
+    eliminandoCategoria.value = false
+  }
+}
+
+
 watch(filtroCaja, () => {
   semanaSeleccionadaId.value = ""
   filtroSemanaLibroCheques.value = "global"
@@ -1755,6 +2189,11 @@ watch(semanaActiva, () => {
 }, { immediate: true })
 
 watch(() => form.value.tipo, (tipo) => {
+  const categoriaSeleccionada = (categorias.value || []).find((cat) => String(cat?.id) === String(form.value.categoria_id || ""))
+  if (categoriaSeleccionada && normalizarTipoCategoria(categoriaSeleccionada?.tipo) !== normalizarTipoCategoria(tipo)) {
+    form.value.categoria_id = ""
+  }
+
   if (tipo === "egreso") {
     form.value.categoria = ""
     form.value.presupuesto_id = ""
@@ -1767,8 +2206,19 @@ watch(() => form.value.tipo, (tipo) => {
   form.value.usar_cheques_libro = false
   form.value.cheques_salida = []
   form.value.endosado_a_cheques = ""
-  if (!form.value.categoria) {
-    form.value.categoria = "mano_obra"
+})
+
+watch(() => filtroTipo.value, (tipo) => {
+  if (!filtroCategoria.value || filtroCategoria.value === FILTRO_SIN_CATEGORIA) return
+  const categoriaSeleccionada = (categorias.value || []).find((cat) => String(cat?.id) === String(filtroCategoria.value))
+  if (!categoriaSeleccionada) {
+    filtroCategoria.value = ""
+    return
+  }
+
+  const tipoFiltro = String(tipo || "").trim().toLowerCase()
+  if (tipoFiltro && normalizarTipoCategoria(categoriaSeleccionada?.tipo) !== tipoFiltro) {
+    filtroCategoria.value = ""
   }
 })
 
@@ -1836,6 +2286,7 @@ watch(() => transferenciaChequesForm.value.caja_destino, (destino) => {
 onMounted(() => {
   refrescarCaja({ mantenerSeleccion: false })
   cargarReferencias()
+  cargarCategorias()
   socket.on('caja:changed', handleCajaChanged)
 })
 onUnmounted(() => {
@@ -1856,6 +2307,9 @@ onUnmounted(() => {
           <p>Seguí ingresos, egresos y composición por medio de pago desde una sola vista, con filtros rápidos y acceso directo a cada movimiento.</p>
         </div>
         <div class="caja-topbar-actions">
+          <button @click="abrirModalCategorias" class="btn btn-primary btn-categorias">
+            Gestionar Categorías
+          </button>
           <div class="caja-pdf-actions">
             <button class="btn btn-pdf btn-pdf-week" :disabled="generandoPdf || !semanaActiva" @click="descargarSemanaPdf">
               {{ generandoPdf ? "Generando PDF..." : "Descargar semana seleccionada" }}
@@ -2029,32 +2483,55 @@ onUnmounted(() => {
       </section>
 
       <section class="caja-toolbar-shell">
-        <div class="toolbar toolbar-caja">
-          <label class="toolbar-search-label toolbar-search">
-            <span>Buscar movimiento</span>
-            <input v-model="filtroBusqueda" type="text" class="input-sm input-search" placeholder="Detalle, cliente, destinatario, presupuesto..." />
-          </label>
-          <label class="toolbar-filter-label">
-            <span>Desde</span>
-            <input v-model="filtroFechaInicio" type="date" class="input-sm" @change="manejarCambioFiltroFecha" />
-          </label>
-          <label class="toolbar-filter-label">
-            <span>Hasta</span>
-            <input v-model="filtroFechaFin" type="date" class="input-sm" @change="manejarCambioFiltroFecha" />
-          </label>
-          <label class="toolbar-filter-label">
-            <span>Tipo</span>
-            <select v-model="filtroTipo" class="select-sm">
-              <option value="">Todos</option>
-              <option value="ingreso">Ingresos</option>
-              <option value="egreso">Egresos</option>
-            </select>
-          </label>
-          <button class="btn btn-filter-apply toolbar-action-btn" @click="aplicarFiltros">Aplicar filtros</button>
-          <button class="btn btn-filter-clear toolbar-action-btn" @click="filtroBusqueda = ''; filtroFechaInicio = ''; filtroFechaFin = ''; filtroTipo = ''; aplicarFiltros()">Limpiar filtros</button>
-          <button class="btn btn-pdf btn-pdf-toolbar toolbar-action-btn" :disabled="generandoPdf || !puedeDescargarResumenGeneral" @click="descargarResumenPdf">
-            {{ generandoPdf ? "Generando PDF..." : "Descargar Resumen PDF" }}
-          </button>
+        <div class="toolbar toolbar-caja toolbar-caja-main">
+          <div class="toolbar-filters-grid">
+            <label class="toolbar-search-label toolbar-search">
+              <span>Buscar movimiento</span>
+              <input v-model="filtroBusqueda" type="text" class="input-sm input-search" placeholder="Detalle, cliente, destinatario, presupuesto..." />
+            </label>
+            <label class="toolbar-filter-label">
+              <span>Desde</span>
+              <input v-model="filtroFechaInicio" type="date" class="input-sm" @change="manejarCambioFiltroFecha" />
+            </label>
+            <label class="toolbar-filter-label">
+              <span>Hasta</span>
+              <input v-model="filtroFechaFin" type="date" class="input-sm" @change="manejarCambioFiltroFecha" />
+            </label>
+            <label class="toolbar-filter-label">
+              <span>Tipo</span>
+              <select v-model="filtroTipo" class="select-sm">
+                <option value="">Todos</option>
+                <option value="ingreso">Ingresos</option>
+                <option value="egreso">Egresos</option>
+              </select>
+            </label>
+            <label class="toolbar-filter-label">
+              <span>Medio de pago</span>
+              <select v-model="filtroMedioPago" class="select-sm">
+                <option value="">Todos</option>
+                <option v-for="medio in mediosDePago" :key="medio.id" :value="medio.id">
+                  {{ medio.label }}
+                </option>
+              </select>
+            </label>
+            <label class="toolbar-filter-label">
+              <span>Categoría</span>
+              <select v-model="filtroCategoria" class="select-sm">
+                <option value="">Todas</option>
+                <option :value="FILTRO_SIN_CATEGORIA">Sin categoría</option>
+                <option v-for="cat in categoriasFiltro" :key="`filtro-cat-${cat.id}`" :value="String(cat.id)">
+                  {{ getEtiquetaCategoriaFiltro(cat) }}
+                </option>
+              </select>
+            </label>
+          </div>
+          <div class="toolbar-actions-row">
+            <button class="btn btn-filter-apply toolbar-action-btn" @click="aplicarFiltros">Aplicar filtros</button>
+            <button class="btn btn-filter-clear toolbar-action-btn" @click="filtroBusqueda = ''; filtroFechaInicio = ''; filtroFechaFin = ''; filtroTipo = ''; filtroMedioPago = ''; filtroCategoria = ''; aplicarFiltros()">Limpiar filtros</button>
+            <button class="btn btn-pdf btn-pdf-toolbar toolbar-action-btn" :disabled="generandoPdf || !puedeDescargarResumenGeneral" @click="descargarResumenPdf">
+              {{ generandoPdf ? "Generando PDF..." : "Descargar Resumen PDF" }}
+            </button>
+          </div>
         </div>
       </section>
 
@@ -2270,7 +2747,7 @@ onUnmounted(() => {
               </span>
             </td>
             <td>
-              <span>{{ mov.tipo === 'ingreso' ? getLabelCategoria(mov.categoria) : '-' }}</span>
+              <span>{{ getLabelCategoria(mov.categoria, mov.categoria_id) }}</span>
             </td>
             <td>
               <div class="tabla-referencia">
@@ -2321,8 +2798,51 @@ onUnmounted(() => {
         </div>
         <div class="detalle-top-actions">
           <button class="btn btn-secondary" @click="volverALista">← Volver a lista</button>
+
           <button class="btn btn-pdf" :disabled="generandoPdfDetalle" @click="descargarMovimientoPdf">
-            {{ generandoPdfDetalle ? "Generando PDF..." : "Descargar PDF" }}
+            {{ generandoPdfDetalle ? "Generando PDF..." : "Descargar comprobante" }}
+          </button>
+
+          <button
+            v-if="movimientoSeleccionado?.tipo === 'ingreso' && !reciboMovimiento"
+            class="btn btn-success"
+            :disabled="emitiendoRecibo || loadingRecibo"
+            @click="emitirRecibo"
+          >
+            {{ emitiendoRecibo ? "Emitiendo recibo..." : "Emitir recibo" }}
+          </button>
+
+          <button
+            v-if="movimientoSeleccionado?.tipo === 'ingreso' && reciboMovimiento"
+            class="btn btn-pdf"
+            :disabled="descargandoRecibo"
+            @click="descargarReciboPdf"
+          >
+            {{
+              descargandoRecibo
+                ? "Descargando recibo..."
+                : (reciboMovimiento.estado === 'anulado'
+                  ? `Recibo N ${String(reciboMovimiento.numero).padStart(6, '0')} Anulado`
+                  : `Descargar recibo N ${String(reciboMovimiento.numero).padStart(6, '0')}`)
+            }}
+          </button>
+
+          <button
+            v-if="movimientoSeleccionado?.tipo === 'ingreso' && reciboMovimiento && reciboMovimiento.estado !== 'anulado'"
+            class="btn btn-danger"
+            :disabled="anulandoRecibo"
+            @click="anularRecibo"
+          >
+            {{ anulandoRecibo ? "Anulando..." : "Anular recibo" }}
+          </button>
+
+          <button
+            v-if="movimientoSeleccionado?.tipo === 'ingreso' && reciboMovimiento && reciboMovimiento.estado === 'anulado'"
+            class="btn btn-success"
+            :disabled="emitiendoRecibo || loadingRecibo"
+            @click="abrirModalRecibo"
+          >
+            {{ emitiendoRecibo ? "Emitiendo recibo..." : "Emitir nuevo recibo" }}
           </button>
         </div>
       </section>
@@ -2339,7 +2859,7 @@ onUnmounted(() => {
         <div class="detalle-info-grid">
           <div class="info-item">
             <label>Fecha</label>
-            <p>{{ new Date(`${movimientoSeleccionado.fecha}T00:00:00`).toLocaleDateString("es-AR") }}</p>
+            <p>{{ formatearFechaLibro(movimientoSeleccionado.fecha) }}</p>
           </div>
           <div class="info-item">
             <label>Caja</label>
@@ -2393,6 +2913,83 @@ onUnmounted(() => {
             <label>ID de movimiento</label>
             <p>#{{ movimientoSeleccionado.id }}</p>
           </div>
+        </div>
+      </div>
+
+      <div v-if="movimientoSeleccionado?.tipo === 'ingreso'" class="detalle-card" style="margin-top: 16px;">
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker">Recibo</span>
+            <h3>Estado del recibo</h3>
+            <p>El recibo usa datos públicos y no muestra referencias internas del sistema.</p>
+          </div>
+        </div>
+
+        <div v-if="loadingRecibo" class="empty-state">
+          Consultando recibo...
+        </div>
+
+        <template v-else-if="reciboMovimiento">
+          <div class="detalle-info-grid">
+            <div class="info-item">
+              <label>Numero</label>
+              <p>{{ String(reciboMovimiento.numero).padStart(6, "0") }}</p>
+            </div>
+            <div class="info-item">
+              <label>Estado</label>
+              <p>{{ reciboMovimiento.estado }}</p>
+            </div>
+            <div v-if="reciboMovimiento.estado === 'anulado'" class="info-item">
+              <label>Motivo de anulación</label>
+              <p>{{ reciboMovimiento.motivo_anulacion || '-' }}</p>
+            </div>
+            <div v-if="reciboMovimiento.estado === 'anulado'" class="info-item">
+              <label>Fecha anulación</label>
+              <p>{{ reciboMovimiento.fecha_anulacion ? formatearFechaLibro(reciboMovimiento.fecha_anulacion) : '-' }}</p>
+            </div>
+            <div class="info-item">
+              <label>Fecha emision</label>
+              <p>{{ formatearFechaLibro(reciboMovimiento.fecha_emision) }}</p>
+            </div>
+            <div class="info-item">
+              <label>Pagador</label>
+              <p>{{ reciboMovimiento.pagador_nombre || '-' }}</p>
+            </div>
+            <div class="info-item">
+              <label>Concepto público</label>
+              <p>{{ reciboMovimiento.concepto_publico || '-' }}</p>
+            </div>
+          </div>
+
+          <div v-if="recibosAnuladosMovimiento.length > 0" class="recibos-historial-shell">
+            <div class="section-heading section-heading-inline recibos-historial-header">
+              <div>
+                <span class="section-kicker">Historial</span>
+                <h3>Recibos anulados</h3>
+              </div>
+            </div>
+
+            <div class="recibos-historial-list">
+              <article v-for="reciboHist in recibosAnuladosMovimiento" :key="`historial-recibo-${reciboHist.id}`" class="recibo-historial-item">
+                <div class="recibo-historial-copy">
+                  <strong>{{ `Recibo N ${String(reciboHist.numero || 0).padStart(6, '0')} Anulado` }}</strong>
+                  <p>{{ `Emitido: ${formatearFechaLibro(reciboHist.fecha_emision)} · Anulado: ${reciboHist.fecha_anulacion ? formatearFechaLibro(reciboHist.fecha_anulacion) : '-'}` }}</p>
+                </div>
+                <button
+                  type="button"
+                  class="btn btn-secondary btn-sm"
+                  :disabled="descargandoRecibo"
+                  @click="descargarReciboPdfPorId(reciboHist.id, reciboHist.numero)"
+                >
+                  Descargar recibo anulado
+                </button>
+              </article>
+            </div>
+          </div>
+        </template>
+
+        <div v-else class="empty-state">
+          Este ingreso todavia no tiene recibo emitido.
         </div>
       </div>
 
@@ -2648,16 +3245,18 @@ onUnmounted(() => {
                 </label>
               </div>
 
-              <div class="form-row form-row-secondary" v-if="esIngreso">
+              <div class="form-row form-row-secondary">
             <label class="form-group form-card-field">
-              <span>Categoría *</span>
-              <select v-model="form.categoria" required>
-                <option value="mano_obra">Mano de obra</option>
-                <option value="materiales">Materiales</option>
-                <option value="varios">Varios</option>
+              <span>Categoría</span>
+                  <select v-model="form.categoria_id" @change="onCategoriaSelectChange">
+                    <option value="">Sin categoría</option>
+                    <option v-for="cat in categoriasFormulario" :key="cat.id" :value="String(cat.id)">
+                      {{ cat.nombre }}
+                    </option>
+                    <option :value="NUEVA_CATEGORIA_OPTION">+ Agregar otra categoría</option>
               </select>
             </label>
-            <label class="form-group form-card-field">
+            <label class="form-group form-card-field" v-if="esIngreso">
               <span>Concepto IVA *</span>
               <select v-model="form.con_iva">
                 <option :value="true">Con IVA</option>
@@ -3004,6 +3603,209 @@ onUnmounted(() => {
       </div>
     </div>
   </div>
+
+  <!-- Modal para emitir recibo -->
+  <div v-if="mostrarModalRecibo" class="modal-overlay" @click.self="mostrarModalRecibo = false">
+    <div class="modal modal-confirmacion modal-recibo">
+      <div class="modal-header modal-header-confirmacion">
+        <div class="modal-header-copy">
+          <span class="section-kicker">Emision de recibos</span>
+          <h3>Emitir recibo numerado</h3>
+          <p>Completa los datos del recibo que se va a emitir.</p>
+        </div>
+        <button type="button" class="btn-close" aria-label="Cerrar modal" @click="mostrarModalRecibo = false">×</button>
+      </div>
+
+      <div class="modal-form modal-form-recibo">
+        <div class="form-group">
+          <label for="pagador">Pagador *</label>
+          <input
+            id="pagador"
+            v-model="formRecibo.pagador_nombre"
+            type="text"
+            placeholder="Nombre del pagador"
+            class="form-control"
+          />
+        </div>
+
+        <div class="form-group">
+          <label>Concepto del recibo *</label>
+          <div class="radio-group">
+            <label class="radio-option">
+              <input v-model="formRecibo.conceptoTipo" type="radio" value="manual" />
+              <span>Ingresar concepto manualmente</span>
+            </label>
+            <label class="radio-option" v-if="presupuestosMovimiento.length > 0">
+              <input v-model="formRecibo.conceptoTipo" type="radio" value="presupuestos" />
+              <span>Usar presupuestos asociados</span>
+            </label>
+          </div>
+        </div>
+
+        <div v-if="formRecibo.conceptoTipo === 'manual'" class="form-group">
+          <input
+            v-model="formRecibo.concepto_publico"
+            type="text"
+            placeholder="Concepto publico"
+            class="form-control"
+          />
+        </div>
+
+        <div v-if="formRecibo.conceptoTipo === 'presupuestos' && presupuestosMovimiento.length > 0" class="form-group">
+          <div class="presupuestos-automaticos">
+            <small style="color: #93c5fd; font-weight: 600; display: block; margin-bottom: 0.5rem;">Selecciona los presupuestos para el concepto:</small>
+            <div class="presupuestos-lista">
+              <label v-for="presupuesto in presupuestosMovimiento" :key="presupuesto.id" class="presupuesto-checkbox">
+                <input
+                  :value="presupuesto.id"
+                  type="checkbox"
+                  v-model="formRecibo.presupuestosSeleccionados"
+                />
+                <span>{{ `Presupuesto #${presupuesto.numero} - ${presupuesto.cliente}` }}</span>
+              </label>
+            </div>
+          </div>
+          
+          <!-- Mostrar preview del concepto que se va a generar -->
+          <div v-if="formRecibo.presupuestosSeleccionados.length > 0" style="margin-top: 0.75rem; padding: 0.75rem; background: #1e293b; border: 1.5px solid #475569; border-radius: 0.6rem;">
+            <small style="color: #93c5fd; font-weight: 600;">Concepto que se generará:</small>
+            <div style="color: #ffffff; margin-top: 0.25rem;">
+              {{ generarConceptoPresupuestos() }}
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="observaciones">Observaciones publicas</label>
+          <textarea
+            id="observaciones"
+            v-model="formRecibo.observaciones_publicas"
+            placeholder="Observaciones (opcional)"
+            class="form-control"
+            rows="2"
+          ></textarea>
+        </div>
+
+        <div class="modal-actions">
+          <button
+            type="button"
+            class="btn-primary"
+            :disabled="emitiendoRecibo"
+            @click="guardarRecibo"
+          >
+            {{ emitiendoRecibo ? "Emitiendo recibo..." : "Emitir recibo" }}
+          </button>
+          <button type="button" class="btn-secondary" :disabled="emitiendoRecibo" @click="mostrarModalRecibo = false">
+            Cancelar
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<!-- Modal Gestión de Categorías -->
+<div v-if="mostrarModalCategorias" class="modal-overlay" @click="mostrarModalCategorias = false">
+  <div class="modal-categorias" @click.stop>
+    <button class="modal-close" @click="mostrarModalCategorias = false">✕</button>
+    <h2>Gestionar Categorías</h2>
+
+    <!-- Formulario para agregar/editar -->
+    <div class="form-categoria">
+      <select v-model="formCategoria.tipo" class="input-categoria">
+        <option value="ingreso">Categoría de ingreso</option>
+        <option value="egreso">Categoría de egreso</option>
+      </select>
+      <input
+        v-model="formCategoria.nombre"
+        placeholder="Nombre de la categoría"
+        class="input-categoria"
+      />
+      <textarea
+        v-model="formCategoria.descripcion"
+        placeholder="Descripción (opcional)"
+        class="textarea-categoria"
+        rows="4"
+      ></textarea>
+      <div class="botones-form">
+        <button @click="guardarCategoria" :disabled="guardandoCategoria" class="btn btn-primary btn-guardar">
+          {{ editandoCategoria ? "Actualizar" : "Agregar Categoría" }}
+        </button>
+        <button
+          v-if="editandoCategoria"
+          @click="cancelarEdicionCategoria"
+          class="btn btn-secondary btn-cancelar"
+        >
+          Cancelar
+        </button>
+      </div>
+    </div>
+
+    <!-- Listado de categorías -->
+    <div class="categorias-lista">
+      <div v-if="categoriasModal.length === 0" class="sin-categorias">
+        No hay categorías aún
+      </div>
+      <div v-else class="categorias-grupos">
+        <section class="categorias-grupo">
+          <div class="categorias-grupo-head">
+            <h4>Ingreso</h4>
+            <span class="categoria-tipo-chip">{{ categoriasModalIngreso.length }}</span>
+          </div>
+          <div class="categorias-grupo-body">
+            <div v-if="categoriasModalIngreso.length === 0" class="sin-categorias">No hay categorías de ingreso</div>
+            <div v-else class="items-categorias">
+              <div v-for="cat in categoriasModalIngreso" :key="`cat-ingreso-${cat.id}`" class="categoria-item">
+                <div class="categoria-info">
+                  <strong>{{ cat.nombre }}</strong>
+                  <p v-if="cat.descripcion" class="categoria-desc">{{ cat.descripcion }}</p>
+                </div>
+                <div class="categoria-acciones">
+                  <button @click="editarCategoria(cat)" class="btn-editar">Editar</button>
+                  <button
+                    @click="eliminarCategoria(cat)"
+                    :disabled="eliminandoCategoria"
+                    class="btn-eliminar"
+                  >
+                    Eliminar
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="categorias-grupo">
+          <div class="categorias-grupo-head">
+            <h4>Egreso</h4>
+            <span class="categoria-tipo-chip">{{ categoriasModalEgreso.length }}</span>
+          </div>
+          <div class="categorias-grupo-body">
+            <div v-if="categoriasModalEgreso.length === 0" class="sin-categorias">No hay categorías de egreso</div>
+            <div v-else class="items-categorias">
+              <div v-for="cat in categoriasModalEgreso" :key="`cat-egreso-${cat.id}`" class="categoria-item">
+                <div class="categoria-info">
+                  <strong>{{ cat.nombre }}</strong>
+                  <p v-if="cat.descripcion" class="categoria-desc">{{ cat.descripcion }}</p>
+                </div>
+                <div class="categoria-acciones">
+                  <button @click="editarCategoria(cat)" class="btn-editar">Editar</button>
+                  <button
+                    @click="eliminarCategoria(cat)"
+                    :disabled="eliminandoCategoria"
+                    class="btn-eliminar"
+                  >
+                    Eliminar
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</div>
+
 </template>
 <style scoped>
 .caja-toolbar-shell {
@@ -3021,6 +3823,41 @@ onUnmounted(() => {
   grid-template-columns: minmax(320px, 1.55fr) repeat(3, minmax(120px, 0.48fr)) repeat(3, auto);
   align-items: flex-end;
   gap: 1rem;
+  width: 100%;
+}
+
+.caja-toolbar-shell .toolbar.toolbar-caja {
+  display: grid;
+}
+
+.caja-toolbar-shell .toolbar-caja.toolbar-caja-main {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.9rem;
+}
+
+.toolbar-filters-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.35fr) repeat(5, minmax(140px, 1fr));
+  gap: 0.8rem;
+  align-items: end;
+  width: 100%;
+}
+
+.toolbar-filters-grid .toolbar-search {
+  grid-column: span 1;
+  min-width: 0;
+}
+
+.toolbar-filters-grid .toolbar-filter-label {
+  width: 100%;
+}
+
+.toolbar-actions-row {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.7rem;
   width: 100%;
 }
 
@@ -3072,6 +3909,140 @@ onUnmounted(() => {
   padding: 0.74rem 1.1rem;
   min-height: 44px;
 }
+
+.radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.radio-option {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  cursor: pointer;
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  transition: background-color 0.2s, border-color 0.2s;
+  border: 1.5px solid transparent;
+}
+
+.radio-option:hover {
+  background-color: rgba(59, 130, 246, 0.12);
+  border-color: rgba(59, 130, 246, 0.3);
+}
+
+.radio-option input[type="radio"] {
+  cursor: pointer;
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  accent-color: #3b82f6;
+}
+
+.presupuestos-lista {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 1rem;
+  border: 1.5px solid #475569;
+  border-radius: 0.6rem;
+  background-color: #1e293b;
+}
+
+.presupuesto-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  cursor: pointer;
+  padding: 0.75rem;
+  border-radius: 0.4rem;
+  transition: background-color 0.2s, border-color 0.2s;
+  user-select: none;
+  background-color: #2d3748;
+  border: 1px solid #475569;
+}
+
+.presupuesto-checkbox:hover {
+  background-color: #374151;
+  border-color: #64748b;
+}
+
+.presupuesto-checkbox input[type="checkbox"] {
+  cursor: pointer;
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  accent-color: #3b82f6;
+}
+
+.presupuesto-checkbox span {
+  color: #ffffff;
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+
+.presupuestos-automaticos {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+  background-color: #0f172a;
+  border: 1.5px solid #475569;
+  border-radius: 0.6rem;
+}
+
+.presupuesto-item {
+  padding: 0.75rem;
+  background-color: #ffffff;
+  border-radius: 0.4rem;
+  border: 1px solid #bfdbfe;
+  color: #1e293b;
+  font-size: 0.95rem;
+}
+
+.modal-form-recibo {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.form-group label {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.form-control {
+  padding: 0.75rem;
+  border: 1.5px solid #cbd5e1;
+  border-radius: 0.5rem;
+  font-size: 0.95rem;
+  font-family: inherit;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  background-color: #ffffff;
+  color: #1e293b;
+}
+
+.form-control::placeholder {
+  color: #94a3b8;
+}
+
+.form-control:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
 </style>
 
 <style scoped>
@@ -3164,6 +4135,7 @@ onUnmounted(() => {
   border-radius: 0.9rem;
   border: 1px solid rgba(59, 130, 246, 0.25);
   background: linear-gradient(180deg, rgba(30, 41, 59, 0.55), rgba(15, 23, 42, 0.65));
+  overflow: hidden;
 }
 
 .caja-bank-inline-head {
@@ -3180,15 +4152,20 @@ onUnmounted(() => {
 
 .caja-bank-inline-grid {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 0.8rem;
 }
 
 .caja-bank-inline-actions {
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 0.7rem;
   margin-top: 0.85rem;
+}
+
+.caja-bank-inline-actions .btn {
+  min-width: 170px;
 }
 
 .caja-semana-header {
@@ -4356,6 +5333,47 @@ onUnmounted(() => {
   margin: 0;
 }
 
+.recibos-historial-shell {
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.recibos-historial-header {
+  margin-bottom: 0;
+}
+
+.recibos-historial-list {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.recibo-historial-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.9rem 1rem;
+  border-radius: 0.9rem;
+  border: 1px solid rgba(248, 113, 113, 0.24);
+  background: linear-gradient(180deg, rgba(127, 29, 29, 0.12), rgba(15, 23, 42, 0.72));
+}
+
+.recibo-historial-copy {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.recibo-historial-copy strong {
+  color: #fecaca;
+}
+
+.recibo-historial-copy p {
+  margin: 0;
+  color: #cbd5e1;
+  font-size: 0.88rem;
+}
+
 .monto-grande {
   font-size: 1.5rem !important;
   font-weight: bold;
@@ -4984,8 +6002,8 @@ onUnmounted(() => {
   background-color: #0f172a;
   border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 0.75rem;
-  width: 90%;
-  max-width: 480px;
+  width: 95%;
+  max-width: 1200px;
   max-height: 96vh;
   overflow-y: auto;
   box-shadow: 0 40px 25px -5px rgba(0, 0, 0, 0.5);
@@ -5002,8 +6020,8 @@ onUnmounted(() => {
 }
 
 .modal-confirmacion {
-  width: min(92vw, 520px);
-  max-width: 520px;
+  width: min(92vw, 1000px);
+  max-width: 1000px;
   border-radius: 1.05rem;
   border-color: rgba(248, 113, 113, 0.2);
   background:
@@ -5649,6 +6667,18 @@ onUnmounted(() => {
   .cheques-libro-lista {
     grid-template-columns: repeat(2, minmax(220px, 1fr));
   }
+
+  .caja-bank-inline-grid {
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  }
+
+  .toolbar-filters-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .toolbar-filters-grid .toolbar-search {
+    grid-column: span 3;
+  }
 }
 
 @media (max-width: 720px) {
@@ -5724,6 +6754,36 @@ onUnmounted(() => {
     min-width: 0;
   }
 
+  .toolbar-filters-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .toolbar-filters-grid .toolbar-search {
+    grid-column: span 1;
+  }
+
+  .toolbar-actions-row {
+    justify-content: stretch;
+  }
+
+  .toolbar-actions-row .btn {
+    width: 100%;
+  }
+
+  .caja-bank-inline-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .caja-bank-inline-actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .caja-bank-inline-actions .btn {
+    width: 100%;
+    min-width: 0;
+  }
+
   .toolbar-libro-cheques {
     grid-template-columns: 1fr;
   }
@@ -5768,4 +6828,305 @@ onUnmounted(() => {
     grid-template-columns: 1fr;
   }
 }
+
+
+.btn-categorias {
+  min-width: 170px;
+}
+
+.modal-categorias {
+  position: relative;
+  width: min(96vw, 980px);
+  max-width: 980px;
+  border-radius: 1.15rem;
+  border: 1px solid rgba(96, 165, 250, 0.2);
+  background:
+    radial-gradient(circle at top left, rgba(59, 130, 246, 0.12), transparent 34%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(15, 23, 42, 0.94));
+  padding: 0;
+  max-height: 92vh;
+  overflow: hidden;
+  box-shadow: 0 32px 55px rgba(2, 6, 23, 0.48);
+}
+
+.modal-close {
+  position: absolute;
+  top: 0.95rem;
+  right: 1rem;
+  background: rgba(30, 41, 59, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  color: #e2e8f0;
+  font-size: 1.1rem;
+  cursor: pointer;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  transition: all 0.2s ease;
+}
+
+.modal-close:hover {
+  color: #ffffff;
+  border-color: rgba(147, 197, 253, 0.45);
+  background: rgba(30, 64, 175, 0.35);
+}
+
+.modal-categorias h2 {
+  color: #dbeafe;
+  margin-bottom: 1.25rem;
+  margin-top: 0;
+  font-size: 18px;
+  padding: 1.4rem 1.55rem 0.75rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.modal-categorias h3 {
+  color: #cbd5e1;
+  font-size: 13px;
+  margin-top: 1.25rem;
+  margin-bottom: 0.75rem;
+  padding: 0 1.4rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+
+.form-categoria {
+  padding: 1.4rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.input-categoria,
+.textarea-categoria {
+  width: 100%;
+  background: #0f172a;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  color: #ffffff;
+  padding: 0.7rem 0.9rem;
+  border-radius: 0.5rem;
+  font-family: inherit;
+  font-size: 13px;
+  margin-bottom: 0.75rem;
+  box-sizing: border-box;
+  transition: all 0.2s ease;
+}
+
+.input-categoria:focus,
+.textarea-categoria:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+  background: #0f172a;
+}
+
+.textarea-categoria {
+  resize: none;
+  min-height: 92px;
+  height: 92px;
+  max-height: 92px;
+  overflow-y: auto;
+}
+
+.botones-form {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.btn-guardar {
+  flex: 1;
+  min-height: 2.65rem;
+}
+
+.btn-guardar:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+
+.btn-cancelar {
+  margin-top: 0;
+  min-height: 2.65rem;
+}
+
+.btn-cancelar:hover {
+  background: rgba(71, 85, 105, 0.9);
+}
+
+.categorias-lista {
+  padding: 0.95rem 1.2rem 1.1rem;
+  height: 46vh;
+  min-height: 320px;
+  overflow: hidden;
+}
+
+.sin-categorias {
+  text-align: center;
+  color: #94a3b8;
+  padding: 1.5rem;
+  font-size: 13px;
+}
+
+.items-categorias {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.categorias-grupos {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  height: 100%;
+  align-items: stretch;
+}
+
+.categorias-grupo {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 0.6rem;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0.9rem;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.48);
+}
+
+.categorias-grupo-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.categorias-grupo-head h4 {
+  margin: 0;
+  color: #cbd5e1;
+  font-size: 0.85rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.categorias-grupo-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 0.35rem;
+  padding-bottom: 0.7rem;
+  scrollbar-gutter: stable;
+}
+
+@media (max-width: 980px) {
+  .categorias-lista {
+    height: auto;
+    max-height: 52vh;
+    overflow-y: auto;
+  }
+
+  .categorias-grupos {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+
+  .categorias-grupo {
+    max-height: 28vh;
+  }
+}
+
+.categoria-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 0.5rem;
+  background: rgba(15, 23, 42, 0.5);
+  gap: 1rem;
+  transition: all 0.2s ease;
+}
+
+.categoria-item:hover {
+  background: rgba(15, 23, 42, 0.8);
+  border-color: rgba(59, 130, 246, 0.3);
+}
+
+.categoria-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.categoria-info strong {
+  color: #dbeafe;
+  display: block;
+  margin-bottom: 0.25rem;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.categoria-tipo-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  background: rgba(30, 64, 175, 0.22);
+  color: #bfdbfe;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.categoria-desc {
+  color: #94a3b8;
+  font-size: 11px;
+  margin: 0;
+}
+
+.categoria-acciones {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: nowrap;
+}
+
+.btn-editar,
+.btn-eliminar {
+  border: none;
+  padding: 0.5rem 0.8rem;
+  border-radius: 0.4rem;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.btn-editar {
+  background: rgba(59, 130, 246, 0.7);
+  color: white;
+}
+
+.btn-editar:hover {
+  background: #3b82f6;
+  transform: translateY(-1px);
+}
+
+.btn-eliminar {
+  background: rgba(239, 68, 68, 0.7);
+  color: white;
+}
+
+.btn-eliminar:hover:not(:disabled) {
+  background: #dc2626;
+  transform: translateY(-1px);
+}
+
+.btn-eliminar:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+
 </style>

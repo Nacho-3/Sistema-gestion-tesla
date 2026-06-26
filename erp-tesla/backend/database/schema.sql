@@ -404,6 +404,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_empleados_dni_activo ON empleados(dni) WHER
 -- =========================
 -- CAJA
 -- =========================
+CREATE TABLE IF NOT EXISTS categorias_caja (
+  id SERIAL PRIMARY KEY,
+  nombre VARCHAR(100) NOT NULL,
+  descripcion TEXT,
+  tipo VARCHAR(20) NOT NULL DEFAULT 'ingreso' CHECK (tipo IN ('ingreso', 'egreso')),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS cajas_semanales (
   id SERIAL PRIMARY KEY,
   caja_codigo VARCHAR(20) NOT NULL DEFAULT 'tesla' CONSTRAINT chk_cajas_semanales_codigo CHECK (caja_codigo IN ('tesla', 'teslita', 'juani')),
@@ -602,6 +611,10 @@ BEGIN
   END IF;
 END $$;
 
+--==========================
+-- TABLA DE CATEGORIAS
+--==========================
+
 -- =========================
 -- PRESUPUESTOS
 -- =========================
@@ -736,6 +749,81 @@ ALTER TABLE certificados ADD COLUMN IF NOT EXISTS iva_porcentaje NUMERIC(6,2) NO
 ALTER TABLE certificados ADD COLUMN IF NOT EXISTS total_cert_con_iva NUMERIC(12,2) NOT NULL DEFAULT 0;
 ALTER TABLE certificados ADD COLUMN IF NOT EXISTS acumulado_certificado NUMERIC(12,2) NOT NULL DEFAULT 0;
 ALTER TABLE certificados ADD COLUMN IF NOT EXISTS observaciones TEXT DEFAULT '';
+ALTER TABLE movimientos_caja ADD COLUMN IF NOT EXISTS categoria_id INTEGER REFERENCES categorias_caja(id) ON DELETE SET NULL;
+ALTER TABLE categorias_caja ADD COLUMN IF NOT EXISTS tipo VARCHAR(20);
+
+UPDATE categorias_caja c
+SET tipo = CASE
+  WHEN EXISTS (
+    SELECT 1 FROM movimientos_caja m
+    WHERE m.categoria_id = c.id AND m.tipo = 'egreso'
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM movimientos_caja m
+    WHERE m.categoria_id = c.id AND m.tipo = 'ingreso'
+  ) THEN 'egreso'
+  ELSE 'ingreso'
+END
+WHERE c.tipo IS NULL OR c.tipo NOT IN ('ingreso', 'egreso');
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.table_constraints
+    WHERE table_name = 'categorias_caja'
+      AND constraint_name = 'categorias_caja_nombre_key'
+  ) THEN
+    ALTER TABLE categorias_caja DROP CONSTRAINT categorias_caja_nombre_key;
+  END IF;
+END $$;
+
+WITH categorias_mixtas AS (
+  SELECT c.id AS categoria_id, c.nombre, c.descripcion
+  FROM categorias_caja c
+  WHERE EXISTS (
+    SELECT 1 FROM movimientos_caja m
+    WHERE m.categoria_id = c.id AND m.tipo = 'ingreso'
+  )
+  AND EXISTS (
+    SELECT 1 FROM movimientos_caja m
+    WHERE m.categoria_id = c.id AND m.tipo = 'egreso'
+  )
+), nuevas_egreso AS (
+  INSERT INTO categorias_caja (nombre, descripcion, tipo)
+  SELECT cm.nombre, cm.descripcion, 'egreso'
+  FROM categorias_mixtas cm
+  WHERE NOT EXISTS (
+    SELECT 1 FROM categorias_caja c2
+    WHERE LOWER(c2.nombre) = LOWER(cm.nombre)
+      AND c2.tipo = 'egreso'
+  )
+  RETURNING id, nombre
+)
+UPDATE movimientos_caja m
+SET categoria_id = c_egreso.id
+FROM categorias_mixtas cm
+JOIN categorias_caja c_egreso
+  ON LOWER(c_egreso.nombre) = LOWER(cm.nombre)
+ AND c_egreso.tipo = 'egreso'
+WHERE m.categoria_id = cm.categoria_id
+  AND m.tipo = 'egreso';
+
+ALTER TABLE categorias_caja
+  ALTER COLUMN tipo SET DEFAULT 'ingreso',
+  ALTER COLUMN tipo SET NOT NULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'chk_categorias_caja_tipo'
+      AND conrelid = 'categorias_caja'::regclass
+  ) THEN
+    ALTER TABLE categorias_caja
+      ADD CONSTRAINT chk_categorias_caja_tipo
+      CHECK (tipo IN ('ingreso', 'egreso'));
+  END IF;
+END $$;
 
 UPDATE certificados
 SET
@@ -881,6 +969,9 @@ CREATE INDEX IF NOT EXISTS idx_presupuestos_obra ON presupuestos(obra_id);
 CREATE INDEX IF NOT EXISTS idx_presupuestos_fecha ON presupuestos(fecha);
 CREATE INDEX IF NOT EXISTS idx_presupuesto_items_presupuesto ON presupuesto_items(presupuesto_id);
 CREATE INDEX IF NOT EXISTS idx_presupuesto_items_tipo ON presupuesto_items(tipo);
+CREATE INDEX IF NOT EXISTS idx_movimientos_categoria ON movimientos_caja(categoria_id);
+CREATE INDEX IF NOT EXISTS idx_categorias_caja_tipo ON categorias_caja(tipo);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_categorias_caja_nombre_tipo ON categorias_caja(LOWER(nombre), tipo);
 
 -- =========================
 -- UPDATED_AT AUTOMÁTICO
@@ -925,6 +1016,10 @@ CREATE TRIGGER trg_certificados_updated_at BEFORE UPDATE ON certificados FOR EAC
 
 DROP TRIGGER IF EXISTS trg_app_config_updated_at ON app_config;
 CREATE TRIGGER trg_app_config_updated_at BEFORE UPDATE ON app_config FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_recibos_caja_updated_at ON recibos_caja;
+CREATE TRIGGER trg_recibos_caja_updated_at BEFORE UPDATE ON recibos_caja FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
 
 -- =========================
 -- INTEGRIDAD REFERENCIAL
@@ -1192,3 +1287,54 @@ CREATE TABLE IF NOT EXISTS indices_cac (
 -- Presupuestos: columna para referenciar el índice CAC base al momento del contrato
 ALTER TABLE IF EXISTS presupuestos
   ADD COLUMN IF NOT EXISTS indice_cac_base_id INTEGER REFERENCES indices_cac(id) ON DELETE SET NULL;
+
+
+-- =========================
+-- RECIBOS DE CAJA
+--==========================
+CREATE SEQUENCE IF NOT EXISTS recibos_caja_numero_seq
+  START WITH 1
+  INCREMENT BY 1;
+
+CREATE TABLE IF NOT EXISTS recibos_caja (
+  id SERIAL PRIMARY KEY,
+  numero INTEGER NOT NULL DEFAULT nextval ('recibos_caja_numero_seq'),
+  movimiento_caja_id INTEGER NOT NULL REFERENCES movimientos_caja(id) ON DELETE RESTRICT,
+  cliente_id INTEGER REFERENCES clientes(id) ON DELETE SET NULL,
+  pagador_nombre TEXT NOT NULL,
+  fecha_emision DATE NOT NULL DEFAULT CURRENT_DATE,
+  fecha_cobro DATE NOT NULL,
+  concepto_publico TEXT NOT NULL,
+  observaciones_publicas TEXT,
+  monto_total NUMERIC(12,2) NOT NULL CHECK (monto_total > 0),
+  moneda VARCHAR(10) NOT NULL DEFAULT 'ARS',
+  medio_pago_resumen TEXT NOT NULL DEFAULT '',
+  medio_pago_snapshot JSONB NOT NULL DEFAULT '[]'::jsonb,
+  estado VARCHAR(20) NOT NULL DEFAULT 'emitido' CHECK (estado IN ('emitido', 'anulado')),
+  emitido_por INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  fecha_anulacion TIMESTAMP,
+  motivo_anulacion TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_recibos_caja_numero
+  ON recibos_caja(numero);
+
+DROP INDEX IF EXISTS idx_recibos_caja_movimiento;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_recibos_caja_movimiento_emitido
+  ON recibos_caja(movimiento_caja_id)
+  WHERE estado = 'emitido';
+
+CREATE INDEX IF NOT EXISTS idx_recibos_caja_movimiento_hist
+  ON recibos_caja(movimiento_caja_id);
+
+CREATE INDEX IF NOT EXISTS idx_recibos_caja_cliente
+  ON recibos_caja(cliente_id);
+
+CREATE INDEX IF NOT EXISTS idx_recibos_caja_fecha_emision
+  ON recibos_caja(fecha_emision);
+
+CREATE INDEX IF NOT EXISTS idx_recibos_caja_estado
+  ON recibos_caja(estado);

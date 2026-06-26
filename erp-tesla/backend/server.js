@@ -26,6 +26,7 @@ import presupuestosRoutes from "./routes/presupuestos.js"
 import certificadosRoutes from "./routes/certificados.js"
 import gastosRouter from "./routes/gastos.js"
 import indicesCacRoutes from "./routes/indices_cac.js"
+import recibosRoutes from "./routes/recibos.js"
 
 
 dotenv.config()
@@ -196,11 +197,11 @@ app.use("/empleados", empleadosRoutes)
 app.use("/horas", horasRoutes)
 app.use("/liquidaciones", liquidacionesRoutes)
 app.use("/caja", cajaRoutes)
+app.use("/recibos", recibosRoutes)
 app.use("/presupuestos", presupuestosRoutes)
 app.use("/certificados", certificadosRoutes)
 app.use("/gastos", gastosRouter)
 app.use("/indices-cac", indicesCacRoutes)
-
 const httpServer = createServer(app)
 
 const io = new SocketIO(httpServer, {

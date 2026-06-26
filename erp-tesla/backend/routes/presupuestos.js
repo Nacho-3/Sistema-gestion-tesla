@@ -719,12 +719,12 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 			y += 64
 			const blockGap = 12
 			const blockW = (width - blockGap) / 2
-			const blockH = 102
+			const blockH = 116
 			const logoBandW = 82
 
 			doc.rect(left, y, blockW, blockH).lineWidth(0.8).strokeColor(lineColor).stroke()
 			if (existsSync(logoToUse)) {
-				doc.image(logoToUse, left + blockW - logoBandW - 4, y + 20, { fit: [78, 56], align: "center", valign: "center" })
+				doc.image(logoToUse, left + blockW - logoBandW - 4, y + 23, { fit: [78, 56], align: "center", valign: "center" })
 			}
 			const empresaTextW = blockW - logoBandW - 14
 			doc.font("Helvetica-Bold").fontSize(9).fillColor("#111").text("EMPRESA", left + 8, y + 6)
@@ -733,8 +733,9 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 			doc.text("CUIT: 30-71712557-2", left + 8, y + 34, { width: empresaTextW, lineBreak: false })
 			doc.text("IVA: Responsable Inscripto", left + 8, y + 47, { width: empresaTextW, lineBreak: false })
 			doc.text("Echeverria 197 - San Francisco (Cba.)", left + 8, y + 60, { width: empresaTextW, lineBreak: false })
-			doc.text("teslamontajeselectricos@hotmail.com", left + 8, y + 73, { width: empresaTextW, lineBreak: false })
-			doc.text("www.teslamontajeselectricos.com.ar", left + 8, y + 86, { width: empresaTextW, lineBreak: false })
+			doc.text("03564-15642579/15573800/15586865", left + 8, y + 73, { width: empresaTextW, lineBreak: false })
+			doc.text("teslamontajeselectricos@hotmail.com", left + 8, y + 86, { width: empresaTextW, lineBreak: false })
+			doc.text("www.teslamontajeselectricos.com.ar", left + 8, y + 99, { width: empresaTextW, lineBreak: false })
 
 			const rightBoxX = left + blockW + blockGap
 			doc.rect(rightBoxX, y, blockW, blockH).lineWidth(0.8).strokeColor(lineColor).stroke()

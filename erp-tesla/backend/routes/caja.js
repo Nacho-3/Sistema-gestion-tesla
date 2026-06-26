@@ -10,6 +10,7 @@ const router = express.Router()
 const MEDIOS_PAGO = ["efectivo", "transferencia", "banco", "cheque", "echeq", "retencion"]
 const MEDIOS_CHEQUE = ["cheque", "echeq"]
 const CAJAS_DISPONIBLES = ["tesla", "teslita", "juani"]
+const TIPOS_MOVIMIENTO = ["ingreso", "egreso"]
 const CATEGORIAS_CAJA = ["mano_obra", "materiales", "varios"]
 const LABEL_CAJA = {
   tesla: "Caja Tesla",
@@ -32,6 +33,9 @@ const LABEL_CATEGORIA = {
 }
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const LOGO_PATH = path.join(__dirname, "..", "assets", "logo_presupuesto.png")
+
+// Función auxiliar para sanitizar texto
+const sanitizeText = (value) => String(value || "").trim()
 
 let detalleColumnCache = null
 let detallesSchemaCache = null
@@ -2018,9 +2022,10 @@ router.post("/semanas/:id/cerrar", async (req, res) => {
 
 router.get("/resumen/pdf", async (req, res) => {
   try {
-    const { fecha_inicio, fecha_fin, tipo, caja_codigo, resumen_modo, busqueda } = req.query
+    const { fecha_inicio, fecha_fin, tipo, caja_codigo, resumen_modo, busqueda, medio_pago, categoria_id } = req.query
     const cajaCodigoNormalizada = caja_codigo ? String(caja_codigo).toLowerCase() : undefined
     const modoResumen = String(resumen_modo || "general").toLowerCase()
+    const FILTRO_SIN_CATEGORIA = "__sin_categoria__"
 
     if (cajaCodigoNormalizada && !CAJAS_DISPONIBLES.includes(cajaCodigoNormalizada)) {
       return res.status(400).json({ error: "Caja inválida" })
@@ -2043,6 +2048,38 @@ router.get("/resumen/pdf", async (req, res) => {
           (mov.nombre_cliente && mov.nombre_cliente.toLowerCase().includes(palabra))
         )
       })
+    }
+
+    // Filtro por medio de pago si se envía
+    if (medio_pago && String(medio_pago).trim() !== "") {
+      const medioPagoFiltro = String(medio_pago).trim().toLowerCase()
+      movimientos = movimientos.filter(mov => {
+        if (!mov.detalles_medio_pago || mov.detalles_medio_pago.length === 0) return false
+        return mov.detalles_medio_pago.some((detalle) =>
+          String(detalle?.medio_pago || "").toLowerCase() === medioPagoFiltro
+        )
+      })
+    }
+
+    // Filtro por categoria (incluye caso especial "sin categoria")
+    if (categoria_id !== undefined && categoria_id !== null && String(categoria_id).trim() !== "") {
+      const categoriaFiltro = String(categoria_id).trim()
+
+      if (categoriaFiltro === FILTRO_SIN_CATEGORIA) {
+        movimientos = movimientos.filter((mov) => {
+          const categoriaId = Number(mov?.categoria_id || 0)
+          const tieneCategoriaId = Number.isInteger(categoriaId) && categoriaId > 0
+          const categoriaTexto = String(mov?.categoria || "").trim()
+          return !tieneCategoriaId && !categoriaTexto
+        })
+      } else {
+        const categoriaIdFiltro = Number(categoriaFiltro)
+        if (!Number.isInteger(categoriaIdFiltro) || categoriaIdFiltro <= 0) {
+          return res.status(400).json({ error: "categoria_id inválida" })
+        }
+
+        movimientos = movimientos.filter((mov) => Number(mov?.categoria_id || 0) === categoriaIdFiltro)
+      }
     }
     // Recalcular totales y balance usando solo los movimientos filtrados
     const totalIngresos = movimientos.filter(m => m.tipo === "ingreso").reduce((sum, m) => sum + Number(m.monto_total || 0), 0)
@@ -2107,8 +2144,8 @@ router.get("/resumen/pdf", async (req, res) => {
         saldo_inicial: roundMoney(saldoInicialEfectivo + saldoInicialCheques),
         saldo_inicial_efectivo: saldoInicialEfectivo,
         saldo_inicial_cheques: saldoInicialCheques,
-        total_ingresos: Number(semanaCaja?.total_ingresos || totales.totalIngresos || 0),
-        total_egresos: Number(semanaCaja?.total_egresos || totales.totalEgresos || 0),
+        total_ingresos: roundMoney(totalIngresos),
+        total_egresos: roundMoney(totalEgresos),
         saldo_final: roundMoney(saldoFinalEfectivo + saldoFinalCheques),
         saldo_final_efectivo: saldoFinalEfectivo,
         saldo_final_cheques: saldoFinalCheques,
@@ -2171,18 +2208,44 @@ router.get("/resumen/pdf", async (req, res) => {
       doc.y = y + 6
     }
 
+    const etiquetaMedioPago = {
+      "efectivo": "Efectivo",
+      "transferencia": "Transferencias",
+      "banco": "Banco",
+      "cheque": "Cheques",
+      "echeq": "E-Cheques",
+      "retencion": "Retenciones"
+    }
+
+    let etiquetaCategoriaFiltro = ""
+    if (categoria_id !== undefined && categoria_id !== null && String(categoria_id).trim() !== "") {
+      const categoriaFiltro = String(categoria_id).trim()
+
+      if (categoriaFiltro === FILTRO_SIN_CATEGORIA) {
+        etiquetaCategoriaFiltro = "Categoria: Sin categoría"
+      } else {
+        const categoriaIdFiltro = Number(categoriaFiltro)
+        if (Number.isInteger(categoriaIdFiltro) && categoriaIdFiltro > 0) {
+          const categoriaDb = await pool.query("SELECT nombre FROM categorias_caja WHERE id = $1 LIMIT 1", [categoriaIdFiltro])
+          const nombreCategoriaDb = String(categoriaDb.rows?.[0]?.nombre || "").trim()
+          etiquetaCategoriaFiltro = nombreCategoriaDb
+            ? `Categoria: ${nombreCategoriaDb}`
+            : `Categoria: ${categoriaFiltro}`
+        }
+      }
+    }
+
     const filtroPeriodo = [
       cajaCodigoNormalizada ? LABEL_CAJA[cajaCodigoNormalizada] : "Todas las cajas",
       fecha_inicio ? `Desde ${formatoFecha(fecha_inicio)}` : "",
       fecha_fin ? `Hasta ${formatoFecha(fecha_fin)}` : "",
       tipo ? `Tipo ${tipo}` : "Todos los tipos",
+      medio_pago ? `Medio ${etiquetaMedioPago[String(medio_pago).toLowerCase()] || String(medio_pago)}` : "",
+      etiquetaCategoriaFiltro,
     ].filter(Boolean).join(" - ")
     
     const headerBottom = drawPremiumHeader(doc, {
       title: "TESLA MONTAJES ELECTRICOS",
-      subtitle: esResumenSemanal
-        ? `${cajaCodigoNormalizada ? `Resumen semanal ${LABEL_CAJA[cajaCodigoNormalizada]}` : "Resumen semanal de caja"}`
-        : (cajaCodigoNormalizada ? `Resumen ${LABEL_CAJA[cajaCodigoNormalizada]}` : "Resumen completo de caja"),
       accentText: filtroPeriodo || "Sin filtros",
       logoPath: LOGO_PATH,
     })  
@@ -2427,7 +2490,6 @@ router.get("/resumen/pdf", async (req, res) => {
     const drawDetailPageHeader = () => {
       const detalleHeaderBottom = drawPremiumHeader(doc, {
         title: "TESLA MONTAJES ELECTRICOS",
-        subtitle: "Detalle de movimientos",
         accentText: filtroPeriodo || "Sin filtros",
         logoPath: LOGO_PATH,
       })
@@ -2634,6 +2696,132 @@ router.get("/:id/pdf", async (req, res) => {
   }
 })
 
+// ===================== CATEGORÍAS CAJA =====================
+
+// Obtener todas las categorías
+router.get("/categorias", async (req, res) => {
+  try {
+    const tipo = String(req.query?.tipo || "").trim().toLowerCase()
+    if (tipo && !TIPOS_MOVIMIENTO.includes(tipo)) {
+      return res.status(400).json({ error: "tipo inválido. Debe ser 'ingreso' o 'egreso'" })
+    }
+
+    const queryBase = "SELECT id, nombre, descripcion, tipo, created_at, updated_at FROM categorias_caja"
+    const result = tipo
+      ? await pool.query(`${queryBase} WHERE tipo = $1 ORDER BY nombre ASC`, [tipo])
+      : await pool.query(`${queryBase} ORDER BY tipo ASC, nombre ASC`)
+
+    res.json(result.rows || [])
+  } catch (err) {
+    console.error("Error al obtener categorías:", err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Crear categoría
+router.post("/categorias", async (req, res) => {
+  try {
+    let { nombre, descripcion, tipo } = req.body
+
+    if (!nombre || typeof nombre !== "string") {
+      return res.status(400).json({ error: "El nombre de la categoría es obligatorio y debe ser una cadena de texto." })
+    }
+
+    const tipoNormalizado = String(tipo || "").trim().toLowerCase()
+    if (!TIPOS_MOVIMIENTO.includes(tipoNormalizado)) {
+      return res.status(400).json({ error: "El tipo de la categoría es obligatorio y debe ser 'ingreso' o 'egreso'." })
+    }
+
+    nombre = sanitizeText(nombre).trim()
+
+    if (nombre.length < 3) {
+      return res.status(400).json({ error: "El nombre de la categoría debe tener al menos 3 caracteres." })
+    }
+
+    const checkResult = await pool.query("SELECT id FROM categorias_caja WHERE LOWER(nombre) = LOWER($1) AND tipo = $2", [nombre, tipoNormalizado])
+    if (checkResult.rows.length > 0) {
+      return res.status(400).json({ error: "Ya existe una categoría con ese nombre para este tipo." })
+    }
+
+    const insertResult = await pool.query(
+      "INSERT INTO categorias_caja (nombre, descripcion, tipo) VALUES ($1, $2, $3) RETURNING id, nombre, descripcion, tipo, created_at, updated_at",
+      [nombre, sanitizeText(descripcion || "").trim(), tipoNormalizado]
+    )
+
+    res.status(201).json(insertResult.rows[0])
+  } catch (err) {
+    console.error("Error al crear categoría:", err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Actualizar categoría
+router.put("/categorias/:id", async (req, res) => {
+  try {
+    const { id } = req.params
+    let { nombre, descripcion, tipo } = req.body
+
+    if (!nombre || typeof nombre !== "string") {
+      return res.status(400).json({ error: "El nombre de la categoría es obligatorio y debe ser una cadena de texto." })
+    }
+
+    const tipoNormalizado = String(tipo || "").trim().toLowerCase()
+    if (!TIPOS_MOVIMIENTO.includes(tipoNormalizado)) {
+      return res.status(400).json({ error: "El tipo de la categoría es obligatorio y debe ser 'ingreso' o 'egreso'." })
+    }
+
+    nombre = sanitizeText(nombre).trim()
+
+    if (nombre.length < 3) {
+      return res.status(400).json({ error: "El nombre de la categoría debe tener al menos 3 caracteres." })
+    }
+
+    const checkResult = await pool.query("SELECT id FROM categorias_caja WHERE LOWER(nombre) = LOWER($1) AND tipo = $2 AND id != $3", [nombre, tipoNormalizado, Number(id)])
+    if (checkResult.rows.length > 0) {
+      return res.status(400).json({ error: "Ya existe una categoría con ese nombre para este tipo." })
+    }
+
+    const updateResult = await pool.query(
+      "UPDATE categorias_caja SET nombre = $1, descripcion = $2, tipo = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $4 RETURNING id, nombre, descripcion, tipo, created_at, updated_at",
+      [nombre, sanitizeText(descripcion || "").trim(), tipoNormalizado, Number(id)]
+    )
+
+    if (updateResult.rows.length === 0) {
+      return res.status(404).json({ error: "Categoría no encontrada" })
+    }
+
+    res.json(updateResult.rows[0])
+  } catch (err) {
+    console.error("Error al actualizar categoría:", err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// Eliminar categoría
+router.delete("/categorias/:id", async (req, res) => {
+  try {
+    const { id } = req.params
+
+    const checkMovimientos = await pool.query("SELECT id FROM movimientos_caja WHERE categoria_id = $1 LIMIT 1", [Number(id)])
+    if (checkMovimientos.rows.length > 0) {
+      return res.status(400).json({ error: "No se puede eliminar la categoría porque está asociada a movimientos de caja." })
+    }
+
+    const deleteResult = await pool.query("DELETE FROM categorias_caja WHERE id = $1", [Number(id)])
+
+    if (deleteResult.rowCount === 0) {
+      return res.status(404).json({ error: "Categoría no encontrada" })
+    }
+
+    res.status(204).send()
+  } catch (err) {
+    console.error("Error al eliminar categoría:", err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// ===================== MOVIMIENTOS =====================
+
 // Obtener movimiento por ID
 router.get("/:id", async (req, res) => {
   try {
@@ -2689,6 +2877,7 @@ router.post("/", async (req, res) => {
       desglose,
       detalles_medio_pago,
       categoria,
+      categoria_id,
       con_iva,
       cliente_id,
       presupuesto_id,
@@ -2707,6 +2896,24 @@ router.post("/", async (req, res) => {
     const tipoNormalizado = String(tipo || "").toLowerCase()
     const destinatarioNormalizado = String(destinatario || "").trim()
     const observacionesNormalizadas = String(observaciones || "").trim()
+    const categoriaIdNormalizada = (categoria_id === undefined || categoria_id === null || categoria_id === "")
+      ? null
+      : Number(categoria_id)
+
+    if (categoriaIdNormalizada !== null && (!Number.isInteger(categoriaIdNormalizada) || categoriaIdNormalizada <= 0)) {
+      return res.status(400).json({ error: "categoria_id inválida" })
+    }
+
+    if (categoriaIdNormalizada !== null) {
+      const categoriaResult = await pool.query("SELECT id, tipo FROM categorias_caja WHERE id = $1", [categoriaIdNormalizada])
+      if (categoriaResult.rows.length === 0) {
+        return res.status(400).json({ error: "La categoría seleccionada no existe" })
+      }
+      const tipoCategoria = String(categoriaResult.rows[0]?.tipo || "").trim().toLowerCase()
+      if (tipoCategoria && tipoCategoria !== tipoNormalizado) {
+        return res.status(400).json({ error: "La categoría seleccionada no corresponde al tipo de movimiento" })
+      }
+    }
 
     // Validaciones
     if (!fecha || !cajaCodigoNormalizada || !tipoNormalizado || !detalle || !monto_total) {
@@ -2717,12 +2924,8 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Caja inválida. Debe ser tesla, teslita o juani" })
     }
 
-    if (!["ingreso", "egreso"].includes(tipoNormalizado)) {
+    if (!TIPOS_MOVIMIENTO.includes(tipoNormalizado)) {
       return res.status(400).json({ error: "Tipo debe ser 'ingreso' o 'egreso'" })
-    }
-
-    if (tipoNormalizado === "ingreso" && !categoria) {
-      return res.status(400).json({ error: "La categoría es obligatoria para ingresos" })
     }
 
     if (tipoNormalizado === "egreso" && !destinatarioNormalizado) {
@@ -2797,6 +3000,7 @@ router.post("/", async (req, res) => {
           observaciones: observacionesNormalizadas || null,
           monto_total: parseFloat(monto_total),
           categoria: tipoNormalizado === "ingreso" ? (categoria || null) : null,
+          categoria_id: categoriaIdNormalizada,
           con_iva: normalizarBoolean(con_iva, true),
           destinatario: tipoNormalizado === "egreso" ? destinatarioNormalizado : null,
           cliente_id: cliente_id || null,
@@ -2939,6 +3143,7 @@ router.put("/:id", async (req, res) => {
       desglose,
       detalles_medio_pago,
       categoria,
+      categoria_id,
       con_iva,
       cliente_id,
       presupuesto_id,
@@ -2957,6 +3162,9 @@ router.put("/:id", async (req, res) => {
     const tipoNormalizado = tipo !== undefined ? String(tipo || "").toLowerCase() : undefined
     const destinatarioNormalizado = destinatario !== undefined ? String(destinatario || "").trim() : undefined
     const observacionesNormalizadas = observaciones !== undefined ? String(observaciones || "").trim() : undefined
+    const categoriaIdNormalizada = (categoria_id === undefined)
+      ? undefined
+      : ((categoria_id === null || categoria_id === "") ? null : Number(categoria_id))
 
     const { data: movimientoActual } = await db
       .from("movimientos_caja")
@@ -2971,7 +3179,7 @@ router.put("/:id", async (req, res) => {
     const tipoFinal = tipoNormalizado || String(movimientoActual.tipo || "").toLowerCase()
 
     // Validaciones básicas
-    if (tipoNormalizado && !["ingreso", "egreso"].includes(tipoNormalizado)) {
+    if (tipoNormalizado && !TIPOS_MOVIMIENTO.includes(tipoNormalizado)) {
       return res.status(400).json({ error: "Tipo debe ser 'ingreso' o 'egreso'" })
     }
 
@@ -2983,8 +3191,19 @@ router.put("/:id", async (req, res) => {
       return res.status(400).json({ error: "Monto total debe ser mayor a 0" })
     }
 
-    if (tipoFinal === "ingreso" && categoria !== undefined && !categoria) {
-      return res.status(400).json({ error: "La categoría es obligatoria para ingresos" })
+    if (categoriaIdNormalizada !== undefined && categoriaIdNormalizada !== null && (!Number.isInteger(categoriaIdNormalizada) || categoriaIdNormalizada <= 0)) {
+      return res.status(400).json({ error: "categoria_id inválida" })
+    }
+
+    if (categoriaIdNormalizada !== undefined && categoriaIdNormalizada !== null) {
+      const categoriaResult = await pool.query("SELECT id, tipo FROM categorias_caja WHERE id = $1", [categoriaIdNormalizada])
+      if (categoriaResult.rows.length === 0) {
+        return res.status(400).json({ error: "La categoría seleccionada no existe" })
+      }
+      const tipoCategoria = String(categoriaResult.rows[0]?.tipo || "").trim().toLowerCase()
+      if (tipoCategoria && tipoCategoria !== tipoFinal) {
+        return res.status(400).json({ error: "La categoría seleccionada no corresponde al tipo de movimiento" })
+      }
     }
 
     if (tipoFinal === "egreso" && destinatario !== undefined && !destinatarioNormalizado) {
@@ -3037,6 +3256,7 @@ router.put("/:id", async (req, res) => {
     if (observaciones !== undefined) actualizaciones.observaciones = observacionesNormalizadas || null
     if (monto_total !== undefined) actualizaciones.monto_total = monto_total
     if (categoria !== undefined) actualizaciones.categoria = tipoFinal === "ingreso" ? (categoria || null) : null
+    if (categoria_id !== undefined) actualizaciones.categoria_id = categoriaIdNormalizada
     if (con_iva !== undefined) actualizaciones.con_iva = normalizarBoolean(con_iva, true)
     if (destinatario !== undefined) actualizaciones.destinatario = tipoFinal === "egreso" ? destinatarioNormalizado : null
     if (cliente_id !== undefined) actualizaciones.cliente_id = cliente_id || null
@@ -3432,6 +3652,19 @@ router.delete("/:id", async (req, res) => {
 
     if (errorMovimientoActual || !movimientoActual) {
       return res.status(404).json({ error: "Movimiento no encontrado" })
+    }
+
+    // Verificar si existe un recibo generado para este movimiento
+    if (String(movimientoActual.tipo || "") === "ingreso") {
+      const recibo = await db.query(
+        `SELECT id FROM recibos_caja WHERE movimiento_caja_id = $1`,
+        [id]
+      )
+      if (recibo.rows && recibo.rows.length > 0) {
+        return res.status(400).json({ 
+          error: "No se puede eliminar este movimiento porque tiene un recibo generado. Primero anula y elimina el recibo." 
+        })
+      }
     }
 
     const client = await pool.connect()
