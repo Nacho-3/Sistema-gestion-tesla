@@ -170,6 +170,7 @@ const form = ref({
   },
   cheques: [],
   usar_cheques_libro: false,
+  usar_echeqs_libro: false,
   cheques_salida: [],
   fecha_salida_cheques: new Date().toISOString().split('T')[0],
   endosado_a_cheques: ""
@@ -474,7 +475,8 @@ const subtitleCaja = computed(() => {
 
 const esIngreso = computed(() => form.value.tipo === "ingreso")
 const esEgreso = computed(() => form.value.tipo === "egreso")
-const chequesBloqueadosPorLibro = computed(() => esEgreso.value && Boolean(form.value.usar_cheques_libro))
+const usaLibroCualquiera = computed(() => esEgreso.value && (Boolean(form.value.usar_cheques_libro) || Boolean(form.value.usar_echeqs_libro)))
+const chequesBloqueadosPorLibro = computed(() => usaLibroCualquiera.value)
 
 const chequesCargados = computed(() => {
   return (form.value.cheques || []).filter((item) => {
@@ -488,7 +490,7 @@ const libroChequesFiltrado = computed(() => {
   const termino = String(filtroBusquedaLibroCheques.value || "").trim().toLowerCase()
 
   return (libroCheques.value || []).filter((item) => {
-    if (String(item?.medio_pago || "").toLowerCase() !== "cheque") return false
+    if (!["cheque", "echeq"].includes(String(item?.medio_pago || "").toLowerCase())) return false
     if (!termino) return true
     return [item.numero_cheque, item.banco, item.librador_endosante, item.endosado_a]
       .some((v) => String(v || "").toLowerCase().includes(termino))
@@ -529,19 +531,25 @@ const capitalizarInicial = (value) => {
   return texto.charAt(0).toUpperCase() + texto.slice(1)
 }
 
-const chequesDisponiblesOrdenados = computed(() => {
-  return [...(chequesDisponibles.value || [])].sort((a, b) => {
-    const fechaA = String(a?.fecha_cheque || "")
-    const fechaB = String(b?.fecha_cheque || "")
-    if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
-
-    const bancoA = String(a?.banco || "")
-    const bancoB = String(b?.banco || "")
-    if (bancoA !== bancoB) return bancoA.localeCompare(bancoB)
-
-    return String(a?.numero_cheque || "").localeCompare(String(b?.numero_cheque || ""))
-  })
+const sortCheques = (arr) => [...(arr || [])].sort((a, b) => {
+  const fechaA = String(a?.fecha_cheque || "")
+  const fechaB = String(b?.fecha_cheque || "")
+  if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
+  const bancoA = String(a?.banco || "")
+  const bancoB = String(b?.banco || "")
+  if (bancoA !== bancoB) return bancoA.localeCompare(bancoB)
+  return String(a?.numero_cheque || "").localeCompare(String(b?.numero_cheque || ""))
 })
+
+const chequesDisponiblesOrdenados = computed(() => sortCheques(chequesDisponibles.value))
+
+const chequesDisponiblesLibroFisicos = computed(() =>
+  sortCheques((chequesDisponibles.value || []).filter((item) => String(item?.medio_pago || "").toLowerCase() === "cheque"))
+)
+
+const chequesDisponiblesLibroEcheqs = computed(() =>
+  sortCheques((chequesDisponibles.value || []).filter((item) => String(item?.medio_pago || "").toLowerCase() === "echeq"))
+)
 
 const esFormularioValido = computed(() => {
   if (!form.value.fecha || !form.value.caja_codigo || !form.value.detalle || !form.value.monto_total || form.value.monto_total <= 0) {
@@ -580,7 +588,7 @@ const esFormularioValido = computed(() => {
   })
   if (!chequesValidos) return false
 
-  if (form.value.tipo === "egreso" && form.value.usar_cheques_libro) {
+  if (form.value.tipo === "egreso" && usaLibroCualquiera.value) {
     if (!Array.isArray(form.value.cheques_salida) || form.value.cheques_salida.length === 0) return false
     if (!String(form.value.endosado_a_cheques || "").trim()) return false
   }
@@ -750,7 +758,7 @@ const asignacionesDraftValidas = computed(() => {
 })
 
 const chequesTransferibles = computed(() => {
-  return (libroChequesDisponibles.value || []).filter((item) => String(item?.medio_pago || "").toLowerCase() === "cheque")
+  return (libroChequesDisponibles.value || []).filter((item) => ["cheque", "echeq"].includes(String(item?.medio_pago || "").toLowerCase()))
 })
 
 const totalTransferenciaCheques = computed(() => {
@@ -1436,6 +1444,7 @@ const crearFormularioVacio = () => ({
   },
   cheques: [],
   usar_cheques_libro: false,
+  usar_echeqs_libro: false,
   cheques_salida: [],
   fecha_salida_cheques: semanaActiva.value?.fecha_inicio || new Date().toISOString().split('T')[0],
   endosado_a_cheques: ""
@@ -1823,7 +1832,10 @@ const abrirEdicion = async (movimiento) => {
       monto_total: parseFloat(movimientoCompleto.monto_total) || 0,
       desglose: normalizarDesglose(movimientoCompleto.detalles_medio_pago || []),
       cheques: chequesMovimiento,
-      usar_cheques_libro: movimientoCompleto.tipo === "egreso" && chequesSalidaIds.length > 0,
+      usar_cheques_libro: movimientoCompleto.tipo === "egreso" && chequesSalidaIds.length > 0
+        && (movimientoCompleto.cheques_salida_detalle || []).some((c) => String(c?.medio_pago || "").toLowerCase() === "cheque"),
+      usar_echeqs_libro: movimientoCompleto.tipo === "egreso" && chequesSalidaIds.length > 0
+        && (movimientoCompleto.cheques_salida_detalle || []).some((c) => String(c?.medio_pago || "").toLowerCase() === "echeq"),
       cheques_salida: chequesSalidaIds,
       fecha_salida_cheques: String(movimientoCompleto.fecha_salida_cheques || movimientoCompleto.fecha || "").split("T")[0] || new Date().toISOString().split('T')[0],
       endosado_a_cheques: String(movimientoCompleto.endosado_a_cheques || movimientoCompleto.destinatario || "").trim(),
@@ -1886,13 +1898,13 @@ const payloadMovimiento = () => ({
       libro_cheque_id: Number(item.libro_cheque_id || 0) || null,
       endosado_a: form.value.tipo === "egreso" ? String(form.value.endosado_a_cheques || form.value.destinatario || "").trim() : null,
     })),
-  cheques_salida: form.value.tipo === "egreso" && form.value.usar_cheques_libro
+  cheques_salida: form.value.tipo === "egreso" && usaLibroCualquiera.value
     ? (form.value.cheques_salida || []).map((id) => ({ libro_cheque_id: Number(id) }))
     : [],
-  fecha_salida_cheques: form.value.tipo === "egreso" && form.value.usar_cheques_libro
+  fecha_salida_cheques: form.value.tipo === "egreso" && usaLibroCualquiera.value
     ? (form.value.fecha_salida_cheques || form.value.fecha)
     : null,
-  endosado_a_cheques: form.value.tipo === "egreso" && form.value.usar_cheques_libro
+  endosado_a_cheques: form.value.tipo === "egreso" && usaLibroCualquiera.value
     ? String(form.value.endosado_a_cheques || form.value.destinatario || "").trim()
     : null,
 })
@@ -1919,8 +1931,21 @@ const cargarLibroCheques = async () => {
 
 const cargarChequesDisponibles = async () => {
   try {
-    const fechaFormulario = String(form.value?.fecha || "").split("T")[0]
     const cajaConsulta = String((showForm.value ? form.value?.caja_codigo : filtroCaja.value) || filtroCaja.value || "tesla").toLowerCase()
+
+    // Para el formulario de egreso: mostrar todos los disponibles de la caja sin restricción de semana.
+    // El filtro por semana solo aplica al libro de cheques y al control semanal.
+    if (showForm.value && form.value.tipo === "egreso") {
+      const res = await api.getChequesDisponiblesCaja(cajaConsulta, null, null)
+      chequesDisponibles.value = (res.data || []).map((item) => ({
+        ...item,
+        librador_endosante: capitalizarInicial(item.librador_endosante),
+        banco: capitalizarInicial(item.banco),
+      }))
+      return
+    }
+
+    const fechaFormulario = String(form.value?.fecha || "").split("T")[0]
     const semanaDesdeFecha = fechaFormulario
       ? (semanasCajaVisibles.value || []).find((semana) => {
         const inicio = String(semana?.fecha_inicio || "")
@@ -1950,7 +1975,7 @@ const cargarChequesDisponibles = async () => {
 }
 
 const sincronizarChequesSalidaSeleccionados = () => {
-  if (!(form.value.tipo === "egreso" && form.value.usar_cheques_libro)) return
+  if (!(form.value.tipo === "egreso" && usaLibroCualquiera.value)) return
 
   const idsSeleccionados = new Set((form.value.cheques_salida || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0))
   const seleccionadosDisponibles = [...idsSeleccionados]
@@ -2328,12 +2353,12 @@ watch(() => semanaActiva.value?.id, () => {
 })
 
 watch(() => form.value.fecha, () => {
-  if (!(showForm.value && form.value.tipo === "egreso" && form.value.usar_cheques_libro)) return
+  if (!(showForm.value && form.value.tipo === "egreso" && usaLibroCualquiera.value)) return
   cargarChequesDisponibles()
 })
 
 watch(() => form.value.caja_codigo, () => {
-  if (!(showForm.value && form.value.tipo === "egreso" && form.value.usar_cheques_libro)) return
+  if (!(showForm.value && form.value.tipo === "egreso" && usaLibroCualquiera.value)) return
   cargarChequesDisponibles()
 })
 
@@ -2353,6 +2378,7 @@ watch(() => form.value.tipo, (tipo) => {
 
   form.value.destinatario = ""
   form.value.usar_cheques_libro = false
+  form.value.usar_echeqs_libro = false
   form.value.cheques_salida = []
   form.value.endosado_a_cheques = ""
 })
@@ -2375,13 +2401,28 @@ watch(() => form.value.usar_cheques_libro, (usar) => {
   if (form.value.tipo !== "egreso") return
   if (usar) {
     cargarChequesDisponibles()
-    // Mantener cheques vinculados al libro durante edicion para no perder seleccion previa.
     form.value.cheques = (form.value.cheques || []).filter((item) => {
       const id = Number(item?.libro_cheque_id || 0)
       return Number.isInteger(id) && id > 0
     })
     sincronizarChequesSalidaSeleccionados()
-  } else {
+  } else if (!form.value.usar_echeqs_libro) {
+    form.value.cheques_salida = []
+    form.value.endosado_a_cheques = ""
+    form.value.fecha_salida_cheques = form.value.fecha
+  }
+})
+
+watch(() => form.value.usar_echeqs_libro, (usar) => {
+  if (form.value.tipo !== "egreso") return
+  if (usar) {
+    cargarChequesDisponibles()
+    form.value.cheques = (form.value.cheques || []).filter((item) => {
+      const id = Number(item?.libro_cheque_id || 0)
+      return Number.isInteger(id) && id > 0
+    })
+    sincronizarChequesSalidaSeleccionados()
+  } else if (!form.value.usar_cheques_libro) {
     form.value.cheques_salida = []
     form.value.endosado_a_cheques = ""
     form.value.fecha_salida_cheques = form.value.fecha
@@ -3597,12 +3638,18 @@ onUnmounted(() => {
 
               <div class="cheques-intro" :class="{ 'cheques-intro-egreso': esEgreso }">
                 <div v-if="esEgreso" class="cheques-libro-egreso">
-                  <label class="check-inline">
-                    <input v-model="form.usar_cheques_libro" type="checkbox" />
-                    <span>Usar cheques disponibles del libro</span>
-                  </label>
+                  <div class="cheques-libro-opciones">
+                    <label class="check-inline">
+                      <input v-model="form.usar_cheques_libro" type="checkbox" />
+                      <span>Usar cheques del libro</span>
+                    </label>
+                    <label class="check-inline">
+                      <input v-model="form.usar_echeqs_libro" type="checkbox" />
+                      <span>Usar eCheqs del libro</span>
+                    </label>
+                  </div>
 
-                  <div v-if="form.usar_cheques_libro" class="cheques-libro-egreso-grid">
+                  <div v-if="usaLibroCualquiera" class="cheques-libro-egreso-grid">
                     <label class="form-group form-card-field">
                       <span>Fecha salida *</span>
                       <input v-model="form.fecha_salida_cheques" type="date" required />
@@ -3614,8 +3661,12 @@ onUnmounted(() => {
                   </div>
 
                   <div v-if="form.usar_cheques_libro" class="cheques-libro-lista">
+                    <div class="cheques-libro-subtitulo">
+                      <span class="section-kicker">Cheques físicos</span>
+                      <span class="cheques-libro-count">{{ chequesDisponiblesLibroFisicos.length }} disponible(s)</span>
+                    </div>
                     <label
-                      v-for="item in chequesDisponiblesOrdenados"
+                      v-for="item in chequesDisponiblesLibroFisicos"
                       :key="item.id"
                       class="cheque-disponible-item"
                     >
@@ -3628,8 +3679,32 @@ onUnmounted(() => {
                         {{ capitalizarInicial(item.banco) || '-' }} · {{ capitalizarInicial(item.librador_endosante) || '-' }} · F. cheque {{ formatearFechaLibro(item.fecha_cheque) }}
                       </span>
                     </label>
-                    <p v-if="!chequesDisponibles.length" class="cheques-libro-empty">
-                      No hay cheques disponibles para esta caja.
+                    <p v-if="!chequesDisponiblesLibroFisicos.length" class="cheques-libro-empty">
+                      No hay cheques físicos disponibles para esta caja.
+                    </p>
+                  </div>
+
+                  <div v-if="form.usar_echeqs_libro" class="cheques-libro-lista">
+                    <div class="cheques-libro-subtitulo">
+                      <span class="section-kicker">eCheqs</span>
+                      <span class="cheques-libro-count">{{ chequesDisponiblesLibroEcheqs.length }} disponible(s)</span>
+                    </div>
+                    <label
+                      v-for="item in chequesDisponiblesLibroEcheqs"
+                      :key="item.id"
+                      class="cheque-disponible-item"
+                    >
+                      <input v-model="form.cheques_salida" :value="item.id" type="checkbox" class="cheque-disponible-check" />
+                      <span class="cheque-disponible-main">
+                        <strong>#{{ item.numero_cheque || '-' }}</strong>
+                        <em>{{ formatoMoneda(item.importe || 0) }}</em>
+                      </span>
+                      <span class="cheque-disponible-meta">
+                        {{ capitalizarInicial(item.banco) || '-' }} · {{ capitalizarInicial(item.librador_endosante) || '-' }} · F. eCheq {{ formatearFechaLibro(item.fecha_cheque) }}
+                      </span>
+                    </label>
+                    <p v-if="!chequesDisponiblesLibroEcheqs.length" class="cheques-libro-empty">
+                      No hay eCheqs disponibles para esta caja.
                     </p>
                   </div>
                 </div>
@@ -6044,6 +6119,29 @@ onUnmounted(() => {
 
 .cheques-intro-egreso .cheques-libro-egreso {
   width: 100%;
+}
+
+.cheques-libro-opciones {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.cheques-libro-subtitulo {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.6rem;
+  background: rgba(30, 41, 59, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.cheques-libro-count {
+  color: #94a3b8;
+  font-size: 0.8rem;
 }
 
 .cheques-intro-copy {
