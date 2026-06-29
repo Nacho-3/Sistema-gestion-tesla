@@ -209,6 +209,26 @@ async function ensureMovimientosCajaRulesSchema() {
             AND NULLIF(BTRIM(COALESCE(destinatario, '')), '') IS NOT NULL
           )
         );
+
+      IF EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'chk_movimientos_monto_total_positivo'
+          AND conrelid = 'movimientos_caja'::regclass
+      ) THEN
+        ALTER TABLE movimientos_caja DROP CONSTRAINT chk_movimientos_monto_total_positivo;
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'chk_movimientos_monto_total_no_negativo'
+          AND conrelid = 'movimientos_caja'::regclass
+      ) THEN
+        ALTER TABLE movimientos_caja
+          ADD CONSTRAINT chk_movimientos_monto_total_no_negativo
+          CHECK (monto_total >= 0);
+      END IF;
     END $$;
   `)
 
@@ -275,7 +295,7 @@ const validarCamposChequeIngreso = (item = {}) => {
 }
 
 async function crearChequesLibroDesdeIngreso({ client, movimientoId, cajaCodigo, fechaMovimiento, detallesPago = [] }) {
-  const chequesIngreso = detallesPago.filter((item) => String(item?.medio_pago || "").toLowerCase() === "cheque")
+  const chequesIngreso = detallesPago.filter((item) => ["cheque", "echeq"].includes(String(item?.medio_pago || "").toLowerCase()))
   if (!chequesIngreso.length) return
 
   const existentes = await client.query(
@@ -308,23 +328,37 @@ async function crearChequesLibroDesdeIngreso({ client, movimientoId, cajaCodigo,
   })
 
   for (const fila of filas) {
-    const duplicado = await client.query(
-      `
-        SELECT id
-        FROM libro_cheques_caja
-        WHERE caja_codigo = $1
-          AND LOWER(COALESCE(numero_cheque, '')) = LOWER($2)
-          AND LOWER(COALESCE(banco, '')) = LOWER($3)
-          AND fecha_cheque = $4
-          AND importe = $5
-          AND estado <> 'anulado'
-        LIMIT 1
-      `,
-      [fila.caja_codigo, fila.numero_cheque, fila.banco, fila.fecha_cheque, fila.importe]
-    )
+    const duplicadoQ = fila.fecha_cheque
+      ? await client.query(
+          `
+            SELECT id
+            FROM libro_cheques_caja
+            WHERE caja_codigo = $1
+              AND LOWER(COALESCE(numero_cheque, '')) = LOWER($2)
+              AND LOWER(COALESCE(banco, '')) = LOWER($3)
+              AND fecha_cheque = $4
+              AND importe = $5
+              AND estado <> 'anulado'
+            LIMIT 1
+          `,
+          [fila.caja_codigo, fila.numero_cheque, fila.banco, fila.fecha_cheque, fila.importe]
+        )
+      : await client.query(
+          `
+            SELECT id
+            FROM libro_cheques_caja
+            WHERE caja_codigo = $1
+              AND LOWER(COALESCE(numero_cheque, '')) = LOWER($2)
+              AND fecha_cheque IS NULL
+              AND importe = $3
+              AND estado <> 'anulado'
+            LIMIT 1
+          `,
+          [fila.caja_codigo, fila.numero_cheque, fila.importe]
+        )
 
-    if (duplicado.rowCount > 0) {
-      throw new Error(`Cheque duplicado detectado (${fila.numero_cheque}) en libro de cheques`)
+    if (duplicadoQ.rowCount > 0) {
+      throw new Error(`Cheque/eCheq duplicado detectado (${fila.numero_cheque}) en libro de cheques`)
     }
 
     const values = [
@@ -593,7 +627,7 @@ async function obtenerChequesDisponiblesAlCierreSemana({ cajaCodigo, fechaFin })
       SELECT l.*
       FROM libro_cheques_caja l
       WHERE l.caja_codigo = $1
-        AND l.medio_pago = 'cheque'
+        AND l.medio_pago IN ('cheque', 'echeq')
         AND LOWER(COALESCE(l.estado, '')) <> 'anulado'
         AND l.fecha_entrada <= $2
         AND (l.fecha_salida IS NULL OR l.fecha_salida > $2)
@@ -660,7 +694,7 @@ async function obtenerChequesDisponiblesSemana({ cajaCodigo, cajaSemanalId, fech
       WHERE m.caja_semanal_id = $1
         AND m.caja_codigo = $2
         AND LOWER(COALESCE(l.estado, '')) = 'disponible'
-        AND l.medio_pago = 'cheque'
+        AND l.medio_pago IN ('cheque', 'echeq')
       ORDER BY l.fecha_cheque DESC NULLS LAST, l.id ASC
     `,
     [semanaId, cajaCodigo]
@@ -1532,7 +1566,7 @@ router.get("/libro-cheques", async (req, res) => {
     }
 
     const params = [cajaCodigo]
-    const where = ["l.caja_codigo = $1", "l.medio_pago = 'cheque'"]
+    const where = ["l.caja_codigo = $1", "l.medio_pago IN ('cheque', 'echeq')"]
 
     if (estado) {
       if (!ESTADOS_LIBRO_CHEQUES.includes(estado)) {
@@ -1609,7 +1643,7 @@ router.get("/libro-cheques", async (req, res) => {
           JOIN movimientos_caja m ON m.id = l.movimiento_entrada_id
           WHERE m.caja_semanal_id = $1
             AND m.caja_codigo = $2
-            AND l.medio_pago = 'cheque'
+            AND l.medio_pago IN ('cheque', 'echeq')
         `,
         [Number(semana.id), cajaCodigo]
       )
@@ -1727,7 +1761,7 @@ router.get("/libro-cheques/disponibles", async (req, res) => {
       SELECT *
       FROM libro_cheques_caja
       WHERE caja_codigo = $1
-        AND medio_pago = 'cheque'
+        AND medio_pago IN ('cheque', 'echeq')
         AND estado = 'disponible'
       ORDER BY fecha_cheque DESC, id ASC
       `,
@@ -1761,7 +1795,7 @@ router.get("/libro-cheques/pdf", async (req, res) => {
     }
 
     const params = [cajaCodigo]
-    const where = ["l.caja_codigo = $1", "l.medio_pago = 'cheque'"]
+    const where = ["l.caja_codigo = $1", "l.medio_pago IN ('cheque', 'echeq')"]
 
     if (busqueda) {
       params.push(`%${busqueda}%`)
@@ -1821,7 +1855,7 @@ router.get("/libro-cheques/pdf", async (req, res) => {
             JOIN movimientos_caja m ON m.id = l.movimiento_entrada_id
             WHERE m.caja_semanal_id = $1
               AND m.caja_codigo = $2
-              AND l.medio_pago = 'cheque'
+              AND l.medio_pago IN ('cheque', 'echeq')
           `,
           [Number(semana.id), cajaCodigo]
         )
@@ -2319,11 +2353,6 @@ router.post("/semanas/:id/control-inicial", async (req, res) => {
     const chequesSeleccionados = ids.map((id) => mapCandidatos.get(id))
     const totalCheques = roundMoney(chequesSeleccionados.reduce((acc, item) => acc + Number(item?.importe || 0), 0))
     const montoTotal = roundMoney(efectivoInicial + totalCheques)
-
-    if (montoTotal <= 0) {
-      await client.query("ROLLBACK")
-      return res.status(400).json({ error: "Debe informar efectivo o seleccionar cheques para el control semanal" })
-    }
 
     const fechaControl = normalizarFechaISO(req.body?.fecha_control || semana.fecha_inicio) || semana.fecha_inicio
     const detalle = String(req.body?.detalle || "Control semanal inicial de caja").trim() || "Control semanal inicial de caja"
@@ -3786,11 +3815,6 @@ router.put("/:id", async (req, res) => {
         const chequesSeleccionados = idsControl.map((chequeId) => mapCandidatos.get(chequeId)).filter(Boolean)
         const totalCheques = roundMoney(chequesSeleccionados.reduce((acc, item) => acc + Number(item?.importe || 0), 0))
         const montoControl = roundMoney(efectivoInicial + totalCheques)
-
-        if (montoControl <= 0) {
-          await client.query("ROLLBACK")
-          return res.status(400).json({ error: "Debe informar efectivo o seleccionar cheques para el control semanal" })
-        }
 
         const fechaControl = normalizarFechaISO(fecha || movimientoActual.fecha || semana.fecha_inicio) || semana.fecha_inicio
         const detalleControl = String(detalle ?? movimientoActual?.[detalleColumn] ?? "Control semanal inicial de caja").trim() || "Control semanal inicial de caja"

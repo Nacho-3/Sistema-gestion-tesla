@@ -1238,14 +1238,23 @@ END $$;
 
 DO $$
 BEGIN
-  IF NOT EXISTS (
+  IF EXISTS (
     SELECT 1 FROM pg_constraint
     WHERE conname = 'chk_movimientos_monto_total_positivo'
       AND conrelid = 'movimientos_caja'::regclass
   ) THEN
     ALTER TABLE movimientos_caja
-      ADD CONSTRAINT chk_movimientos_monto_total_positivo
-      CHECK (monto_total > 0);
+      DROP CONSTRAINT chk_movimientos_monto_total_positivo;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'chk_movimientos_monto_total_no_negativo'
+      AND conrelid = 'movimientos_caja'::regclass
+  ) THEN
+    ALTER TABLE movimientos_caja
+      ADD CONSTRAINT chk_movimientos_monto_total_no_negativo
+      CHECK (monto_total >= 0);
   END IF;
 END $$;
 
