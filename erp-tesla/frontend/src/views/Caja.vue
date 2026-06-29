@@ -1635,11 +1635,6 @@ const guardarControlSemanal = async () => {
     .map((valor) => Number(valor))
     .filter((valor) => Number.isInteger(valor) && valor > 0)
 
-  if (efectivo <= 0 && ids.length === 0) {
-    error.value = "Debes informar efectivo o seleccionar cheques para el control semanal"
-    return
-  }
-
   try {
     guardandoControlSemanal.value = true
     await api.registrarControlSemanal(semanaId, {

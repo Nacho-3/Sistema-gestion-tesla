@@ -209,6 +209,26 @@ async function ensureMovimientosCajaRulesSchema() {
             AND NULLIF(BTRIM(COALESCE(destinatario, '')), '') IS NOT NULL
           )
         );
+
+      IF EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'chk_movimientos_monto_total_positivo'
+          AND conrelid = 'movimientos_caja'::regclass
+      ) THEN
+        ALTER TABLE movimientos_caja DROP CONSTRAINT chk_movimientos_monto_total_positivo;
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'chk_movimientos_monto_total_no_negativo'
+          AND conrelid = 'movimientos_caja'::regclass
+      ) THEN
+        ALTER TABLE movimientos_caja
+          ADD CONSTRAINT chk_movimientos_monto_total_no_negativo
+          CHECK (monto_total >= 0);
+      END IF;
     END $$;
   `)
 
@@ -2320,11 +2340,6 @@ router.post("/semanas/:id/control-inicial", async (req, res) => {
     const totalCheques = roundMoney(chequesSeleccionados.reduce((acc, item) => acc + Number(item?.importe || 0), 0))
     const montoTotal = roundMoney(efectivoInicial + totalCheques)
 
-    if (montoTotal <= 0) {
-      await client.query("ROLLBACK")
-      return res.status(400).json({ error: "Debe informar efectivo o seleccionar cheques para el control semanal" })
-    }
-
     const fechaControl = normalizarFechaISO(req.body?.fecha_control || semana.fecha_inicio) || semana.fecha_inicio
     const detalle = String(req.body?.detalle || "Control semanal inicial de caja").trim() || "Control semanal inicial de caja"
     const observaciones = String(req.body?.observaciones || "").trim() || null
@@ -3786,11 +3801,6 @@ router.put("/:id", async (req, res) => {
         const chequesSeleccionados = idsControl.map((chequeId) => mapCandidatos.get(chequeId)).filter(Boolean)
         const totalCheques = roundMoney(chequesSeleccionados.reduce((acc, item) => acc + Number(item?.importe || 0), 0))
         const montoControl = roundMoney(efectivoInicial + totalCheques)
-
-        if (montoControl <= 0) {
-          await client.query("ROLLBACK")
-          return res.status(400).json({ error: "Debe informar efectivo o seleccionar cheques para el control semanal" })
-        }
 
         const fechaControl = normalizarFechaISO(fecha || movimientoActual.fecha || semana.fecha_inicio) || semana.fecha_inicio
         const detalleControl = String(detalle ?? movimientoActual?.[detalleColumn] ?? "Control semanal inicial de caja").trim() || "Control semanal inicial de caja"
