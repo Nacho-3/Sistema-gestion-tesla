@@ -422,6 +422,8 @@ CREATE TABLE IF NOT EXISTS cajas_semanales (
   total_ingresos NUMERIC(12,2) NOT NULL DEFAULT 0,
   total_egresos NUMERIC(12,2) NOT NULL DEFAULT 0,
   saldo_final NUMERIC(12,2) NOT NULL DEFAULT 0,
+  control_inicial_realizado BOOLEAN NOT NULL DEFAULT FALSE,
+  control_inicial_movimiento_id INTEGER,
   saldo_banco NUMERIC(12,2),
   saldo_pendiente_echeq NUMERIC(12,2),
   saldo_echeq_depositados NUMERIC(12,2),
@@ -437,6 +439,7 @@ CREATE TABLE IF NOT EXISTS movimientos_caja (
   fecha DATE NOT NULL,
   caja_codigo VARCHAR(20) NOT NULL DEFAULT 'tesla' CONSTRAINT chk_movimientos_caja_codigo CHECK (caja_codigo IN ('tesla', 'teslita', 'juani')),
   tipo VARCHAR(20) NOT NULL CHECK (tipo IN ('ingreso', 'egreso')),
+  es_control_semanal BOOLEAN NOT NULL DEFAULT FALSE,
   detalle TEXT NOT NULL,
   observaciones TEXT,
   categoria VARCHAR(20) CONSTRAINT chk_movimientos_categoria CHECK (categoria IS NULL OR categoria IN ('mano_obra', 'materiales', 'varios')),
@@ -750,6 +753,32 @@ ALTER TABLE certificados ADD COLUMN IF NOT EXISTS total_cert_con_iva NUMERIC(12,
 ALTER TABLE certificados ADD COLUMN IF NOT EXISTS acumulado_certificado NUMERIC(12,2) NOT NULL DEFAULT 0;
 ALTER TABLE certificados ADD COLUMN IF NOT EXISTS observaciones TEXT DEFAULT '';
 ALTER TABLE movimientos_caja ADD COLUMN IF NOT EXISTS categoria_id INTEGER REFERENCES categorias_caja(id) ON DELETE SET NULL;
+ALTER TABLE movimientos_caja ADD COLUMN IF NOT EXISTS es_control_semanal BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE cajas_semanales ADD COLUMN IF NOT EXISTS control_inicial_realizado BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE cajas_semanales ADD COLUMN IF NOT EXISTS control_inicial_movimiento_id INTEGER;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'fk_cajas_semanales_control_inicial_movimiento'
+      AND conrelid = 'cajas_semanales'::regclass
+  ) THEN
+    ALTER TABLE cajas_semanales
+      ADD CONSTRAINT fk_cajas_semanales_control_inicial_movimiento
+      FOREIGN KEY (control_inicial_movimiento_id)
+      REFERENCES movimientos_caja(id)
+      ON DELETE SET NULL;
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS cajas_semanales_cheques_control (
+  id SERIAL PRIMARY KEY,
+  caja_semanal_id INTEGER NOT NULL REFERENCES cajas_semanales(id) ON DELETE CASCADE,
+  libro_cheque_id INTEGER NOT NULL REFERENCES libro_cheques_caja(id) ON DELETE RESTRICT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT uq_caja_semanal_cheque_control UNIQUE (caja_semanal_id, libro_cheque_id)
+);
 ALTER TABLE categorias_caja ADD COLUMN IF NOT EXISTS tipo VARCHAR(20);
 
 UPDATE categorias_caja c
@@ -956,9 +985,13 @@ CREATE INDEX IF NOT EXISTS idx_movimientos_caja_codigo ON movimientos_caja(caja_
 CREATE INDEX IF NOT EXISTS idx_movimientos_caja_semanal ON movimientos_caja(caja_semanal_id);
 CREATE INDEX IF NOT EXISTS idx_movimientos_caja_fecha_tipo ON movimientos_caja(caja_codigo, fecha, tipo);
 CREATE INDEX IF NOT EXISTS idx_cajas_semanales_codigo_inicio ON cajas_semanales(caja_codigo, fecha_inicio);
+CREATE INDEX IF NOT EXISTS idx_cajas_semanales_control_realizado ON cajas_semanales(control_inicial_realizado);
+CREATE INDEX IF NOT EXISTS idx_cajas_semanales_control_movimiento ON cajas_semanales(control_inicial_movimiento_id);
 CREATE INDEX IF NOT EXISTS idx_libro_cheques_estado ON libro_cheques_caja(estado);
 CREATE INDEX IF NOT EXISTS idx_libro_cheques_caja_estado ON libro_cheques_caja(caja_codigo, estado);
 CREATE INDEX IF NOT EXISTS idx_libro_cheques_numero ON libro_cheques_caja(numero_cheque);
+CREATE INDEX IF NOT EXISTS idx_caja_semanal_cheques_control_semana ON cajas_semanales_cheques_control(caja_semanal_id);
+CREATE INDEX IF NOT EXISTS idx_caja_semanal_cheques_control_libro ON cajas_semanales_cheques_control(libro_cheque_id);
 CREATE INDEX IF NOT EXISTS idx_movimientos_cliente ON movimientos_caja(cliente_id);
 CREATE INDEX IF NOT EXISTS idx_movimientos_presupuesto ON movimientos_caja(presupuesto_id);
 CREATE INDEX IF NOT EXISTS idx_detalles_movimiento ON detalles_medio_pago(movimiento_id);

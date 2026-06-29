@@ -1,29 +1,19 @@
 import axios from "axios"
-
 import { clearStoredSession } from "./session"
 
+// Detectamos si estamos en la consola de laboratorio (puerto 5174)
+const isLaboratorio = window.location.port === "5174"
 
-
-const isViteDevServer = window.location.port === "5173"
-
-const DEFAULT_API_BASE_URL = isViteDevServer
-
-  ? `${window.location.protocol}//${window.location.hostname}:3000`
-
-  : "/api"
-
+// Si es laboratorio va al 5001. Si es el dev común (producción local), va al 3000.
+const DEFAULT_API_BASE_URL = isLaboratorio
+  ? `${window.location.protocol}//${window.location.hostname}:5001`
+  : `${window.location.protocol}//${window.location.hostname}:3000`
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL
 
-
-
 const api = axios.create({
-
   baseURL: API_BASE_URL,
-
   withCredentials: true,
-
-  timeout: 10000 // 10 segundos
-
+  timeout: 10000 
 })
 
 api.interceptors.response.use(
@@ -397,6 +387,14 @@ export default {
     return api.post(`/caja/semanas/${id}/saldos`, payload)
   },
 
+  getControlSemanalCandidatos(id) {
+    return api.get(`/caja/semanas/${id}/control-candidatos`)
+  },
+
+  registrarControlSemanal(id, payload) {
+    return api.post(`/caja/semanas/${id}/control-inicial`, payload)
+  },
+
   getLibroChequesCaja(caja_codigo, estado, busqueda, fecha_inicio, fecha_fin) {
     const params = new URLSearchParams()
     if (caja_codigo) params.append("caja_codigo", caja_codigo)
@@ -407,9 +405,11 @@ export default {
     return api.get(`/caja/libro-cheques?${params.toString()}`)
   },
 
-  getChequesDisponiblesCaja(caja_codigo) {
+  getChequesDisponiblesCaja(caja_codigo, caja_semanal_id, fecha) {
     const params = new URLSearchParams()
     if (caja_codigo) params.append("caja_codigo", caja_codigo)
+    if (caja_semanal_id) params.append("caja_semanal_id", caja_semanal_id)
+    if (fecha) params.append("fecha", fecha)
     return api.get(`/caja/libro-cheques/disponibles?${params.toString()}`)
   },
 

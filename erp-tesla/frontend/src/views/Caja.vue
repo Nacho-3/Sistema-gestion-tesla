@@ -58,6 +58,13 @@ const mostrarModalAsignaciones = ref(false)
 const mostrarModalTransferenciaCheques = ref(false)
 const transferiendoCheques = ref(false)
 const asignacionesDraft = ref([])
+const mostrarModalControlSemanal = ref(false)
+const guardandoControlSemanal = ref(false)
+const chequesControlSemanalCandidatos = ref([])
+const chequesControlSemanalSeleccionados = ref([])
+const controlSemanalEfectivo = ref(0)
+const controlSemanalDetalle = ref("Control semanal inicial de caja")
+const controlSemanalObservaciones = ref("")
 const transferenciaChequesForm = ref({
   caja_destino: "",
   fecha: new Date().toISOString().split('T')[0],
@@ -443,6 +450,24 @@ const opcionesSemanaLibroCheques = computed(() => {
   })).filter((semana) => Boolean(semana.id))
 })
 
+const obtenerSemanaLibroChequesPorDefecto = () => {
+  const claveSemanaActiva = claveSemanaLibro(semanaActiva.value)
+  if (!claveSemanaActiva) return "global"
+  const existeSemana = opcionesSemanaLibroCheques.value.some((semana) => String(semana.id) === String(claveSemanaActiva))
+  return existeSemana ? claveSemanaActiva : "global"
+}
+
+const sincronizarFiltroSemanaLibroCheques = ({ forzar = false } = {}) => {
+  const filtroActual = String(filtroSemanaLibroCheques.value || "").toLowerCase()
+  const existeFiltroActual = opcionesSemanaLibroCheques.value.some((semana) => String(semana.id) === String(filtroSemanaLibroCheques.value))
+
+  if (!forzar && filtroActual !== "global" && existeFiltroActual) {
+    return
+  }
+
+  filtroSemanaLibroCheques.value = obtenerSemanaLibroChequesPorDefecto()
+}
+
 const subtitleCaja = computed(() => {
   return `${cajaActiva.value.label} - Movimientos de ingresos y egresos`
 })
@@ -667,6 +692,29 @@ const saldoFinalEfectivoSemana = computed(() => Number(semanaActiva.value?.saldo
 const saldoFinalChequesSemana = computed(() => Number(semanaActiva.value?.saldo_final_cheques || 0))
 const saldoFinalSemana = computed(() => saldoFinalEfectivoSemana.value + saldoFinalChequesSemana.value)
 const semanaEstaCerrada = computed(() => String(semanaActiva.value?.estado || "").toLowerCase() === "cerrada")
+const movimientosSemanaActiva = computed(() => {
+  if (!semanaActiva.value) return []
+  return (movimientos.value || []).filter((mov) => movimientoPerteneceASemana(mov, semanaActiva.value))
+})
+const semanaRequiereControl = computed(() => {
+  if (!semanaActiva.value) return false
+  if (semanaEstaCerrada.value) return false
+  return movimientosSemanaActiva.value.length === 0
+})
+const totalChequesControlSemanal = computed(() => {
+  const ids = new Set((chequesControlSemanalSeleccionados.value || []).map((valor) => Number(valor)))
+  return (chequesControlSemanalCandidatos.value || [])
+    .filter((item) => ids.has(Number(item.id)))
+    .reduce((acc, item) => acc + Number(item.importe || 0), 0)
+})
+const totalControlSemanal = computed(() => {
+  return Number(controlSemanalEfectivo.value || 0) + Number(totalChequesControlSemanal.value || 0)
+})
+const todosChequesControlSeleccionados = computed(() => {
+  const candidatos = chequesControlSemanalCandidatos.value || []
+  if (!candidatos.length) return false
+  return candidatos.every((item) => (chequesControlSemanalSeleccionados.value || []).includes(Number(item.id)))
+})
 const etiquetaSemanaActiva = computed(() => {
   if (!semanaActiva.value?.fecha_inicio || !semanaActiva.value?.fecha_fin) return "Semana actual"
   const inicio = new Date(`${semanaActiva.value.fecha_inicio}T00:00:00`).toLocaleDateString("es-AR")
@@ -809,29 +857,28 @@ const cargarSemanasCaja = async (mantenerSeleccion = true) => {
 
     if (!mantenerSeleccion || !semanaSeleccionadaId.value) {
       semanaSeleccionadaId.value = semanaActual.value?.id ? String(semanaActual.value.id) : (semanasCaja.value[0]?.id ? String(semanasCaja.value[0].id) : "")
+      sincronizarFiltroSemanaLibroCheques({ forzar: true })
       return
     }
 
     const existeSeleccion = semanasCaja.value.some((semana) => String(semana.id) === String(semanaSeleccionadaId.value))
-    if (existeSeleccion) return
+    if (existeSeleccion) {
+      sincronizarFiltroSemanaLibroCheques()
+      return
+    }
 
     const semanaSeleccionadaNormalizada = extraerSemanaIdNumerica(semanaSeleccionadaId.value)
     if (semanaSeleccionadaNormalizada) {
       const semanaEquivalente = semanasCaja.value.find((semana) => Number(semana.id) === semanaSeleccionadaNormalizada)
       if (semanaEquivalente) {
         semanaSeleccionadaId.value = String(semanaEquivalente.id)
+        sincronizarFiltroSemanaLibroCheques({ forzar: true })
         return
       }
     }
 
     semanaSeleccionadaId.value = semanaActual.value?.id ? String(semanaActual.value.id) : (semanasCaja.value[0]?.id ? String(semanasCaja.value[0].id) : "")
-
-    if (String(filtroSemanaLibroCheques.value || "").toLowerCase() !== "global") {
-      const existeSemanaLibro = opcionesSemanaLibroCheques.value.some((semana) => String(semana.id) === String(filtroSemanaLibroCheques.value))
-      if (!existeSemanaLibro) {
-        filtroSemanaLibroCheques.value = "global"
-      }
-    }
+    sincronizarFiltroSemanaLibroCheques({ forzar: true })
   } catch (err) {
     console.error("Error al cargar semanas de caja:", err)
     if (!mantenerSeleccion && semanaActual.value?.id) {
@@ -1367,7 +1414,7 @@ const descargarLibroChequesPdf = async () => {
 }
 
 const crearFormularioVacio = () => ({
-  fecha: new Date().toISOString().split('T')[0],
+  fecha: semanaActiva.value?.fecha_inicio || new Date().toISOString().split('T')[0],
   caja_codigo: filtroCaja.value || "tesla",
   tipo: "ingreso",
   categoria: "",
@@ -1390,7 +1437,7 @@ const crearFormularioVacio = () => ({
   cheques: [],
   usar_cheques_libro: false,
   cheques_salida: [],
-  fecha_salida_cheques: new Date().toISOString().split('T')[0],
+  fecha_salida_cheques: semanaActiva.value?.fecha_inicio || new Date().toISOString().split('T')[0],
   endosado_a_cheques: ""
 })
 
@@ -1543,7 +1590,79 @@ const cerrarFormulario = () => {
   error.value = ""
 }
 
+const abrirModalControlSemanal = async () => {
+  const semanaId = extraerSemanaIdNumerica(semanaActiva.value?.id)
+  if (!semanaId) {
+    error.value = "No se pudo determinar la semana activa para registrar el control"
+    return
+  }
+
+  try {
+    const res = await api.getControlSemanalCandidatos(semanaId)
+    chequesControlSemanalCandidatos.value = Array.isArray(res.data) ? res.data : []
+    chequesControlSemanalSeleccionados.value = (chequesControlSemanalCandidatos.value || []).map((item) => Number(item.id))
+    controlSemanalEfectivo.value = 0
+    controlSemanalDetalle.value = "Control semanal inicial de caja"
+    controlSemanalObservaciones.value = ""
+    mostrarModalControlSemanal.value = true
+  } catch (err) {
+    error.value = `Error al cargar cheques para control semanal: ${err.response?.data?.error || err.message}`
+  }
+}
+
+const toggleSeleccionTodosChequesControl = () => {
+  if (todosChequesControlSeleccionados.value) {
+    chequesControlSemanalSeleccionados.value = []
+    return
+  }
+  chequesControlSemanalSeleccionados.value = (chequesControlSemanalCandidatos.value || []).map((item) => Number(item.id))
+}
+
+const guardarControlSemanal = async () => {
+  const semanaId = extraerSemanaIdNumerica(semanaActiva.value?.id)
+  if (!semanaId) {
+    error.value = "No se pudo determinar la semana activa para guardar el control"
+    return
+  }
+
+  const efectivo = Number(controlSemanalEfectivo.value || 0)
+  if (efectivo < 0) {
+    error.value = "El efectivo inicial no puede ser negativo"
+    return
+  }
+
+  const ids = (chequesControlSemanalSeleccionados.value || [])
+    .map((valor) => Number(valor))
+    .filter((valor) => Number.isInteger(valor) && valor > 0)
+
+  if (efectivo <= 0 && ids.length === 0) {
+    error.value = "Debes informar efectivo o seleccionar cheques para el control semanal"
+    return
+  }
+
+  try {
+    guardandoControlSemanal.value = true
+    await api.registrarControlSemanal(semanaId, {
+      efectivo_inicial: efectivo,
+      cheques_controlados_ids: ids,
+      detalle: String(controlSemanalDetalle.value || "").trim() || "Control semanal inicial de caja",
+      observaciones: String(controlSemanalObservaciones.value || "").trim() || null,
+    })
+
+    mostrarModalControlSemanal.value = false
+    await refrescarCaja()
+  } catch (err) {
+    error.value = `Error al guardar control semanal: ${err.response?.data?.error || err.message}`
+  } finally {
+    guardandoControlSemanal.value = false
+  }
+}
+
 const abrirFormulario = async () => {
+  if (semanaRequiereControl.value) {
+    await abrirModalControlSemanal()
+    return
+  }
   await cargarReferencias()
   await cargarCategorias()
   form.value = crearFormularioVacio()
@@ -1805,7 +1924,25 @@ const cargarLibroCheques = async () => {
 
 const cargarChequesDisponibles = async () => {
   try {
-    const res = await api.getChequesDisponiblesCaja(filtroCaja.value)
+    const fechaFormulario = String(form.value?.fecha || "").split("T")[0]
+    const cajaConsulta = String((showForm.value ? form.value?.caja_codigo : filtroCaja.value) || filtroCaja.value || "tesla").toLowerCase()
+    const semanaDesdeFecha = fechaFormulario
+      ? (semanasCajaVisibles.value || []).find((semana) => {
+        const inicio = String(semana?.fecha_inicio || "")
+        const fin = String(semana?.fecha_fin || "")
+        if (!inicio || !fin) return false
+        return fechaFormulario >= inicio && fechaFormulario <= fin
+      })
+      : null
+
+    const semanaObjetivo = showForm.value ? (semanaDesdeFecha || semanaActiva.value) : semanaActiva.value
+    const semanaId = extraerSemanaIdNumerica(semanaObjetivo?.id)
+    if (!semanaId) {
+      chequesDisponibles.value = []
+      return
+    }
+
+    const res = await api.getChequesDisponiblesCaja(cajaConsulta, semanaId, fechaFormulario)
     chequesDisponibles.value = (res.data || []).map((item) => ({
       ...item,
       librador_endosante: capitalizarInicial(item.librador_endosante),
@@ -1995,6 +2132,8 @@ const getLabelCategoria = (categoria, categoriaId = null) => {
   if (categoria === "varios") return "Varios"
   return "-"
 }
+
+const esControlSemanalMovimiento = (movimiento) => Boolean(movimiento?.es_control_semanal)
 
 const getLabelTipoCategoria = (tipo) => {
   return normalizarTipoCategoria(tipo) === "egreso" ? "Egreso" : "Ingreso"
@@ -2188,6 +2327,21 @@ watch(semanaActiva, () => {
   cargarSaldosEditablesDesdeSemana()
 }, { immediate: true })
 
+watch(() => semanaActiva.value?.id, () => {
+  sincronizarFiltroSemanaLibroCheques({ forzar: true })
+  cargarChequesDisponibles()
+})
+
+watch(() => form.value.fecha, () => {
+  if (!(showForm.value && form.value.tipo === "egreso" && form.value.usar_cheques_libro)) return
+  cargarChequesDisponibles()
+})
+
+watch(() => form.value.caja_codigo, () => {
+  if (!(showForm.value && form.value.tipo === "egreso" && form.value.usar_cheques_libro)) return
+  cargarChequesDisponibles()
+})
+
 watch(() => form.value.tipo, (tipo) => {
   const categoriaSeleccionada = (categorias.value || []).find((cat) => String(cat?.id) === String(form.value.categoria_id || ""))
   if (categoriaSeleccionada && normalizarTipoCategoria(categoriaSeleccionada?.tipo) !== normalizarTipoCategoria(tipo)) {
@@ -2225,6 +2379,7 @@ watch(() => filtroTipo.value, (tipo) => {
 watch(() => form.value.usar_cheques_libro, (usar) => {
   if (form.value.tipo !== "egreso") return
   if (usar) {
+    cargarChequesDisponibles()
     // Mantener cheques vinculados al libro durante edicion para no perder seleccion previa.
     form.value.cheques = (form.value.cheques || []).filter((item) => {
       const id = Number(item?.libro_cheque_id || 0)
@@ -2346,7 +2501,7 @@ onUnmounted(() => {
               <span>Semana</span>
               <select v-model="semanaSeleccionadaId" class="select-sm">
                 <option v-for="semana in semanasCajaVisibles" :key="semana.id" :value="String(semana.id)">
-                  {{ new Date(`${semana.fecha_inicio}T00:00:00`).toLocaleDateString("es-AR") }} - {{ new Date(`${semana.fecha_fin}T00:00:00`).toLocaleDateString("es-AR") }} {{ String(semana.estado) === 'abierta' ? '(actual)' : '' }}
+                  {{ new Date(`${semana.fecha_inicio}T00:00:00`).toLocaleDateString("es-AR") }} - {{ new Date(`${semana.fecha_fin}T00:00:00`).toLocaleDateString("es-AR") }} ({{ String(semana.estado || '').toLowerCase() === 'abierta' ? 'abierta' : 'cerrada' }})
                 </option>
               </select>
             </label>
@@ -2506,7 +2661,7 @@ onUnmounted(() => {
               </select>
             </label>
             <label class="toolbar-filter-label">
-              <span>Medio de pago</span>
+              <span>Medio</span>
               <select v-model="filtroMedioPago" class="select-sm">
                 <option value="">Todos</option>
                 <option v-for="medio in mediosDePago" :key="medio.id" :value="medio.id">
@@ -2519,8 +2674,8 @@ onUnmounted(() => {
               <select v-model="filtroCategoria" class="select-sm">
                 <option value="">Todas</option>
                 <option :value="FILTRO_SIN_CATEGORIA">Sin categoría</option>
-                <option v-for="cat in categoriasFiltro" :key="`filtro-cat-${cat.id}`" :value="String(cat.id)">
-                  {{ getEtiquetaCategoriaFiltro(cat) }}
+                <option v-for="cat in categoriasFiltro" :key="cat.id" :value="String(cat.id)">
+                  {{ cat.nombre }}
                 </option>
               </select>
             </label>
@@ -2529,38 +2684,37 @@ onUnmounted(() => {
             <button class="btn btn-filter-apply toolbar-action-btn" @click="aplicarFiltros">Aplicar filtros</button>
             <button class="btn btn-filter-clear toolbar-action-btn" @click="filtroBusqueda = ''; filtroFechaInicio = ''; filtroFechaFin = ''; filtroTipo = ''; filtroMedioPago = ''; filtroCategoria = ''; aplicarFiltros()">Limpiar filtros</button>
             <button class="btn btn-pdf btn-pdf-toolbar toolbar-action-btn" :disabled="generandoPdf || !puedeDescargarResumenGeneral" @click="descargarResumenPdf">
-              {{ generandoPdf ? "Generando PDF..." : "Descargar Resumen PDF" }}
+              {{ generandoPdf ? "Generando PDF..." : "PDF resumen" }}
             </button>
           </div>
         </div>
       </section>
 
-      <!-- Desglose por medio de pago -->
-      <div class="desglose-medios">
-        <div class="section-heading">
-          <div>
-            <span class="section-kicker">Distribucion</span>
-            <h3>Desglose por medio de pago</h3>
-          </div>
-        </div>
-        <div class="medios-grid">
-          <div class="medio-card" v-for="medio in desgloseMedios" :key="medio.id">
-            <span class="label">{{ medio.label }}</span>
-            <div class="medio-detalle-linea">
-              <small>Ingresos</small>
-              <strong class="medio-ingreso">{{ formatoMoneda(medio.ingresos || 0) }}</strong>
-            </div>
-            <div class="medio-detalle-linea">
-              <small>Egresos</small>
-              <strong class="medio-egreso">{{ formatoMoneda(medio.egresos || 0) }}</strong>
-            </div>
-            <div class="medio-detalle-linea">
-              <small>Balance</small>
-              <strong class="medio-balance">{{ formatoMoneda(medio.balance || 0) }}</strong>
+      <section class="section caja-medios-shell">
+          <div class="section-heading section-heading-inline">
+            <div>
+              <span class="section-kicker">Medios de pago</span>
+              <h3>Composición de ingresos y egresos</h3>
             </div>
           </div>
-        </div>
-      </div>
+          <div class="medios-grid">
+            <div class="medio-card" v-for="medio in desgloseMedios" :key="medio.id">
+              <span class="label">{{ medio.label }}</span>
+              <div class="medio-detalle-linea">
+                <small>Ingresos</small>
+                <strong class="medio-ingreso">{{ formatoMoneda(medio.ingresos || 0) }}</strong>
+              </div>
+              <div class="medio-detalle-linea">
+                <small>Egresos</small>
+                <strong class="medio-egreso">{{ formatoMoneda(medio.egresos || 0) }}</strong>
+              </div>
+              <div class="medio-detalle-linea">
+                <small>Balance</small>
+                <strong class="medio-balance">{{ formatoMoneda(medio.balance || 0) }}</strong>
+              </div>
+            </div>
+          </div>
+      </section>
 
       <section class="caja-list-shell caja-list-shell-compact">
         <div class="section-heading section-heading-inline section-heading-libro">
@@ -2722,6 +2876,14 @@ onUnmounted(() => {
         <div v-else-if="movimientosFiltrados.length === 0" class="empty">
           <strong>No hay movimientos registrados</strong>
           <span>Probá ajustando el rango, el tipo o la búsqueda para encontrar movimientos cargados.</span>
+          <button
+            v-if="semanaRequiereControl"
+            type="button"
+            class="btn btn-primary"
+            @click="abrirModalControlSemanal"
+          >
+            Hacer control semanal
+          </button>
         </div>
         <div v-else class="tabla-shell">
         <table class="tabla">
@@ -2742,9 +2904,14 @@ onUnmounted(() => {
           <tr v-for="mov in movimientosFiltrados" :key="mov.id" :class="`row-${mov.tipo}`">
             <td>{{ new Date(mov.fecha).toLocaleDateString('es-AR') }}</td>
             <td>
-              <span :class="`badge badge-${mov.tipo}`">
-                {{ mov.tipo === 'ingreso' ? 'Ingreso' : 'Egreso' }}
-              </span>
+              <template v-if="esControlSemanalMovimiento(mov)">
+                <span class="badge badge-info">Control semanal</span>
+              </template>
+              <template v-else>
+                <span :class="`badge badge-${mov.tipo}`">
+                  {{ mov.tipo === 'ingreso' ? 'Ingreso' : 'Egreso' }}
+                </span>
+              </template>
             </td>
             <td>
               <span>{{ getLabelCategoria(mov.categoria, mov.categoria_id) }}</span>
@@ -3118,6 +3285,76 @@ onUnmounted(() => {
             {{ transferiendoCheques ? "Transfiriendo..." : "Confirmar transferencia" }}
           </button>
           <button type="button" class="btn-secondary" :disabled="transferiendoCheques" @click="mostrarModalTransferenciaCheques = false">
+            Cancelar
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="mostrarModalControlSemanal" class="modal-overlay modal-overlay-front" @click.self="mostrarModalControlSemanal = false">
+    <div class="modal modal-confirmacion modal-transfer-cheques">
+      <div class="modal-header modal-header-confirmacion">
+        <div class="modal-header-copy">
+          <span class="section-kicker">Caja semanal</span>
+          <h3>Control semanal inicial</h3>
+          <p>Definí efectivo y cheques controlados para iniciar la semana.</p>
+        </div>
+        <button type="button" class="btn-close" aria-label="Cerrar modal" @click="mostrarModalControlSemanal = false">×</button>
+      </div>
+
+      <div class="modal-form modal-form-transfer-cheques">
+        <label class="form-group">
+          <span>Efectivo inicial</span>
+          <input v-model.number="controlSemanalEfectivo" type="number" step="0.01" min="0" />
+        </label>
+
+        <label class="form-group">
+          <span>Detalle</span>
+          <input v-model="controlSemanalDetalle" type="text" />
+        </label>
+
+        <label class="form-group">
+          <span>Observaciones</span>
+          <textarea v-model="controlSemanalObservaciones" rows="2" />
+        </label>
+
+        <div class="form-group">
+          <div class="cheques-transfer-toolbar cheques-transfer-toolbar-control">
+            <div class="cheques-transfer-toolbar-copy">
+              <span class="cheques-transfer-toolbar-title">Cheques disponibles de la semana anterior</span>
+              <small class="cheques-transfer-toolbar-meta">
+                {{ chequesControlSemanalSeleccionados.length }} de {{ chequesControlSemanalCandidatos.length }} seleccionados
+              </small>
+            </div>
+            <button type="button" class="btn btn-secondary btn-sm cheques-transfer-toolbar-btn" @click="toggleSeleccionTodosChequesControl">
+              {{ todosChequesControlSeleccionados ? "Deseleccionar todos" : "Seleccionar todos" }}
+            </button>
+          </div>
+          <div class="cheques-transfer-list">
+            <label v-for="item in chequesControlSemanalCandidatos" :key="`control-${item.id}`" class="cheque-transfer-item">
+              <input v-model="chequesControlSemanalSeleccionados" type="checkbox" :value="Number(item.id)" />
+              <span>#{{ item.numero_cheque || '-' }} · {{ item.banco || '-' }} · {{ formatoMoneda(item.importe || 0) }}</span>
+            </label>
+            <small v-if="!chequesControlSemanalCandidatos.length" class="form-help">No hay cheques disponibles de la semana anterior.</small>
+          </div>
+        </div>
+
+        <div class="transfer-cheques-total">
+          <span>Total cheques seleccionados</span>
+          <strong>{{ formatoMoneda(totalChequesControlSemanal || 0) }}</strong>
+        </div>
+
+        <div class="transfer-cheques-total">
+          <span>Total control semanal</span>
+          <strong>{{ formatoMoneda(totalControlSemanal || 0) }}</strong>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn-primary" :disabled="guardandoControlSemanal" @click="guardarControlSemanal">
+            {{ guardandoControlSemanal ? "Guardando..." : "Guardar control semanal" }}
+          </button>
+          <button type="button" class="btn-secondary" :disabled="guardandoControlSemanal" @click="mostrarModalControlSemanal = false">
             Cancelar
           </button>
         </div>
@@ -3809,8 +4046,8 @@ onUnmounted(() => {
 </template>
 <style scoped>
 .caja-toolbar-shell {
-  margin-bottom: 2.5rem;
-  margin-top: -2.5rem;
+  margin-top: 1rem;
+  margin-bottom: 1rem;
   padding: 1.15rem 1.2rem;
   border-radius: 1rem;
   border: 1px solid rgba(148, 163, 184, 0.16);
@@ -3837,7 +4074,7 @@ onUnmounted(() => {
 
 .toolbar-filters-grid {
   display: grid;
-  grid-template-columns: minmax(220px, 1.35fr) repeat(5, minmax(140px, 1fr));
+  grid-template-columns: minmax(260px, 1.5fr) repeat(5, minmax(140px, 1fr));
   gap: 0.8rem;
   align-items: end;
   width: 100%;
@@ -4129,13 +4366,17 @@ onUnmounted(() => {
 }
 
 .caja-bank-inline-shell {
-  margin-top: -0.5rem;
-  margin-bottom: 2rem;
+  margin-top: 1rem;
+  margin-bottom: 1rem;
   padding: 1rem;
   border-radius: 0.9rem;
   border: 1px solid rgba(59, 130, 246, 0.25);
   background: linear-gradient(180deg, rgba(30, 41, 59, 0.55), rgba(15, 23, 42, 0.65));
   overflow: hidden;
+}
+
+.caja-bank-inline-shell + .caja-toolbar-shell {
+  margin-top: 0;
 }
 
 .caja-bank-inline-head {
@@ -5211,6 +5452,12 @@ onUnmounted(() => {
   border: 1px solid rgba(248, 113, 113, 0.3);
 }
 
+.badge-info {
+  background: rgba(96, 165, 250, 0.2);
+  color: #93c5fd;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+}
+
 .acciones {
   vertical-align: top;
 }
@@ -5251,8 +5498,58 @@ onUnmounted(() => {
   margin-top: 1rem;
 }
 
+.empty .btn {
+  margin-top: 0.8rem;
+}
+
 .empty strong {
   color: #e2e8f0;
+}
+
+.cheques-transfer-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.7rem;
+  margin-bottom: 0.5rem;
+}
+
+.cheques-transfer-toolbar-copy {
+  display: grid;
+  gap: 0.22rem;
+}
+
+.cheques-transfer-toolbar-title {
+  color: #e2e8f0;
+  font-weight: 700;
+  font-size: 0.93rem;
+}
+
+.cheques-transfer-toolbar-meta {
+  color: #94a3b8;
+  font-size: 0.78rem;
+}
+
+.cheques-transfer-toolbar-control {
+  padding: 0.7rem 0.8rem;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: linear-gradient(135deg, rgba(30, 41, 59, 0.62), rgba(15, 23, 42, 0.52));
+}
+
+.cheques-transfer-toolbar-btn {
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .cheques-transfer-toolbar-control {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .cheques-transfer-toolbar-btn {
+    width: 100%;
+  }
 }
 
 /* Detalle card */
@@ -5290,6 +5587,15 @@ onUnmounted(() => {
   border-radius: 1rem;
   border: 1px solid rgba(148, 163, 184, 0.14);
   background: rgba(30, 41, 59, 0.34);
+}
+
+.caja-medios-shell {
+  margin-top: 0;
+  margin-bottom: 1rem;
+}
+
+.caja-medios-shell + .caja-list-shell-compact {
+  margin-top: 0;
 }
 
 .section h3 {
@@ -6663,23 +6969,52 @@ onUnmounted(() => {
   border-color: rgba(148, 163, 184, 0.5);
 }
 
-@media (max-width: 1200px) {
+@media (max-width: 1750px) {
   .cheques-libro-lista {
     grid-template-columns: repeat(2, minmax(220px, 1fr));
   }
 
   .caja-bank-inline-grid {
-    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));;
   }
 
   .toolbar-filters-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .toolbar-filters-grid .toolbar-search {
-    grid-column: span 3;
+  .toolbar-filters-grid .toolbar-search{
+    grid-column: 1 / -1;
+  }
+
+  .toolbar-actions-row{
+    justify-content: flex-start;
   }
 }
+
+@media (max-width: 1200px){
+  .toolbar-filters-grid{
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .toolbar-filters-grid .toolbar-search{
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 980px){
+  .toolbar-filters-grid{
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .toolbar-filters-grid .toolbar-search{
+    grid-column: 1 / -1;
+  }
+
+  .toolbar-actions-row .btn {
+    justify-content: flex-start;
+  }
+}
+
 
 @media (max-width: 720px) {
   .caja-topbar,

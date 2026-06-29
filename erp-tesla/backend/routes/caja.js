@@ -83,6 +83,44 @@ async function ensureLibroChequesSchema() {
   `)
 
   await pool.query(`
+    ALTER TABLE IF EXISTS movimientos_caja
+      ADD COLUMN IF NOT EXISTS es_control_semanal BOOLEAN NOT NULL DEFAULT FALSE;
+  `)
+
+  await pool.query(`
+    ALTER TABLE IF EXISTS cajas_semanales
+      ADD COLUMN IF NOT EXISTS control_inicial_realizado BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS control_inicial_movimiento_id INTEGER;
+  `)
+
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'fk_cajas_semanales_control_inicial_movimiento'
+          AND conrelid = 'cajas_semanales'::regclass
+      ) THEN
+        ALTER TABLE cajas_semanales
+          ADD CONSTRAINT fk_cajas_semanales_control_inicial_movimiento
+          FOREIGN KEY (control_inicial_movimiento_id)
+          REFERENCES movimientos_caja(id)
+          ON DELETE SET NULL;
+      END IF;
+    END $$;
+  `)
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cajas_semanales_cheques_control (
+      id SERIAL PRIMARY KEY,
+      caja_semanal_id INTEGER NOT NULL REFERENCES cajas_semanales(id) ON DELETE CASCADE,
+      libro_cheque_id INTEGER NOT NULL REFERENCES libro_cheques_caja(id) ON DELETE RESTRICT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT uq_caja_semanal_cheque_control UNIQUE (caja_semanal_id, libro_cheque_id)
+    );
+  `)
+
+  await pool.query(`
     DO $$
     BEGIN
       IF NOT EXISTS (
@@ -100,6 +138,10 @@ async function ensureLibroChequesSchema() {
   await pool.query("CREATE INDEX IF NOT EXISTS idx_libro_cheques_estado ON libro_cheques_caja(estado);")
   await pool.query("CREATE INDEX IF NOT EXISTS idx_libro_cheques_caja_estado ON libro_cheques_caja(caja_codigo, estado);")
   await pool.query("CREATE INDEX IF NOT EXISTS idx_libro_cheques_numero ON libro_cheques_caja(numero_cheque);")
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_cajas_semanales_control_realizado ON cajas_semanales(control_inicial_realizado);")
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_cajas_semanales_control_movimiento ON cajas_semanales(control_inicial_movimiento_id);")
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_caja_semanal_cheques_control_semana ON cajas_semanales_cheques_control(caja_semanal_id);")
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_caja_semanal_cheques_control_libro ON cajas_semanales_cheques_control(libro_cheque_id);")
 
   libroChequesSchemaReady = true
 }
@@ -543,7 +585,99 @@ async function obtenerCajaSemanalAnterior(caja_codigo, fecha_inicio) {
   return data?.[0] || null
 }
 
+async function obtenerChequesDisponiblesAlCierreSemana({ cajaCodigo, fechaFin }) {
+  if (!cajaCodigo || !fechaFin) return []
+
+  const result = await pool.query(
+    `
+      SELECT l.*
+      FROM libro_cheques_caja l
+      WHERE l.caja_codigo = $1
+        AND l.medio_pago = 'cheque'
+        AND LOWER(COALESCE(l.estado, '')) <> 'anulado'
+        AND l.fecha_entrada <= $2
+        AND (l.fecha_salida IS NULL OR l.fecha_salida > $2)
+      ORDER BY l.fecha_cheque DESC NULLS LAST, l.id ASC
+    `,
+    [cajaCodigo, fechaFin]
+  )
+
+  return result.rows || []
+}
+
+async function obtenerChequesControladosSemana(cajaSemanalId) {
+  const id = Number(cajaSemanalId || 0)
+  if (!Number.isInteger(id) || id <= 0) return []
+
+  const result = await pool.query(
+    `
+      SELECT l.*
+      FROM cajas_semanales_cheques_control c
+      JOIN libro_cheques_caja l ON l.id = c.libro_cheque_id
+      WHERE c.caja_semanal_id = $1
+      ORDER BY l.fecha_cheque DESC NULLS LAST, l.id ASC
+    `,
+    [id]
+  )
+
+  return result.rows || []
+}
+
+async function obtenerChequesDisponiblesSemana({ cajaCodigo, cajaSemanalId, fechaReferencia }) {
+  const semanaId = Number(cajaSemanalId || 0)
+  if (!Number.isInteger(semanaId) || semanaId <= 0) return []
+
+  const semanaQ = await pool.query(
+    `SELECT * FROM cajas_semanales WHERE id = $1 LIMIT 1`,
+    [semanaId]
+  )
+  const semana = semanaQ.rows?.[0]
+  if (!semana) return []
+
+  if (!semana.control_inicial_realizado) {
+    const fechaRefNormalizada = normalizarFechaISO(fechaReferencia)
+    const inicio = normalizarFechaISO(semana.fecha_inicio)
+    const fin = normalizarFechaISO(semana.fecha_fin)
+    const fechaCorte = (fechaRefNormalizada && inicio && fin && fechaRefNormalizada >= inicio && fechaRefNormalizada <= fin)
+      ? fechaRefNormalizada
+      : fin
+
+    if (!fechaCorte) return []
+
+    return obtenerChequesDisponiblesAlCierreSemana({
+      cajaCodigo,
+      fechaFin: fechaCorte,
+    })
+  }
+
+  const controlados = await obtenerChequesControladosSemana(semanaId)
+
+  const ingresosSemanaQ = await pool.query(
+    `
+      SELECT l.*
+      FROM libro_cheques_caja l
+      JOIN movimientos_caja m ON m.id = l.movimiento_entrada_id
+      WHERE m.caja_semanal_id = $1
+        AND m.caja_codigo = $2
+        AND LOWER(COALESCE(l.estado, '')) = 'disponible'
+        AND l.medio_pago = 'cheque'
+      ORDER BY l.fecha_cheque DESC NULLS LAST, l.id ASC
+    `,
+    [semanaId, cajaCodigo]
+  )
+
+  const mapa = new Map()
+  ;[...(controlados || []), ...(ingresosSemanaQ.rows || [])].forEach((row) => {
+    if (!row?.id) return
+    if (String(row.estado || "").toLowerCase() !== "disponible") return
+    mapa.set(Number(row.id), row)
+  })
+
+  return Array.from(mapa.values())
+}
+
 async function asegurarCajaSemanal(caja_codigo, fecha) {
+  await ensureLibroChequesSchema()
   const rango = getRangoSemana(fecha)
   const codigo = String(caja_codigo || "").toLowerCase()
 
@@ -586,19 +720,18 @@ async function asegurarCajaSemanal(caja_codigo, fecha) {
     return legacy
   }
 
-  const saldoPrevio = await obtenerSaldoAcumuladoPorMedio(codigo, rango.fecha_inicio)
-  const saldoInicial = roundMoney(saldoPrevio.total || 0)
-
   const { data: creada, error: errorCreada } = await db
     .from("cajas_semanales")
     .insert([{
       caja_codigo: codigo,
       fecha_inicio: rango.fecha_inicio,
       fecha_fin: rango.fecha_fin,
-      saldo_inicial: saldoInicial,
+      saldo_inicial: 0,
       total_ingresos: 0,
       total_egresos: 0,
-      saldo_final: saldoInicial,
+      saldo_final: 0,
+      control_inicial_realizado: false,
+      control_inicial_movimiento_id: null,
       estado: "abierta",
     }])
     .select()
@@ -627,6 +760,7 @@ async function recalcularCajaSemanal(cajaSemanalId) {
     .select(`
       monto_total,
       tipo,
+      es_control_semanal,
       detalles_medio_pago(*)
     `)
     .eq("caja_semanal_id", cajaSemanalId)
@@ -635,25 +769,44 @@ async function recalcularCajaSemanal(cajaSemanalId) {
 
   const movimientosNormalizados = (movimientos || []).map(normalizarMovimiento)
 
-  const totalIngresos = movimientos.filter(m => m.tipo === "ingreso").reduce((sum, m) => sum + Number(m.monto_total || 0), 0)
-  const totalEgresos = movimientos.filter(m => m.tipo === "egreso").reduce((sum, m) => sum + Number(m.monto_total || 0), 0)
-  const balance = totalIngresos - totalEgresos
-  const cantidadMovimientos = movimientos.length
-
-  const saldoInicialPorMedio = await obtenerSaldoAcumuladoPorMedio(semana.caja_codigo, semana.fecha_inicio)
-  const saldoPorMedio = {
-    efectivo: Number(saldoInicialPorMedio.efectivo || 0),
-    cheques: Number(saldoInicialPorMedio.cheques || 0),
+  const control = movimientosNormalizados.find((mov) => Boolean(mov?.es_control_semanal))
+  const sumaDetalles = (detalles = [], medioObjetivo) => {
+    return (detalles || [])
+      .filter((detalle) => String(detalle?.medio_pago || "").toLowerCase() === medioObjetivo)
+      .reduce((acc, detalle) => acc + Number(detalle?.monto || 0), 0)
   }
-  movimientosNormalizados.forEach((movimiento) => {
+
+  const saldoInicialEfectivo = control ? roundMoney(sumaDetalles(control.detalles_medio_pago, "efectivo")) : 0
+  const saldoInicialCheques = control ? roundMoney(sumaDetalles(control.detalles_medio_pago, "cheque")) : 0
+  const saldoInicial = roundMoney(saldoInicialEfectivo + saldoInicialCheques)
+
+  const movimientosOperativos = movimientosNormalizados.filter((mov) => !Boolean(mov?.es_control_semanal))
+  const totalIngresos = roundMoney(
+    movimientosOperativos
+      .filter((mov) => mov.tipo === "ingreso")
+      .reduce((sum, mov) => sum + Number(mov.monto_total || 0), 0)
+  )
+  const totalEgresos = roundMoney(
+    movimientosOperativos
+      .filter((mov) => mov.tipo === "egreso")
+      .reduce((sum, mov) => sum + Number(mov.monto_total || 0), 0)
+  )
+
+  const saldoPorMedio = {
+    efectivo: Number(saldoInicialEfectivo || 0),
+    cheques: Number(saldoInicialCheques || 0),
+  }
+  movimientosOperativos.forEach((movimiento) => {
     actualizarSaldoPorMedio(saldoPorMedio, movimiento)
   })
-  const saldoFinal = roundMoney(Number(saldoPorMedio.efectivo || 0) + Number(saldoPorMedio.cheques || 0))
+  const saldoFinalEfectivo = roundMoney(Number(saldoPorMedio.efectivo || 0))
+  const saldoFinalCheques = roundMoney(Number(saldoPorMedio.cheques || 0))
+  const saldoFinal = roundMoney(saldoFinalEfectivo + saldoFinalCheques)
 
   const { data: actualizada, error: errorActualizacion } = await db
     .from("cajas_semanales")
     .update({
-      saldo_inicial: roundMoney(Number(saldoInicialPorMedio.total || 0)),
+      saldo_inicial: saldoInicial,
       total_ingresos: totalIngresos,
       total_egresos: totalEgresos,
       saldo_final: saldoFinal,
@@ -884,6 +1037,7 @@ async function obtenerMovimientosCajaConDetalles(cajaCodigo) {
       id,
       fecha,
       tipo,
+      es_control_semanal,
       monto_total,
       caja_semanal_id,
       detalles_medio_pago(*)
@@ -921,11 +1075,9 @@ async function enriquecerSemanasConMedios(cajaCodigo, semanas = []) {
   if (!cajaCodigo || !Array.isArray(semanas) || semanas.length === 0) return semanas || []
 
   const movimientos = await obtenerMovimientosCajaConDetalles(cajaCodigo)
-  const acumulador = { efectivo: 0, cheques: 0 }
 
   const enriquecidas = [...semanas]
     .map((semana) => ({ ...semana }))
-    .sort((a, b) => new Date(a.fecha_inicio) - new Date(b.fecha_inicio))
     .map((semana) => {
       const semanaId = normalizarCajaSemanalId(semana.id)
       const inicio = normalizarFechaISO(semana.fecha_inicio)
@@ -942,22 +1094,35 @@ async function enriquecerSemanasConMedios(cajaCodigo, semanas = []) {
         return (!inicio || fechaMovimiento >= inicio) && (!fin || fechaMovimiento <= fin)
       })
 
-      const semanaEnriquecida = {
-        ...semana,
-        saldo_inicial: roundMoney(acumulador.efectivo + acumulador.cheques),
-        saldo_inicial_efectivo: roundMoney(acumulador.efectivo),
-        saldo_inicial_cheques: roundMoney(acumulador.cheques),
+      const control = movimientosSemana.find((movimiento) => Boolean(movimiento?.es_control_semanal))
+      const sumaDetalles = (detalles = [], medioObjetivo) => {
+        return (detalles || [])
+          .filter((detalle) => String(detalle?.medio_pago || "").toLowerCase() === medioObjetivo)
+          .reduce((acc, detalle) => acc + Number(detalle?.monto || 0), 0)
       }
 
-      movimientosSemana.forEach((movimiento) => {
-        actualizarSaldoPorMedio(acumulador, movimiento)
-      })
+      const inicialEfectivo = control ? roundMoney(sumaDetalles(control.detalles_medio_pago, "efectivo")) : 0
+      const inicialCheques = control ? roundMoney(sumaDetalles(control.detalles_medio_pago, "cheque")) : 0
+      const saldoPorMedio = {
+        efectivo: Number(inicialEfectivo || 0),
+        cheques: Number(inicialCheques || 0),
+      }
 
-      semanaEnriquecida.saldo_final = roundMoney(acumulador.efectivo + acumulador.cheques)
-      semanaEnriquecida.saldo_final_efectivo = roundMoney(acumulador.efectivo)
-      semanaEnriquecida.saldo_final_cheques = roundMoney(acumulador.cheques)
+      movimientosSemana
+        .filter((movimiento) => !Boolean(movimiento?.es_control_semanal))
+        .forEach((movimiento) => {
+          actualizarSaldoPorMedio(saldoPorMedio, movimiento)
+        })
 
-      return semanaEnriquecida
+      return {
+        ...semana,
+        saldo_inicial: roundMoney(inicialEfectivo + inicialCheques),
+        saldo_inicial_efectivo: roundMoney(inicialEfectivo),
+        saldo_inicial_cheques: roundMoney(inicialCheques),
+        saldo_final: roundMoney(saldoPorMedio.efectivo + saldoPorMedio.cheques),
+        saldo_final_efectivo: roundMoney(saldoPorMedio.efectivo),
+        saldo_final_cheques: roundMoney(saldoPorMedio.cheques),
+      }
     })
 
   return enriquecidas.sort((a, b) => new Date(b.fecha_inicio) - new Date(a.fecha_inicio))
@@ -1411,37 +1576,95 @@ router.get("/libro-cheques", async (req, res) => {
       return
     }
 
-    const rowsSemana = rows
-      .map((row) => {
-        const fechaEntradaCheque = normalizarFechaISO(row.fecha_entrada)
-        const fechaSalidaCheque = normalizarFechaISO(row.fecha_salida)
-        const estadoActual = String(row.estado || "").toLowerCase()
+    const semanaQ = await pool.query(
+      `
+        SELECT id, control_inicial_realizado
+        FROM cajas_semanales
+        WHERE caja_codigo = $1
+          AND fecha_inicio = $2
+          AND fecha_fin = $3
+        ORDER BY id DESC
+        LIMIT 1
+      `,
+      [cajaCodigo, fechaInicio, fechaFin]
+    )
 
-        if (estadoActual === "anulado") return null
+    const semana = semanaQ.rows?.[0] || null
 
-        const disponibleAlCorte = Boolean(
-          fechaEntradaCheque
-          && fechaEntradaCheque <= fechaFin
-          && (!fechaSalidaCheque || fechaSalidaCheque > fechaFin)
-        )
+    let rowsSemana = []
+    if (semana) {
+      const controladosQ = await pool.query(
+        `
+          SELECT libro_cheque_id
+          FROM cajas_semanales_cheques_control
+          WHERE caja_semanal_id = $1
+        `,
+        [Number(semana.id)]
+      )
 
-        const salioEnSemana = Boolean(
-          fechaSalidaCheque
-          && fechaSalidaCheque >= fechaInicio
-          && fechaSalidaCheque <= fechaFin
-        )
+      const ingresadosSemanaQ = await pool.query(
+        `
+          SELECT l.id
+          FROM libro_cheques_caja l
+          JOIN movimientos_caja m ON m.id = l.movimiento_entrada_id
+          WHERE m.caja_semanal_id = $1
+            AND m.caja_codigo = $2
+            AND l.medio_pago = 'cheque'
+        `,
+        [Number(semana.id), cajaCodigo]
+      )
 
-        if (!disponibleAlCorte && !salioEnSemana) return null
+      const universoSemana = new Set([
+        ...(controladosQ.rows || []).map((item) => Number(item.libro_cheque_id)).filter((id) => Number.isInteger(id) && id > 0),
+        ...(ingresadosSemanaQ.rows || []).map((item) => Number(item.id)).filter((id) => Number.isInteger(id) && id > 0),
+      ])
 
-        const estadoVista = disponibleAlCorte ? "disponible" : "no_disponible"
-        return {
-          ...row,
-          estado_vista: estadoVista,
-          semana_inicio: fechaInicio,
-          semana_fin: fechaFin,
-        }
-      })
-      .filter(Boolean)
+      rowsSemana = rows
+        .filter((row) => universoSemana.has(Number(row.id)))
+        .map((row) => {
+          const estadoActual = String(row.estado || "").toLowerCase()
+          if (estadoActual === "anulado") return null
+          return {
+            ...row,
+            estado_vista: estadoActual === "disponible" ? "disponible" : "no_disponible",
+            semana_inicio: fechaInicio,
+            semana_fin: fechaFin,
+          }
+        })
+        .filter(Boolean)
+    } else {
+      rowsSemana = rows
+        .map((row) => {
+          const fechaEntradaCheque = normalizarFechaISO(row.fecha_entrada)
+          const fechaSalidaCheque = normalizarFechaISO(row.fecha_salida)
+          const estadoActual = String(row.estado || "").toLowerCase()
+
+          if (estadoActual === "anulado") return null
+
+          const disponibleAlCorte = Boolean(
+            fechaEntradaCheque
+            && fechaEntradaCheque <= fechaFin
+            && (!fechaSalidaCheque || fechaSalidaCheque > fechaFin)
+          )
+
+          const salioEnSemana = Boolean(
+            fechaSalidaCheque
+            && fechaSalidaCheque >= fechaInicio
+            && fechaSalidaCheque <= fechaFin
+          )
+
+          if (!disponibleAlCorte && !salioEnSemana) return null
+
+          const estadoVista = disponibleAlCorte ? "disponible" : "no_disponible"
+          return {
+            ...row,
+            estado_vista: estadoVista,
+            semana_inicio: fechaInicio,
+            semana_fin: fechaFin,
+          }
+        })
+        .filter(Boolean)
+    }
 
     const filtradosPorEstado = estado
       ? rowsSemana.filter((row) => row.estado_vista === (estado === "disponible" ? "disponible" : "no_disponible"))
@@ -1457,9 +1680,46 @@ router.get("/libro-cheques/disponibles", async (req, res) => {
   try {
     await ensureLibroChequesSchema()
     const cajaCodigo = String(req.query.caja_codigo || "tesla").toLowerCase()
+    const cajaSemanalId = normalizarCajaSemanalId(req.query.caja_semanal_id)
+    const fecha = normalizarFechaISO(req.query.fecha)
 
     if (!CAJAS_DISPONIBLES.includes(cajaCodigo)) {
       return res.status(400).json({ error: "Caja inválida" })
+    }
+
+    let cajaSemanalIdObjetivo = cajaSemanalId
+
+    if (fecha) {
+      const semanaPorFechaQ = await pool.query(
+        `
+          SELECT id
+          FROM cajas_semanales
+          WHERE caja_codigo = $1
+            AND fecha_inicio <= $2
+            AND fecha_fin >= $2
+          ORDER BY id DESC
+          LIMIT 1
+        `,
+        [cajaCodigo, fecha]
+      )
+      cajaSemanalIdObjetivo = normalizarCajaSemanalId(semanaPorFechaQ.rows?.[0]?.id)
+    }
+
+    if (cajaSemanalIdObjetivo) {
+      const semanaRows = await pool.query(
+        `SELECT id FROM cajas_semanales WHERE id = $1 AND caja_codigo = $2 LIMIT 1`,
+        [cajaSemanalIdObjetivo, cajaCodigo]
+      )
+      if (!semanaRows.rows.length) {
+        return res.status(404).json({ error: "Semana no encontrada para la caja indicada" })
+      }
+
+      const rowsSemana = await obtenerChequesDisponiblesSemana({
+        cajaCodigo,
+        cajaSemanalId: cajaSemanalIdObjetivo,
+        fechaReferencia: fecha,
+      })
+      return res.json(rowsSemana || [])
     }
 
     const result = await pool.query(
@@ -1528,26 +1788,78 @@ router.get("/libro-cheques/pdf", async (req, res) => {
     let disponibles, noDisponibles
 
     if (filtroSemanal) {
-      // Mismo cálculo que /libro-cheques: disponibles al corte y salidos en semana
-      const rowsSemana = allRows
-        .filter((row) => String(row.estado || "").toLowerCase() !== "anulado")
-        .map((row) => {
-          const fechaEntradaCheque = normalizarFechaISO(row.fecha_entrada)
-          const fechaSalidaCheque = normalizarFechaISO(row.fecha_salida)
-          const disponibleAlCorte = Boolean(
-            fechaEntradaCheque
-            && fechaEntradaCheque <= fechaFin
-            && (!fechaSalidaCheque || fechaSalidaCheque > fechaFin)
-          )
-          const salioEnSemana = Boolean(
-            fechaSalidaCheque
-            && fechaSalidaCheque >= fechaInicio
-            && fechaSalidaCheque <= fechaFin
-          )
-          if (!disponibleAlCorte && !salioEnSemana) return null
-          return { ...row, estado_vista: disponibleAlCorte ? "disponible" : "no_disponible" }
-        })
-        .filter(Boolean)
+      const semanaQ = await pool.query(
+        `
+          SELECT id, control_inicial_realizado
+          FROM cajas_semanales
+          WHERE caja_codigo = $1
+            AND fecha_inicio = $2
+            AND fecha_fin = $3
+          ORDER BY id DESC
+          LIMIT 1
+        `,
+        [cajaCodigo, fechaInicio, fechaFin]
+      )
+
+      const semana = semanaQ.rows?.[0] || null
+
+      let rowsSemana = []
+      if (semana) {
+        const controladosQ = await pool.query(
+          `
+            SELECT libro_cheque_id
+            FROM cajas_semanales_cheques_control
+            WHERE caja_semanal_id = $1
+          `,
+          [Number(semana.id)]
+        )
+
+        const ingresadosSemanaQ = await pool.query(
+          `
+            SELECT l.id
+            FROM libro_cheques_caja l
+            JOIN movimientos_caja m ON m.id = l.movimiento_entrada_id
+            WHERE m.caja_semanal_id = $1
+              AND m.caja_codigo = $2
+              AND l.medio_pago = 'cheque'
+          `,
+          [Number(semana.id), cajaCodigo]
+        )
+
+        const universoSemana = new Set([
+          ...(controladosQ.rows || []).map((item) => Number(item.libro_cheque_id)).filter((id) => Number.isInteger(id) && id > 0),
+          ...(ingresadosSemanaQ.rows || []).map((item) => Number(item.id)).filter((id) => Number.isInteger(id) && id > 0),
+        ])
+
+        rowsSemana = allRows
+          .filter((row) => universoSemana.has(Number(row.id)))
+          .map((row) => {
+            const estadoActual = String(row.estado || "").toLowerCase()
+            if (estadoActual === "anulado") return null
+            return { ...row, estado_vista: estadoActual === "disponible" ? "disponible" : "no_disponible" }
+          })
+          .filter(Boolean)
+      } else {
+        rowsSemana = allRows
+          .filter((row) => String(row.estado || "").toLowerCase() !== "anulado")
+          .map((row) => {
+            const fechaEntradaCheque = normalizarFechaISO(row.fecha_entrada)
+            const fechaSalidaCheque = normalizarFechaISO(row.fecha_salida)
+            const disponibleAlCorte = Boolean(
+              fechaEntradaCheque
+              && fechaEntradaCheque <= fechaFin
+              && (!fechaSalidaCheque || fechaSalidaCheque > fechaFin)
+            )
+            const salioEnSemana = Boolean(
+              fechaSalidaCheque
+              && fechaSalidaCheque >= fechaInicio
+              && fechaSalidaCheque <= fechaFin
+            )
+            if (!disponibleAlCorte && !salioEnSemana) return null
+            return { ...row, estado_vista: disponibleAlCorte ? "disponible" : "no_disponible" }
+          })
+          .filter(Boolean)
+      }
 
       disponibles = rowsSemana
         .filter((row) => row.estado_vista === "disponible")
@@ -1903,6 +2215,197 @@ router.get("/semana-actual", async (req, res) => {
     res.json(semanaObjetivo || semanaActualizada || semana)
   } catch (err) {
     res.status(400).json({ error: err.message })
+  }
+})
+
+router.get("/semanas/:id/control-candidatos", async (req, res) => {
+  try {
+    await ensureLibroChequesSchema()
+    const semanaId = normalizarCajaSemanalId(req.params.id)
+    if (!semanaId) return res.status(400).json({ error: "ID de semana inválido" })
+
+    const semanaQ = await pool.query(`SELECT * FROM cajas_semanales WHERE id = $1 LIMIT 1`, [semanaId])
+    const semana = semanaQ.rows?.[0]
+    if (!semana) return res.status(404).json({ error: "Semana no encontrada" })
+
+    if (String(semana.estado || "").toLowerCase() === "cerrada") {
+      return res.status(400).json({ error: "La semana está cerrada" })
+    }
+
+    const movsQ = await pool.query(`SELECT COUNT(*)::int AS total FROM movimientos_caja WHERE caja_semanal_id = $1`, [semanaId])
+    if (Number(movsQ.rows?.[0]?.total || 0) > 0) {
+      return res.status(400).json({ error: "El control semanal solo se puede cargar cuando la semana no tiene movimientos" })
+    }
+
+    const anterior = await obtenerCajaSemanalAnterior(semana.caja_codigo, semana.fecha_inicio)
+    if (!anterior) {
+      return res.json([])
+    }
+
+    const candidatos = await obtenerChequesDisponiblesAlCierreSemana({
+      cajaCodigo: semana.caja_codigo,
+      fechaFin: normalizarFechaISO(anterior.fecha_fin),
+    })
+
+    return res.json(candidatos || [])
+  } catch (err) {
+    return res.status(500).json({ error: err.message })
+  }
+})
+
+router.post("/semanas/:id/control-inicial", async (req, res) => {
+  const client = await pool.connect()
+  try {
+    await ensureLibroChequesSchema()
+    await ensureMovimientosCajaRulesSchema()
+    await getDetallesSchema()
+    const detalleColumn = await getDetalleColumn()
+
+    const semanaId = normalizarCajaSemanalId(req.params.id)
+    if (!semanaId) return res.status(400).json({ error: "ID de semana inválido" })
+
+    const efectivoInicial = roundMoney(Number(req.body?.efectivo_inicial || 0))
+    const ids = Array.isArray(req.body?.cheques_controlados_ids)
+      ? req.body.cheques_controlados_ids.map((valor) => Number(valor)).filter((valor) => Number.isInteger(valor) && valor > 0)
+      : []
+
+    if (efectivoInicial < 0) {
+      return res.status(400).json({ error: "El efectivo inicial no puede ser negativo" })
+    }
+
+    await client.query("BEGIN")
+
+    const semanaQ = await client.query(
+      `SELECT * FROM cajas_semanales WHERE id = $1 FOR UPDATE`,
+      [semanaId]
+    )
+    const semana = semanaQ.rows?.[0]
+    if (!semana) {
+      await client.query("ROLLBACK")
+      return res.status(404).json({ error: "Semana no encontrada" })
+    }
+
+    if (String(semana.estado || "").toLowerCase() === "cerrada") {
+      await client.query("ROLLBACK")
+      return res.status(400).json({ error: "La semana está cerrada" })
+    }
+
+    if (semana.control_inicial_realizado) {
+      await client.query("ROLLBACK")
+      return res.status(400).json({ error: "El control semanal ya fue registrado" })
+    }
+
+    const movsQ = await client.query(`SELECT COUNT(*)::int AS total FROM movimientos_caja WHERE caja_semanal_id = $1`, [semanaId])
+    if (Number(movsQ.rows?.[0]?.total || 0) > 0) {
+      await client.query("ROLLBACK")
+      return res.status(400).json({ error: "El control semanal debe ser el primer movimiento de la semana" })
+    }
+
+    const anterior = await obtenerCajaSemanalAnterior(semana.caja_codigo, semana.fecha_inicio)
+    const candidatos = anterior
+      ? await obtenerChequesDisponiblesAlCierreSemana({
+        cajaCodigo: semana.caja_codigo,
+        fechaFin: normalizarFechaISO(anterior.fecha_fin),
+      })
+      : []
+
+    const mapCandidatos = new Map((candidatos || []).map((item) => [Number(item.id), item]))
+    const invalidos = ids.filter((id) => !mapCandidatos.has(id))
+    if (invalidos.length > 0) {
+      await client.query("ROLLBACK")
+      return res.status(400).json({ error: "Hay cheques seleccionados que no pertenecen al cierre de la semana anterior" })
+    }
+
+    const chequesSeleccionados = ids.map((id) => mapCandidatos.get(id))
+    const totalCheques = roundMoney(chequesSeleccionados.reduce((acc, item) => acc + Number(item?.importe || 0), 0))
+    const montoTotal = roundMoney(efectivoInicial + totalCheques)
+
+    if (montoTotal <= 0) {
+      await client.query("ROLLBACK")
+      return res.status(400).json({ error: "Debe informar efectivo o seleccionar cheques para el control semanal" })
+    }
+
+    const fechaControl = normalizarFechaISO(req.body?.fecha_control || semana.fecha_inicio) || semana.fecha_inicio
+    const detalle = String(req.body?.detalle || "Control semanal inicial de caja").trim() || "Control semanal inicial de caja"
+    const observaciones = String(req.body?.observaciones || "").trim() || null
+
+    const insertMovQ = await client.query(
+      `
+      INSERT INTO movimientos_caja (
+        fecha, caja_codigo, tipo, ${detalleColumn}, observaciones, monto_total,
+        categoria, categoria_id, con_iva, destinatario, cliente_id, presupuesto_id, caja_semanal_id, es_control_semanal
+      ) VALUES ($1,$2,'ingreso',$3,$4,$5,'varios',NULL,TRUE,NULL,NULL,NULL,$6,TRUE)
+      RETURNING *
+      `,
+      [fechaControl, semana.caja_codigo, detalle, observaciones, montoTotal, semanaId]
+    )
+    const movimiento = insertMovQ.rows[0]
+
+    if (efectivoInicial > 0) {
+      await client.query(
+        `
+        INSERT INTO detalles_medio_pago (movimiento_id, medio_pago, monto, identificador, banco, fecha_cobro)
+        VALUES ($1,'efectivo',$2,NULL,NULL,NULL)
+        `,
+        [movimiento.id, efectivoInicial]
+      )
+    }
+
+    for (const cheque of chequesSeleccionados) {
+      await client.query(
+        `
+        INSERT INTO detalles_medio_pago (
+          movimiento_id, medio_pago, monto, identificador, banco, fecha_cobro,
+          librador_endosante, numero_cheque, fecha_cheque, fecha_entrada, libro_cheque_id
+        ) VALUES ($1,'cheque',$2,$3,$4,NULL,$5,$6,$7,$8,$9)
+        `,
+        [
+          movimiento.id,
+          roundMoney(Number(cheque.importe || 0)),
+          String(cheque.numero_cheque || "").trim() || null,
+          String(cheque.banco || "").trim() || null,
+          String(cheque.librador_endosante || "").trim() || null,
+          String(cheque.numero_cheque || "").trim() || null,
+          normalizarFechaISO(cheque.fecha_cheque),
+          normalizarFechaISO(cheque.fecha_entrada),
+          Number(cheque.id),
+        ]
+      )
+    }
+
+    for (const id of ids) {
+      await client.query(
+        `
+        INSERT INTO cajas_semanales_cheques_control (caja_semanal_id, libro_cheque_id)
+        VALUES ($1, $2)
+        ON CONFLICT (caja_semanal_id, libro_cheque_id) DO NOTHING
+        `,
+        [semanaId, id]
+      )
+    }
+
+    await client.query(
+      `
+      UPDATE cajas_semanales
+      SET control_inicial_realizado = TRUE,
+          control_inicial_movimiento_id = $2,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      `,
+      [semanaId, movimiento.id]
+    )
+
+    await client.query("COMMIT")
+
+    await recalcularCajaSemanal(semanaId)
+    getIo()?.emit("caja:changed")
+
+    return res.status(201).json({ ok: true, movimiento_id: movimiento.id })
+  } catch (err) {
+    try { await client.query("ROLLBACK") } catch (_) {}
+    return res.status(500).json({ error: err.message })
+  } finally {
+    client.release()
   }
 })
 
@@ -2928,6 +3431,16 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Tipo debe ser 'ingreso' o 'egreso'" })
     }
 
+    const semanaDestino = await asegurarCajaSemanal(cajaCodigoNormalizada, fecha)
+    const checkPrimerMov = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM movimientos_caja WHERE caja_semanal_id = $1`,
+      [Number(semanaDestino.id)]
+    )
+    const cantidadSemana = Number(checkPrimerMov.rows?.[0]?.total || 0)
+    if (cantidadSemana === 0) {
+      return res.status(400).json({ error: "Debe registrar primero el control semanal inicial para comenzar la semana" })
+    }
+
     if (tipoNormalizado === "egreso" && !destinatarioNormalizado) {
       return res.status(400).json({ error: "El destinatario es obligatorio para egresos" })
     }
@@ -3174,6 +3687,220 @@ router.put("/:id", async (req, res) => {
 
     if (!movimientoActual) {
       return res.status(404).json({ error: "Movimiento no encontrado" })
+    }
+
+    if (Boolean(movimientoActual?.es_control_semanal)) {
+      const semanaId = normalizarCajaSemanalId(movimientoActual.caja_semanal_id)
+      if (!semanaId) {
+        return res.status(400).json({ error: "El movimiento de control semanal no tiene semana asociada" })
+      }
+
+      const client = await pool.connect()
+      try {
+        await client.query("BEGIN")
+
+        const semanaQ = await client.query(
+          `SELECT * FROM cajas_semanales WHERE id = $1 FOR UPDATE`,
+          [semanaId]
+        )
+        const semana = semanaQ.rows?.[0]
+        if (!semana) {
+          await client.query("ROLLBACK")
+          return res.status(404).json({ error: "Semana no encontrada" })
+        }
+
+        if (String(semana.estado || "").toLowerCase() === "cerrada") {
+          await client.query("ROLLBACK")
+          return res.status(400).json({ error: "La semana está cerrada" })
+        }
+
+        if (Number(semana.control_inicial_movimiento_id || 0) !== Number(id)) {
+          await client.query("ROLLBACK")
+          return res.status(400).json({ error: "Solo se puede editar el movimiento asignado como control semanal" })
+        }
+
+        const movsQ = await client.query(
+          `SELECT COUNT(*)::int AS total FROM movimientos_caja WHERE caja_semanal_id = $1 AND id <> $2`,
+          [semanaId, Number(id)]
+        )
+        if (Number(movsQ.rows?.[0]?.total || 0) > 0) {
+          await client.query("ROLLBACK")
+          return res.status(400).json({ error: "No se puede editar el control semanal cuando ya existen otros movimientos en la semana" })
+        }
+
+        const anterior = await obtenerCajaSemanalAnterior(semana.caja_codigo, semana.fecha_inicio)
+        const candidatos = anterior
+          ? await obtenerChequesDisponiblesAlCierreSemana({
+            cajaCodigo: semana.caja_codigo,
+            fechaFin: normalizarFechaISO(anterior.fecha_fin),
+          })
+          : []
+
+        const mapCandidatos = new Map((candidatos || []).map((item) => [Number(item.id), item]))
+
+        const idsControl = Array.isArray(detalles_medio_pago)
+          ? Array.from(new Set(
+            detalles_medio_pago
+              .filter((item) => String(item?.medio_pago || "").toLowerCase() === "cheque")
+              .map((item) => Number(item?.libro_cheque_id || 0))
+              .filter((valor) => Number.isInteger(valor) && valor > 0)
+          ))
+          : (await client.query(
+            `SELECT libro_cheque_id FROM cajas_semanales_cheques_control WHERE caja_semanal_id = $1`,
+            [semanaId]
+          )).rows.map((item) => Number(item.libro_cheque_id)).filter((valor) => Number.isInteger(valor) && valor > 0)
+
+        const invalidos = idsControl.filter((chequeId) => !mapCandidatos.has(chequeId))
+        if (invalidos.length > 0) {
+          await client.query("ROLLBACK")
+          return res.status(400).json({ error: "Hay cheques seleccionados que no pertenecen al cierre de la semana anterior" })
+        }
+
+        let efectivoInicial = 0
+        if (desglose !== undefined) {
+          efectivoInicial = roundMoney(Number(desglose?.efectivo || 0))
+        } else if (Array.isArray(detalles_medio_pago)) {
+          efectivoInicial = roundMoney(
+            detalles_medio_pago
+              .filter((item) => String(item?.medio_pago || "").toLowerCase() === "efectivo")
+              .reduce((acc, item) => acc + Number(item?.monto || 0), 0)
+          )
+        } else {
+          const efectivoQ = await client.query(
+            `
+              SELECT COALESCE(SUM(monto), 0)::numeric AS total
+              FROM detalles_medio_pago
+              WHERE movimiento_id = $1
+                AND medio_pago = 'efectivo'
+            `,
+            [Number(id)]
+          )
+          efectivoInicial = roundMoney(Number(efectivoQ.rows?.[0]?.total || 0))
+        }
+
+        if (efectivoInicial < 0) {
+          await client.query("ROLLBACK")
+          return res.status(400).json({ error: "El efectivo inicial no puede ser negativo" })
+        }
+
+        const chequesSeleccionados = idsControl.map((chequeId) => mapCandidatos.get(chequeId)).filter(Boolean)
+        const totalCheques = roundMoney(chequesSeleccionados.reduce((acc, item) => acc + Number(item?.importe || 0), 0))
+        const montoControl = roundMoney(efectivoInicial + totalCheques)
+
+        if (montoControl <= 0) {
+          await client.query("ROLLBACK")
+          return res.status(400).json({ error: "Debe informar efectivo o seleccionar cheques para el control semanal" })
+        }
+
+        const fechaControl = normalizarFechaISO(fecha || movimientoActual.fecha || semana.fecha_inicio) || semana.fecha_inicio
+        const detalleControl = String(detalle ?? movimientoActual?.[detalleColumn] ?? "Control semanal inicial de caja").trim() || "Control semanal inicial de caja"
+        const observacionesControl = observaciones !== undefined
+          ? (String(observaciones || "").trim() || null)
+          : (String(movimientoActual?.observaciones || "").trim() || null)
+
+        await client.query(
+          `
+            UPDATE movimientos_caja
+            SET fecha = $2,
+                caja_codigo = $3,
+                tipo = 'ingreso',
+                ${detalleColumn} = $4,
+                observaciones = $5,
+                monto_total = $6,
+                categoria = 'varios',
+                categoria_id = NULL,
+                con_iva = TRUE,
+                destinatario = NULL,
+                cliente_id = NULL,
+                presupuesto_id = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+          `,
+          [Number(id), fechaControl, semana.caja_codigo, detalleControl, observacionesControl, montoControl]
+        )
+
+        await client.query(`DELETE FROM detalles_medio_pago WHERE movimiento_id = $1`, [Number(id)])
+
+        if (efectivoInicial > 0) {
+          await client.query(
+            `
+              INSERT INTO detalles_medio_pago (movimiento_id, medio_pago, monto, identificador, banco, fecha_cobro)
+              VALUES ($1, 'efectivo', $2, NULL, NULL, NULL)
+            `,
+            [Number(id), efectivoInicial]
+          )
+        }
+
+        for (const cheque of chequesSeleccionados) {
+          await client.query(
+            `
+              INSERT INTO detalles_medio_pago (
+                movimiento_id, medio_pago, monto, identificador, banco, fecha_cobro,
+                librador_endosante, numero_cheque, fecha_cheque, fecha_entrada, libro_cheque_id
+              ) VALUES ($1, 'cheque', $2, $3, $4, NULL, $5, $6, $7, $8, $9)
+            `,
+            [
+              Number(id),
+              roundMoney(Number(cheque.importe || 0)),
+              String(cheque.numero_cheque || "").trim() || null,
+              String(cheque.banco || "").trim() || null,
+              String(cheque.librador_endosante || "").trim() || null,
+              String(cheque.numero_cheque || "").trim() || null,
+              normalizarFechaISO(cheque.fecha_cheque),
+              normalizarFechaISO(cheque.fecha_entrada),
+              Number(cheque.id),
+            ]
+          )
+        }
+
+        await client.query(`DELETE FROM cajas_semanales_cheques_control WHERE caja_semanal_id = $1`, [semanaId])
+        for (const chequeId of idsControl) {
+          await client.query(
+            `
+              INSERT INTO cajas_semanales_cheques_control (caja_semanal_id, libro_cheque_id)
+              VALUES ($1, $2)
+              ON CONFLICT (caja_semanal_id, libro_cheque_id) DO NOTHING
+            `,
+            [semanaId, chequeId]
+          )
+        }
+
+        await client.query(
+          `
+            UPDATE cajas_semanales
+            SET control_inicial_realizado = TRUE,
+                control_inicial_movimiento_id = $2,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+          `,
+          [semanaId, Number(id)]
+        )
+
+        await client.query("COMMIT")
+
+        await recalcularCajaSemanal(semanaId)
+
+        const { data: movimientoControlFinal } = await db
+          .from("movimientos_caja")
+          .select(`
+            *,
+            detalles_medio_pago(*)
+          `)
+          .eq("id", id)
+          .single()
+
+        const movimientoControlNormalizado = normalizarMovimiento(movimientoControlFinal)
+        movimientoControlNormalizado.presupuestos_ids = []
+        movimientoControlNormalizado.presupuestos_asignaciones = []
+
+        getIo()?.emit('caja:changed')
+        return res.json(movimientoControlNormalizado)
+      } catch (errorControl) {
+        try { await client.query("ROLLBACK") } catch (_) {}
+        return res.status(500).json({ error: errorControl.message })
+      } finally {
+        client.release()
+      }
     }
 
     const tipoFinal = tipoNormalizado || String(movimientoActual.tipo || "").toLowerCase()
@@ -3646,12 +4373,81 @@ router.delete("/:id", async (req, res) => {
 
     const { data: movimientoActual, error: errorMovimientoActual } = await db
       .from("movimientos_caja")
-      .select("id, caja_semanal_id, tipo")
+      .select("id, caja_semanal_id, tipo, es_control_semanal")
       .eq("id", id)
       .single()
 
     if (errorMovimientoActual || !movimientoActual) {
       return res.status(404).json({ error: "Movimiento no encontrado" })
+    }
+
+    if (Boolean(movimientoActual?.es_control_semanal)) {
+      const semanaId = normalizarCajaSemanalId(movimientoActual.caja_semanal_id)
+      if (!semanaId) {
+        return res.status(400).json({ error: "El movimiento de control semanal no tiene semana asociada" })
+      }
+
+      const client = await pool.connect()
+      try {
+        await client.query("BEGIN")
+
+        const semanaQ = await client.query(
+          `SELECT * FROM cajas_semanales WHERE id = $1 FOR UPDATE`,
+          [semanaId]
+        )
+        const semana = semanaQ.rows?.[0]
+        if (!semana) {
+          await client.query("ROLLBACK")
+          return res.status(404).json({ error: "Semana no encontrada" })
+        }
+
+        if (String(semana.estado || "").toLowerCase() === "cerrada") {
+          await client.query("ROLLBACK")
+          return res.status(400).json({ error: "La semana está cerrada" })
+        }
+
+        if (Number(semana.control_inicial_movimiento_id || 0) !== Number(id)) {
+          await client.query("ROLLBACK")
+          return res.status(400).json({ error: "Solo se puede eliminar el movimiento asignado como control semanal" })
+        }
+
+        const otrosMovimientosQ = await client.query(
+          `SELECT COUNT(*)::int AS total FROM movimientos_caja WHERE caja_semanal_id = $1 AND id <> $2`,
+          [semanaId, Number(id)]
+        )
+
+        if (Number(otrosMovimientosQ.rows?.[0]?.total || 0) > 0) {
+          await client.query("ROLLBACK")
+          return res.status(400).json({ error: "No se puede eliminar el control semanal porque ya existen otros movimientos en la semana" })
+        }
+
+        await client.query(`DELETE FROM cajas_semanales_cheques_control WHERE caja_semanal_id = $1`, [semanaId])
+        await client.query(`DELETE FROM detalles_medio_pago WHERE movimiento_id = $1`, [Number(id)])
+        await client.query(`DELETE FROM movimientos_caja WHERE id = $1`, [Number(id)])
+
+        await client.query(
+          `
+            UPDATE cajas_semanales
+            SET control_inicial_realizado = FALSE,
+                control_inicial_movimiento_id = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+          `,
+          [semanaId]
+        )
+
+        await client.query("COMMIT")
+
+        await recalcularCajaSemanal(semanaId)
+
+        getIo()?.emit('caja:changed')
+        return res.json({ mensaje: "Control semanal eliminado" })
+      } catch (errorControlDelete) {
+        try { await client.query("ROLLBACK") } catch (_) {}
+        return res.status(500).json({ error: errorControlDelete.message })
+      } finally {
+        client.release()
+      }
     }
 
     // Bloquear solo si existe un recibo emitido activo.
