@@ -241,7 +241,7 @@ const openGenerator = (presupuestoId = "") => {
   resetForm()
   selectedGroupId.value = ""
   form.value.presupuesto_id = String(presupuestoId)
-  showAdvanceModal.value = false
+  showAdvanceModal.value = true
   fillIndiceBase(presupuestoId)
   prefillIndiceActual()
 }
@@ -266,6 +266,7 @@ const editCertificado = (certificado) => {
   const indiceActual = Number(certificado.indice_actual_cac) || 0
   const presupuestoRef = presupuestos.value.find((p) => String(p.id) === String(certificado.presupuesto_id))
   const usaIndices = indiceBase > 0 && indiceActual > 0
+  const tipoRegistro = certificado.tipo_registro || ((Number(certificado.monto_base) || 0) > 0 ? "monto" : "porcentaje")
   const indiceBaseSel = indicesCac.value.find((i) => Number(i.valor) === indiceBase)?.id || null
   const indiceActualSel = indicesCac.value.find((i) => Number(i.valor) === indiceActual)?.id || null
 
@@ -275,7 +276,7 @@ const editCertificado = (certificado) => {
   form.value = {
     presupuesto_id: String(certificado.presupuesto_id),
     fecha: String(certificado.fecha || "").slice(0, 10),
-    tipo_registro: certificado.tipo_registro || "porcentaje",
+    tipo_registro: tipoRegistro,
     porcentaje_avance: Number(certificado.porcentaje_avance) || 0,
     monto_base: Number(certificado.monto_base) || 0,
     indice_modo: "indices",
@@ -424,7 +425,7 @@ onUnmounted(() => {
             <span>Presupuestos habilitados</span>
             <strong>{{ presupuestosDisponiblesParaPrimerCertificado.length }}</strong>
           </div>
-          <button class="btn-primary topbar-main-btn" type="button" @click="openGenerator()">+ Nuevo generador</button>
+          <button class="btn-primary topbar-main-btn" type="button" @click="openGenerator()">+ Nuevo certificado</button>
         </div>
       </section>
 
@@ -451,156 +452,7 @@ onUnmounted(() => {
         </article>
       </section>
 
-      <section class="form-card">
-        <div class="section-head">
-          <div>
-            <span class="section-kicker">Generador base</span>
-            <h3>Generador de certificados</h3>
-            <p>Solo muestra presupuestos originales que todavia no tienen certificados.</p>
-          </div>
-          <button class="btn-secondary" type="button" @click="openGenerator()">Nuevo generador</button>
-        </div>
-
-        <div class="summary-pills">
-          <div class="summary-pill">
-            <span>Presupuesto seleccionado</span>
-            <strong>{{ presupuestoSeleccionado ? `#${presupuestoSeleccionado.numero}` : "Sin seleccionar" }}</strong>
-          </div>
-          <div class="summary-pill">
-            <span>Modalidad</span>
-            <strong>{{ form.tipo_registro === "monto" ? "Por monto" : "Por porcentaje" }}</strong>
-          </div>
-          <div class="summary-pill">
-            <span>Actualización CAC</span>
-            <strong>{{ formatMoney(actualizacion) }}</strong>
-          </div>
-          <div class="summary-pill">
-            <span>Total estimado</span>
-            <strong>{{ formatMoney(totalCertConIva) }}</strong>
-          </div>
-        </div>
-
-        <div class="grid-form grid-form-surface generator-form">
-          <div class="full-span">
-            <label>Presupuesto original</label>
-            <select v-model="form.presupuesto_id">
-              <option value="">Seleccionar</option>
-              <option v-for="p in presupuestosDisponiblesParaPrimerCertificado" :key="p.id" :value="String(p.id)">
-                #{{ p.numero }} - {{ p.cliente }} - {{ p.obra }}
-              </option>
-            </select>
-          </div>
-
-          <div class="gen-col-3">
-            <label>Fecha</label>
-            <input v-model="form.fecha" type="date" />
-          </div>
-
-          <div class="gen-col-3">
-            <label>Estado</label>
-            <select v-model="form.estado">
-              <option value="pendiente">Pendiente</option>
-              <option value="pagado">Pagado</option>
-            </select>
-          </div>
-
-          <div class="gen-col-3">
-            <label>Tipo de avance</label>
-            <select v-model="form.tipo_registro">
-              <option value="porcentaje">Por porcentaje</option>
-              <option value="monto">Por monto</option>
-            </select>
-          </div>
-
-          <div v-if="form.tipo_registro === 'porcentaje'" class="gen-col-3">
-            <label>Porcentaje de avance</label>
-            <input v-model.number="form.porcentaje_avance" type="number" min="0" step="0.01" />
-          </div>
-
-          <div v-else class="gen-col-3">
-            <label>Monto base</label>
-            <input v-model.number="form.monto_base" type="number" min="0" step="0.01" />
-          </div>
-
-          <div class="full-span form-flow-hint">
-            <strong>Flujo sugerido</strong>
-            <span>Base CAC tomada del presupuesto original. Elegí índice actual y luego confirmá avance, IVA y pagos.</span>
-          </div>
-
-          <div class="gen-col-3">
-            <label>Índice CAC base (presupuesto original)</label>
-            <input :value="indiceCacBaseSeleccionado ? `${indiceCacBaseSeleccionado.periodo} — ${indiceCacBaseSeleccionado.valor}` : (form.indice_cac_base ? form.indice_cac_base : 'Sin índice base en presupuesto')" type="text" readonly />
-          </div>
-
-          <div class="gen-col-3">
-            <label>Índice CAC actual</label>
-            <div class="inline-actions">
-              <select v-if="indicesCac.length" v-model="form.indice_cac_actual_sel" style="margin-bottom:.3rem">
-                <option value="">— Seleccionar del registro —</option>
-                <option v-for="idx in indicesCac" :key="idx.id" :value="idx.id">{{ idx.periodo }} — {{ idx.valor }}</option>
-              </select>
-              <button class="btn-secondary btn-mini" type="button" @click="aplicarUltimoIndiceActual">Usar último</button>
-            </div>
-          </div>
-
-          <div class="gen-col-2">
-            <label>Factor efectivo</label>
-            <input :value="Number(indiceCacEfectivoRedondeado).toFixed(4)" type="text" readonly />
-          </div>
-
-          <div class="gen-col-2">
-            <label>Diferencia CAC</label>
-            <input :value="`${Number(indiceCacVariacionPorcentual).toFixed(2)}%`" type="text" readonly />
-          </div>
-
-          <div class="field-card checkbox-card gen-col-2">
-            <label class="checkbox-label">
-              <input v-model="form.aplica_iva" type="checkbox" />
-              <span>Agregar IVA en este certificado</span>
-            </label>
-          </div>
-
-          <div v-if="!tieneIndiceBase || !tieneIndiceActual" class="full-span cert-warning">
-            <strong>Falta completar índices CAC</strong>
-            <span v-if="!tieneIndiceBase">Este presupuesto no tiene índice base cargado.</span>
-            <span v-else>Seleccioná un índice CAC actual para poder generar el certificado.</span>
-          </div>
-
-          <div class="gen-col-2">
-            <label>IVA %</label>
-            <input v-model.number="form.iva_porcentaje" type="number" min="0" step="0.01" :disabled="!form.aplica_iva" />
-          </div>
-
-          <div class="gen-col-2">
-            <label>Pagos</label>
-            <input v-model.number="form.pagos" type="number" min="0" step="0.01" />
-          </div>
-
-          <div class="full-span">
-            <label>Observaciones</label>
-            <input v-model="form.observaciones" type="text" />
-          </div>
-        </div>
-
-        <div class="stats-grid preview-grid">
-          <div class="stat-card"><span>Importe original</span><strong>{{ formatMoney(importeOriginal) }}</strong></div>
-          <div class="stat-card"><span>Monto base</span><strong>{{ formatMoney(montoBaseCalculado) }}</strong></div>
-          <div class="stat-card"><span>Actualizacion CAC</span><strong>{{ formatMoney(actualizacion) }}</strong></div>
-          <div class="stat-card"><span>IVA</span><strong>{{ formatMoney(iva) }}</strong></div>
-          <div class="stat-card"><span>Total cert. sin IVA</span><strong>{{ formatMoney(totalCertSinIva) }}</strong></div>
-          <div class="stat-card"><span>Total cert. con IVA</span><strong>{{ formatMoney(totalCertConIva) }}</strong></div>
-          <div class="stat-card"><span>Acumulado con este cert.</span><strong>{{ formatMoney(acumuladoConActual) }}</strong></div>
-          <div class="stat-card"><span>Saldo presupuesto</span><strong>{{ formatMoney(saldoPreOriginal) }}</strong></div>
-          <div class="stat-card"><span>Saldo pendiente del cert.</span><strong>{{ formatMoney(saldoPendiente) }}</strong></div>
-        </div>
-
-        <div class="actions">
-          <button class="btn-secondary" type="button" @click="resetForm">Limpiar</button>
-          <button class="btn-primary" :disabled="saving || !certificadoListo" @click="saveCertificado">
-            {{ saving ? "Guardando..." : "Generar certificado original" }}
-          </button>
-        </div>
-      </section>
+      
 
       <section class="table-card">
         <div class="section-head">
@@ -671,14 +523,14 @@ onUnmounted(() => {
 
       <Modal
         v-if="showAdvanceModal"
-        :maxWidth="editingId ? '1220px' : '1080px'"
-        bodyMaxHeight="78vh"
+        :maxWidth="editingId ? '1360px' : '1280px'"
+        bodyMaxHeight="66vh"
         @close="closeAdvanceModal"
       >
         <template #header>
           <div class="modal-header-copy">
-            <span class="section-kicker">Avance secuencial</span>
-            <h2>{{ editingId ? 'Editar avance' : `Nuevo avance ${siguienteSecuencia}` }}</h2>
+            <span class="section-kicker">Certificados</span>
+            <h2>{{ editingId ? 'Editar avance' : `Nuevo certificado ${siguienteSecuencia}` }}</h2>
             <p v-if="presupuestoSeleccionado">
               Presupuesto #{{ presupuestoSeleccionado.numero }} · {{ presupuestoSeleccionado.cliente }} · {{ presupuestoSeleccionado.obra }}
             </p>
@@ -703,6 +555,25 @@ onUnmounted(() => {
 
           <section class="modal-section">
           <div class="grid-form modal-form">
+            <div v-if="!editingId && !selectedGroupId" class="full-span field-card">
+              <label>Presupuesto original</label>
+              <select v-model="form.presupuesto_id">
+                <option value="">Seleccionar</option>
+                <option v-for="p in presupuestosDisponiblesParaPrimerCertificado" :key="p.id" :value="String(p.id)">
+                  #{{ p.numero }} - {{ p.cliente }} - {{ p.obra }}
+                </option>
+              </select>
+            </div>
+
+            <div v-else-if="!editingId && selectedGroupId" class="full-span field-card">
+              <label>Presupuesto original</label>
+              <input
+                :value="presupuestoSeleccionado ? `#${presupuestoSeleccionado.numero} - ${presupuestoSeleccionado.cliente} - ${presupuestoSeleccionado.obra}` : 'Presupuesto no encontrado'"
+                type="text"
+                readonly
+              />
+            </div>
+
             <div class="field-card">
               <label>Fecha</label>
               <input v-model="form.fecha" type="date" />
@@ -825,7 +696,7 @@ onUnmounted(() => {
         <template #footer>
           <button class="btn-secondary" type="button" @click="closeAdvanceModal">Cerrar</button>
           <button class="btn-primary" type="button" :disabled="saving || !certificadoListo" @click="saveCertificado">
-            {{ saving ? "Guardando..." : editingId ? "Actualizar avance" : "Guardar avance" }}
+            {{ saving ? "Guardando..." : editingId ? "Actualizar certificado" : "Crear certificado" }}
           </button>
         </template>
       </Modal>

@@ -96,9 +96,14 @@ const validarInputCertificado = (input = {}) => {
 		return { ok: false, status: 400, error: "presupuesto_id invalido" }
 	}
 
-	const tipoRegistro = normalizeTipoRegistro(input.tipo_registro)
+	const tipoRegistroRaw = normalizeTipoRegistro(input.tipo_registro)
 	const porcentajeAvance = Math.max(0, toNumber(input.porcentaje_avance, 0))
 	const montoBase = Math.max(0, toNumber(input.monto_base, 0))
+	const montoLegacy = Math.max(0, toNumber(input.certificado, 0))
+	// Compatibilidad: si llega sin tipo_registro pero con monto base/certificado, tratar como registro por monto.
+	const tipoRegistro = (tipoRegistroRaw === "porcentaje" && porcentajeAvance <= 0 && (montoBase > 0 || montoLegacy > 0))
+		? "monto"
+		: tipoRegistroRaw
 	const indiceData = resolveIndiceCacData(input)
 	const indiceCac = indiceData.indiceCac
 	const ingresoIndiceBase = toNumber(input.indice_base_cac, 0)
@@ -800,6 +805,12 @@ router.post("/", async (req, res) => {
 
 		const presupuesto = presupuestoResult.rows[0]
 		const indiceBasePresupuesto = Math.max(0, toNumber(presupuesto.indice_base_cac, 0))
+		// Compatibilidad con BD antiguas: algunas tienen unique global en certificados.numero.
+		// Se genera un numero global para evitar choques entre presupuestos distintos.
+		await client.query("LOCK TABLE certificados IN EXCLUSIVE MODE")
+		const numeroGlobalResult = await client.query(
+			`SELECT COALESCE(MAX(numero), 0) + 1 AS siguiente_global FROM certificados`
+		)
 		const secuenciaResult = await client.query(
 			`SELECT COALESCE(MAX(secuencia), 0) + 1 AS siguiente FROM certificados WHERE presupuesto_id = $1`,
 			[validacion.presupuestoId]
@@ -810,6 +821,7 @@ router.post("/", async (req, res) => {
 		)
 
 		const siguienteSecuencia = Number(secuenciaResult.rows[0]?.siguiente) || 1
+		const siguienteNumeroGlobal = Number(numeroGlobalResult.rows[0]?.siguiente_global) || siguienteSecuencia
 		const acumuladoPrevio = toNumber(acumuladoPrevioResult.rows[0]?.acumulado)
 		const calculado = calcularCertificado({
 			presupuesto,
@@ -839,7 +851,7 @@ router.post("/", async (req, res) => {
 			`,
 			[
 				validacion.presupuestoId,
-				siguienteSecuencia,
+				siguienteNumeroGlobal,
 				siguienteSecuencia,
 				fecha || null,
 				validacion.estado,
@@ -916,7 +928,14 @@ router.put("/:id", async (req, res) => {
 			return res.status(404).json({ error: "Presupuesto no encontrado" })
 		}
 
+		const certificadoCompletoResult = await client.query(
+			`SELECT * FROM certificados WHERE id = $1 LIMIT 1`,
+			[certificadoId]
+		)
+		const certificadoCompleto = certificadoCompletoResult.rows?.[0] || {}
+
 		const validacion = validarInputCertificado({
+			...certificadoCompleto,
 			...req.body,
 			presupuesto_id: certificadoActual.presupuesto_id,
 		})
@@ -1011,6 +1030,12 @@ router.put("/:id", async (req, res) => {
 		res.json(mapCertificado(updatedResult.rows[0]))
 	} catch (err) {
 		await client.query("ROLLBACK")
+		if (err?.code === "23505") {
+			return res.status(409).json({ error: "Conflicto de datos al actualizar el certificado. Reintentá la operación." })
+		}
+		if (err?.code === "23514" || err?.code === "22P02" || err?.code === "22003") {
+			return res.status(400).json({ error: `Datos inválidos para actualizar certificado: ${err.message}` })
+		}
 		res.status(500).json({ error: err.message })
 	} finally {
 		client.release()
