@@ -3,13 +3,8 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-<<<<<<< HEAD
   "scripts": {
-    "dev": "vite --port 5173",
-=======
-"scripts": {
     "dev": "vite --port 5173 --strictPort false",
->>>>>>> origin/dev
     "build": "vite build",
     "preview": "vite preview"
   },

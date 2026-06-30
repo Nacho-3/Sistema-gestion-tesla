@@ -2,18 +2,7 @@ import axios from "axios"
 
 import { clearStoredSession } from "./session"
 
-<<<<<<< HEAD
 
-
-const isViteDevServer = window.location.port === "5173"
-
-const DEFAULT_API_BASE_URL = isViteDevServer
-
-  ? `${window.location.protocol}//${window.location.hostname}:3000`
-
-  : "/api"
-
-=======
 // 1. Detectamos en qué entorno local estamos parados según el puerto del navegador
 const isLaboratorioLocal = window.location.port === "5174"
 const isProduccionLocal = window.location.port === "5173"
@@ -27,7 +16,7 @@ if (isLaboratorioLocal) {
   DEFAULT_API_BASE_URL = `${window.location.protocol}//${window.location.hostname}:3000` // Backend de Prod Local
 }
 
->>>>>>> origin/dev
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL
 
 
