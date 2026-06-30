@@ -1,13 +1,19 @@
 import axios from "axios"
 import { clearStoredSession } from "./session"
 
-// Detectamos si estamos en la consola de laboratorio (puerto 5174)
-const isLaboratorio = window.location.port === "5174"
+// 1. Detectamos en qué entorno local estamos parados según el puerto del navegador
+const isLaboratorioLocal = window.location.port === "5174"
+const isProduccionLocal = window.location.port === "5173"
 
-// Si es laboratorio va al 5001. Si es el dev común (producción local), va al 3000.
-const DEFAULT_API_BASE_URL = isLaboratorio
-  ? `${window.location.protocol}//${window.location.hostname}:5001`
-  : `${window.location.protocol}//${window.location.hostname}:3000`
+// 2. Definimos la URL por defecto según el puerto
+let DEFAULT_API_BASE_URL = "/api" // Por defecto para producción real en el servidor
+
+if (isLaboratorioLocal) {
+  DEFAULT_API_BASE_URL = `${window.location.protocol}//${window.location.hostname}:5001` // Backend de Lab
+} else if (isProduccionLocal) {
+  DEFAULT_API_BASE_URL = `${window.location.protocol}//${window.location.hostname}:3000` // Backend de Prod Local
+}
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL
 
 const api = axios.create({
@@ -304,7 +310,7 @@ export default {
   },
 
   // Caja
-  getMovimientosCaja(fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id, busqueda) {
+  getMovimientosCaja(fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id, busqueda, cliente_id) {
     const params = new URLSearchParams()
     if (fecha_inicio) params.append("fecha_inicio", fecha_inicio)
     if (fecha_fin) params.append("fecha_fin", fecha_fin)
@@ -312,6 +318,7 @@ export default {
     if (caja_codigo) params.append("caja_codigo", caja_codigo)
     if (caja_semanal_id) params.append("caja_semanal_id", caja_semanal_id)
     if (busqueda) params.append("busqueda", busqueda)
+    if (cliente_id) params.append("cliente_id", cliente_id)
     return api.get(`/caja?${params.toString()}`)
   },
 
@@ -334,8 +341,13 @@ export default {
     return api.get(`/caja/${id}`)
   },
 
+  
   getMovimientoCajaPdf(id) {
     return api.get(`/caja/${id}/pdf`, { responseType: "blob" })
+  },
+
+  updateMovimientoCaja(id, payload) {
+    return api.put(`/caja/${id}`, payload)
   },
 
   createMovimientoCaja(payload) {
@@ -356,10 +368,6 @@ export default {
 
   getEstadoImportacionSueldos(mes, anio) {
     return api.get("/caja/importar-sueldos/estado", { params: { mes, anio } })
-  },
-
-  updateMovimientoCaja(id, payload) {
-    return api.put(`/caja/${id}`, payload)
   },
 
   deleteMovimientoCaja(id) {

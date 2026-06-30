@@ -103,13 +103,20 @@ export const drawPremiumHeader = (doc, { title, subtitle, accentText, logoPath }
     ? Math.max(220, logoLeftX - logoReservedGap - 45)
     : pageWidth - 90
 
-  doc.fillColor(PDF_COLORS.ink).font("Helvetica-Bold").fontSize(16).text(title, 45, top + 45, { width: contentWidth })
-  doc.font("Helvetica").fontSize(10).fillColor(PDF_COLORS.slate).text(subtitle, 45, top + 69, { width: contentWidth })
+  const titleY = top + 40
+  const subtitleY = titleY + 24
+  const accentY = subtitleY + 14
+
+  doc.fillColor(PDF_COLORS.ink).font("Helvetica-Bold").fontSize(16).text(title, 45, titleY, { width: contentWidth })
+  doc.font("Helvetica").fontSize(10).fillColor(PDF_COLORS.slate).text(subtitle, 45, subtitleY, {
+    width: contentWidth,
+    lineBreak: false,
+  })
   if (accentText) {
     doc.font("Helvetica-Bold").fillColor(PDF_COLORS.muted)
     const fitted = fitSingleLineText(doc, accentText, contentWidth, 9, 7)
     doc.fontSize(fitted.fontSize)
-    doc.text(fitted.text, 45, top + 65, { lineBreak: false })
+    doc.text(fitted.text, 45, accentY, { lineBreak: false })
   }
 
   if (logoPath && fs.existsSync(logoPath)) {
@@ -117,7 +124,7 @@ export const drawPremiumHeader = (doc, { title, subtitle, accentText, logoPath }
     doc.image(logoPath, logoX, top + 6, { fit: [66, 60] })
   }
 
-  const lineY = top + 85
+  const lineY = accentText ? accentY + 16 : subtitleY + 16
   doc.strokeColor(PDF_COLORS.line).lineWidth(1).moveTo(45, lineY).lineTo(pageWidth - 45, lineY).stroke()
 
   doc.fillColor(PDF_COLORS.ink)

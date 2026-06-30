@@ -295,7 +295,7 @@ const validarCamposChequeIngreso = (item = {}) => {
 }
 
 async function crearChequesLibroDesdeIngreso({ client, movimientoId, cajaCodigo, fechaMovimiento, detallesPago = [] }) {
-  const chequesIngreso = detallesPago.filter((item) => ["cheque", "echeq"].includes(String(item?.medio_pago || "").toLowerCase()))
+  const chequesIngreso = detallesPago.filter((item) => String(item?.medio_pago || "").toLowerCase() === "cheque")
   if (!chequesIngreso.length) return
 
   const existentes = await client.query(
@@ -627,7 +627,7 @@ async function obtenerChequesDisponiblesAlCierreSemana({ cajaCodigo, fechaFin })
       SELECT l.*
       FROM libro_cheques_caja l
       WHERE l.caja_codigo = $1
-        AND l.medio_pago IN ('cheque', 'echeq')
+        AND l.medio_pago = 'cheque'
         AND LOWER(COALESCE(l.estado, '')) <> 'anulado'
         AND l.fecha_entrada <= $2
         AND (l.fecha_salida IS NULL OR l.fecha_salida > $2)
@@ -694,7 +694,7 @@ async function obtenerChequesDisponiblesSemana({ cajaCodigo, cajaSemanalId, fech
       WHERE m.caja_semanal_id = $1
         AND m.caja_codigo = $2
         AND LOWER(COALESCE(l.estado, '')) = 'disponible'
-        AND l.medio_pago IN ('cheque', 'echeq')
+        AND l.medio_pago = 'cheque'
       ORDER BY l.fecha_cheque DESC NULLS LAST, l.id ASC
     `,
     [semanaId, cajaCodigo]
@@ -1504,7 +1504,7 @@ async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_
 // Listar movimientos de caja con filtros
 router.get("/", async (req, res) => {
   try {
-    const { fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id, busqueda } = req.query
+    const { fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id, busqueda, cliente_id } = req.query
 
     if (caja_codigo && !CAJAS_DISPONIBLES.includes(String(caja_codigo).toLowerCase())) {
       return res.status(400).json({ error: "Caja inválida" })
@@ -1519,6 +1519,21 @@ router.get("/", async (req, res) => {
       caja_codigo: caja_codigo ? String(caja_codigo).toLowerCase() : undefined,
       caja_semanal_id: cajaSemanalIdNormalizada,
     })
+
+    // Si se filtra por cliente, asegurar que presupuestos_ids está cargado
+    if (cliente_id) {
+      const clienteIdNum = Number(cliente_id)
+      movimientos = movimientos.filter(m => Number(m.cliente_id) === clienteIdNum)
+      
+      // Recargar presupuestos_ids para cada movimiento del cliente
+      for (const mov of movimientos) {
+        const presupuestosIds = await obtenerPresupuestosIdsPorMovimiento(mov.id)
+        if (presupuestosIds && presupuestosIds.length > 0) {
+          mov.presupuestos_ids = presupuestosIds
+          if (!mov.presupuesto_id) mov.presupuesto_id = presupuestosIds[0]
+        }
+      }
+    }
 
     // Filtro por palabra clave si se envía 'busqueda'
     if (busqueda && String(busqueda).trim() !== "") {
@@ -1566,7 +1581,7 @@ router.get("/libro-cheques", async (req, res) => {
     }
 
     const params = [cajaCodigo]
-    const where = ["l.caja_codigo = $1", "l.medio_pago IN ('cheque', 'echeq')"]
+    const where = ["l.caja_codigo = $1", "l.medio_pago = 'cheque'"]
 
     if (estado) {
       if (!ESTADOS_LIBRO_CHEQUES.includes(estado)) {
@@ -1643,7 +1658,7 @@ router.get("/libro-cheques", async (req, res) => {
           JOIN movimientos_caja m ON m.id = l.movimiento_entrada_id
           WHERE m.caja_semanal_id = $1
             AND m.caja_codigo = $2
-            AND l.medio_pago IN ('cheque', 'echeq')
+            AND l.medio_pago = 'cheque'
         `,
         [Number(semana.id), cajaCodigo]
       )
@@ -1761,7 +1776,7 @@ router.get("/libro-cheques/disponibles", async (req, res) => {
       SELECT *
       FROM libro_cheques_caja
       WHERE caja_codigo = $1
-        AND medio_pago IN ('cheque', 'echeq')
+        AND medio_pago = 'cheque'
         AND estado = 'disponible'
       ORDER BY fecha_cheque DESC, id ASC
       `,
@@ -1795,7 +1810,7 @@ router.get("/libro-cheques/pdf", async (req, res) => {
     }
 
     const params = [cajaCodigo]
-    const where = ["l.caja_codigo = $1", "l.medio_pago IN ('cheque', 'echeq')"]
+    const where = ["l.caja_codigo = $1", "l.medio_pago = 'cheque'"]
 
     if (busqueda) {
       params.push(`%${busqueda}%`)
@@ -1855,7 +1870,7 @@ router.get("/libro-cheques/pdf", async (req, res) => {
             JOIN movimientos_caja m ON m.id = l.movimiento_entrada_id
             WHERE m.caja_semanal_id = $1
               AND m.caja_codigo = $2
-              AND l.medio_pago IN ('cheque', 'echeq')
+              AND l.medio_pago = 'cheque'
           `,
           [Number(semana.id), cajaCodigo]
         )
