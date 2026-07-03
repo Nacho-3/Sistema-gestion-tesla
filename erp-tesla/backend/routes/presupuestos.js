@@ -812,8 +812,9 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 						const actual = items[index]
 						const cantidadBloque = Math.max(1, Number(actual?.cantidad || 1))
 						const itemsBloque = items.slice(index, Math.min(items.length, index + cantidadBloque))
+						const titulo = sanitizeDescripcion(actual?.etapa)
 
-						bloques.push({ items: itemsBloque })
+						bloques.push({ items: itemsBloque, titulo })
 						index += Math.max(1, cantidadBloque)
 					}
 
@@ -827,13 +828,14 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 						if (idx > 0) {
 							y += 6
 						}
+						y = sectionHeader(bloque.titulo || `Bloque ${idx + 1}`, y)
 						const manoRows = bloque.items.map((item, itemIdx) => ([`${itemIdx + 1}. ${item.descripcion || "-"}`]))
 						const subtotalBloque = bloque.items.reduce((acc, item) => acc + Number(item?.subtotal || 0), 0)
 						y = drawTable({
 							yStart: y,
 							columns: columnasBloqueCantidad,
 							rows: manoRows.length ? manoRows : manoObraEmptyRow,
-							subtotalLabel: "Subtotal",
+							subtotalLabel: "Subtotal bloque",
 							subtotalValue: formatoMonedaPdf(subtotalBloque),
 						})
 					})

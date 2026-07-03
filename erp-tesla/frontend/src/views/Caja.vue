@@ -32,6 +32,7 @@ const filtroBusqueda = ref("")
 const semanasCaja = ref([])
 const semanaActual = ref(null)
 const semanaSeleccionadaId = ref("")
+const mostrarModalAbrirSemana = ref(false)
 const mostrarModalCerrarSemana = ref(false)
 const saldoBancoCierre = ref("")
 const saldoPendienteEcheqCierre = ref("")
@@ -44,8 +45,11 @@ const saldoEcheqDepositadosEditable = ref("")
 const saldoEfectivoEditable = ref("")
 const saldoChequesEditable = ref("")
 const guardandoSaldosSemana = ref(false)
-const proximaSemanaInfo = ref(null)
 const confirmandoCierre = ref(false)
+const abriendoSemana = ref(false)
+const formAbrirSemana = ref({
+  fecha_inicio: "",
+})
 const libroCheques = ref([])
 const chequesDisponibles = ref([])
 const loadingLibroCheques = ref(false)
@@ -245,6 +249,13 @@ const getRangoSemanaLocal = (fechaValor) => {
 
 const normalizarFechaSemana = (valor) => String(valor || "").split("T")[0]
 
+const normalizarEstadoSemana = (estado) => {
+  const valor = String(estado || "").trim().toLowerCase()
+  if (["abierta", "abierto"].includes(valor)) return "abierta"
+  if (["cerrada", "cerrado"].includes(valor)) return "cerrada"
+  return valor || "cerrada"
+}
+
 const normalizarSemanaCaja = (semana, defaults = {}) => {
   if (!semana) return null
   return {
@@ -265,7 +276,7 @@ const normalizarSemanaCaja = (semana, defaults = {}) => {
     saldo_echeq_depositados: semana.saldo_echeq_depositados === null || semana.saldo_echeq_depositados === undefined ? null : Number(semana.saldo_echeq_depositados),
     saldo_efectivo: semana.saldo_efectivo === null || semana.saldo_efectivo === undefined ? null : Number(semana.saldo_efectivo),
     saldo_cheques: semana.saldo_cheques === null || semana.saldo_cheques === undefined ? null : Number(semana.saldo_cheques),
-    estado: String(semana.estado || defaults.estado || "cerrada").toLowerCase(),
+    estado: normalizarEstadoSemana(semana.estado || defaults.estado || "cerrada"),
   }
 }
 
@@ -289,18 +300,41 @@ const movimientoPerteneceASemana = (movimiento, semana) => {
 
   const semanaId = extraerSemanaIdNumerica(semana.id)
   const movimientoSemanaId = extraerSemanaIdNumerica(movimiento?.caja_semanal_id)
+  const fechaMovimiento = String(movimiento?.fecha || "").split("T")[0]
+  const inicio = String(semana.fecha_inicio || "")
+  const fin = String(semana.fecha_fin || "")
+  const fechaEnRango = Boolean(fechaMovimiento)
+    && (!inicio || fechaMovimiento >= inicio)
+    && (!fin || fechaMovimiento <= fin)
 
-  if (semanaId && movimientoSemanaId) {
+  // Si el movimiento ya tiene semana asignada, esa asignacion manda.
+  // Evita duplicados cuando dos semanas comparten el mismo dia de borde
+  // (por ejemplo cerrar y volver a abrir el 03/07).
+  if (movimientoSemanaId && semanaId) {
     return semanaId === movimientoSemanaId
   }
 
-  const fechaMovimiento = String(movimiento?.fecha || "").split("T")[0]
-  if (!fechaMovimiento) return false
+  if (!movimientoSemanaId && fechaEnRango) {
+    const candidatas = (semanasCajaVisibles.value || []).filter((item) => {
+      const inicioSemana = String(item?.fecha_inicio || "")
+      const finSemana = String(item?.fecha_fin || "")
+      return (!inicioSemana || fechaMovimiento >= inicioSemana) && (!finSemana || fechaMovimiento <= finSemana)
+    })
 
-  const inicio = String(semana.fecha_inicio || "")
-  const fin = String(semana.fecha_fin || "")
+    if (candidatas.length > 1) {
+      candidatas.sort((a, b) => {
+        const inicioA = String(a?.fecha_inicio || "")
+        const inicioB = String(b?.fecha_inicio || "")
+        if (inicioA !== inicioB) return inicioB.localeCompare(inicioA)
+        return Number(b?.id || 0) - Number(a?.id || 0)
+      })
 
-  return (!inicio || fechaMovimiento >= inicio) && (!fin || fechaMovimiento <= fin)
+      const semanaCanonicaId = extraerSemanaIdNumerica(candidatas[0]?.id)
+      return Boolean(semanaCanonicaId && semanaId && semanaCanonicaId === semanaId)
+    }
+  }
+
+  return fechaEnRango
 }
 
 const cajaActiva = computed(() => {
@@ -388,41 +422,22 @@ const semanasCajaVisibles = computed(() => {
     construirSemanasDesdeMovimientos().forEach(registrar)
   }
 
-  const semanasOrdenadas = Array.from(mapa.values()).sort((a, b) => new Date(b.fecha_inicio) - new Date(a.fecha_inicio))
-  const rangoHoy = getRangoSemanaLocal(formatFechaISO(new Date()))
-
-  if (rangoHoy) {
-    const yaExisteSemanaActual = semanasOrdenadas.some((semana) => {
-      return semana.fecha_inicio === rangoHoy.fecha_inicio && semana.fecha_fin === rangoHoy.fecha_fin
-    })
-
-    if (!yaExisteSemanaActual) {
-      const saldoBase = semanasOrdenadas.length > 0
-        ? Number(semanasOrdenadas[0]?.saldo_final || 0)
-        : 0
-
-      semanasOrdenadas.unshift(normalizarSemanaCaja({
-        id: actual?.id || `actual-${filtroCaja.value}-${rangoHoy.fecha_inicio}`,
-        caja_codigo: filtroCaja.value,
-        fecha_inicio: rangoHoy.fecha_inicio,
-        fecha_fin: rangoHoy.fecha_fin,
-        saldo_inicial: actual?.saldo_inicial ?? saldoBase,
-        total_ingresos: actual?.total_ingresos ?? 0,
-        total_egresos: actual?.total_egresos ?? 0,
-        saldo_final: actual?.saldo_final ?? saldoBase,
-        estado: actual?.estado || "abierta",
-      }))
-    }
-  }
-
-  return semanasOrdenadas
+  return Array.from(mapa.values()).sort((a, b) => new Date(b.fecha_inicio) - new Date(a.fecha_inicio)
+  )
 })
 
 const semanaActiva = computed(() => {
   if (semanaSeleccionadaId.value) {
     return semanasCajaVisibles.value.find((semana) => String(semana.id) === String(semanaSeleccionadaId.value)) || null
   }
-  return semanaActual.value || semanasCajaVisibles.value[0] || null
+  if (semanaActual.value) {
+    return semanaActual.value
+  }
+  return semanasCajaVisibles.value[0] || null
+})
+
+const haySemanaAbierta = computed(() => {
+  return (semanasCajaVisibles.value || []).some((semana) => normalizarEstadoSemana(semana?.estado) === "abierta")
 })
 
 const claveSemanaLibro = (semana) => {
@@ -662,8 +677,27 @@ const movimientosFiltrados = computed(() => {
     })
   }
 
-  // Los filtros de fecha se aplican en la API
-  return resultado.sort((a, b) => new Date(b.fecha) - new Date(a.fecha))
+  // Los filtros de fecha se aplican en la API.
+  // Orden estable: fecha desc; dentro del mismo dia, el control semanal queda al final (mas antiguo),
+  // y luego por id desc para que lo ultimo cargado quede arriba.
+  return [...resultado].sort((a, b) => {
+    const fechaA = String(a?.fecha || "").split("T")[0]
+    const fechaB = String(b?.fecha || "").split("T")[0]
+
+    if (fechaA !== fechaB) {
+      return fechaB.localeCompare(fechaA)
+    }
+
+    const controlA = Boolean(a?.es_control_semanal)
+    const controlB = Boolean(b?.es_control_semanal)
+    if (controlA !== controlB) {
+      return controlA ? 1 : -1
+    }
+
+    const idA = Number(a?.id || 0)
+    const idB = Number(b?.id || 0)
+    return idB - idA
+  })
 })
 
 const totalIngresosVisibles = computed(() => movimientosFiltrados.value
@@ -699,7 +733,7 @@ const egresosSemana = computed(() => Number(semanaActiva.value?.total_egresos ||
 const saldoFinalEfectivoSemana = computed(() => Number(semanaActiva.value?.saldo_final_efectivo || 0))
 const saldoFinalChequesSemana = computed(() => Number(semanaActiva.value?.saldo_final_cheques || 0))
 const saldoFinalSemana = computed(() => saldoFinalEfectivoSemana.value + saldoFinalChequesSemana.value)
-const semanaEstaCerrada = computed(() => String(semanaActiva.value?.estado || "").toLowerCase() === "cerrada")
+const semanaEstaCerrada = computed(() => normalizarEstadoSemana(semanaActiva.value?.estado) === "cerrada")
 const movimientosSemanaActiva = computed(() => {
   if (!semanaActiva.value) return []
   return (movimientos.value || []).filter((mov) => movimientoPerteneceASemana(mov, semanaActiva.value))
@@ -856,7 +890,7 @@ const cargarSemanasCaja = async (mantenerSeleccion = true) => {
       semanaActual.value = resSemanaActual.value.data ? normalizarSemanaCaja(resSemanaActual.value.data) : null
     } else {
       console.error("Error al cargar semana actual:", resSemanaActual.reason)
-      semanaActual.value = semanasCaja.value.find((semana) => String(semana.estado || "") === "abierta") || null
+      semanaActual.value = semanasCaja.value.find((semana) => normalizarEstadoSemana(semana?.estado) === "abierta") || null
     }
 
     if (semanaActual.value && !semanasCaja.value.some((semana) => claveSemanaCaja(semana) === claveSemanaCaja(semanaActual.value))) {
@@ -864,7 +898,7 @@ const cargarSemanasCaja = async (mantenerSeleccion = true) => {
     }
 
     if (!mantenerSeleccion || !semanaSeleccionadaId.value) {
-      semanaSeleccionadaId.value = semanaActual.value?.id ? String(semanaActual.value.id) : (semanasCaja.value[0]?.id ? String(semanasCaja.value[0].id) : "")
+      semanaSeleccionadaId.value = semanaActual.value?.id ? String(semanaActual.value.id) : ""
       sincronizarFiltroSemanaLibroCheques({ forzar: true })
       return
     }
@@ -885,7 +919,7 @@ const cargarSemanasCaja = async (mantenerSeleccion = true) => {
       }
     }
 
-    semanaSeleccionadaId.value = semanaActual.value?.id ? String(semanaActual.value.id) : (semanasCaja.value[0]?.id ? String(semanasCaja.value[0].id) : "")
+    semanaSeleccionadaId.value = semanaActual.value?.id ? String(semanaActual.value.id) : ""
     sincronizarFiltroSemanaLibroCheques({ forzar: true })
   } catch (err) {
     console.error("Error al cargar semanas de caja:", err)
@@ -918,23 +952,48 @@ const manejarCambioFiltroFecha = () => {
   }
 }
 
+const resetFormAbrirSemana = () => {
+  const hoy = formatFechaISO(new Date())
+  formAbrirSemana.value = {
+    fecha_inicio: hoy,
+  }
+}
+
+const abrirModalNuevaSemana = () => {
+  resetFormAbrirSemana()
+  mostrarModalAbrirSemana.value = true
+}
+
+const confirmarAbrirSemana = async () => {
+  const fechaInicio = String(formAbrirSemana.value.fecha_inicio || "").trim()
+
+  if (!fechaInicio) {
+    error.value = "Debés completar la fecha de inicio para abrir la semana"
+    return
+  }
+
+  try {
+    abriendoSemana.value = true
+    const res = await api.abrirSemanaCaja({
+      caja_codigo: filtroCaja.value,
+      fecha_inicio: fechaInicio,
+    })
+
+    const nuevaSemanaId = res?.data?.id
+    await refrescarCaja({ mantenerSeleccion: false })
+    if (nuevaSemanaId) {
+      semanaSeleccionadaId.value = String(nuevaSemanaId)
+    }
+    mostrarModalAbrirSemana.value = false
+  } catch (err) {
+    error.value = `Error al abrir semana: ${err.response?.data?.error || err.message}`
+  } finally {
+    abriendoSemana.value = false
+  }
+}
+
 const abrirModalCerrarSemana = () => {
   if (!semanaActiva.value?.id) return
-  
-  // Calculamos las fechas de la próxima semana para mostrar seguridad al usuario
-  const fechaFin = semanaActiva.value.fecha_fin
-  if (fechaFin) {
-    const d = new Date(`${fechaFin}T00:00:00`)
-    const proxInicio = new Date(d)
-    proxInicio.setDate(d.getDate() + 3) // Lunes
-    const proxFin = new Date(proxInicio)
-    proxFin.setDate(proxInicio.getDate() + 4) // Viernes
-    
-    proximaSemanaInfo.value = {
-      inicio: proxInicio.toLocaleDateString("es-AR"),
-      fin: proxFin.toLocaleDateString("es-AR")
-    }
-  }
 
   saldoBancoCierre.value = saldoBancoEditable.value
   saldoPendienteEcheqCierre.value = saldoEcheqADepositarEditable.value
@@ -1009,14 +1068,10 @@ const confirmarCerrarSemana = async () => {
       saldo_efectivo: saldoEfectivoCierre.value !== "" ? Number(saldoEfectivoCierre.value) : null,
       saldo_cheques: saldoChequesCierre.value !== "" ? Number(saldoChequesCierre.value) : null,
     }
-    const res = await api.cerrarSemanaCaja(semanaActiva.value.id, body)
-    const proximaSemanaId = res?.data?.proximaSemana?.id
-    if (proximaSemanaId) {
-      semanaSeleccionadaId.value = String(proximaSemanaId)
-    }
+    await api.cerrarSemanaCaja(semanaActiva.value.id, body)
     await refrescarCaja({ mantenerSeleccion: true })
     mostrarModalCerrarSemana.value = false
-    proximaSemanaInfo.value = null
+    semanaSeleccionadaId.value = ""
   } catch (err) {
     error.value = `Error al cerrar semana: ${err.response?.data?.error || err.message}`
   } finally {
@@ -1422,7 +1477,7 @@ const descargarLibroChequesPdf = async () => {
 }
 
 const crearFormularioVacio = () => ({
-  fecha: semanaActiva.value?.fecha_inicio || new Date().toISOString().split('T')[0],
+  fecha: formatFechaISO(new Date()),
   caja_codigo: filtroCaja.value || "tesla",
   tipo: "ingreso",
   categoria: "",
@@ -1446,7 +1501,7 @@ const crearFormularioVacio = () => ({
   usar_cheques_libro: false,
   usar_echeqs_libro: false,
   cheques_salida: [],
-  fecha_salida_cheques: semanaActiva.value?.fecha_inicio || new Date().toISOString().split('T')[0],
+  fecha_salida_cheques: formatFechaISO(new Date()),
   endosado_a_cheques: ""
 })
 
@@ -1869,6 +1924,7 @@ const payloadMovimiento = () => ({
   presupuesto_ids: form.value.tipo === "ingreso"
     ? ((form.value.presupuesto_ids || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0))
     : [],
+  caja_semanal_id: extraerSemanaIdNumerica(semanaActiva.value?.id),
   presupuestos_asignaciones: form.value.tipo === "ingreso"
     ? normalizarAsignacionesPresupuestos(form.value.presupuestos_asignaciones || [], { excluirCeros: true }).map((item) => ({
       presupuesto_id: Number(item.presupuesto_id),
@@ -1932,18 +1988,6 @@ const cargarLibroCheques = async () => {
 const cargarChequesDisponibles = async () => {
   try {
     const cajaConsulta = String((showForm.value ? form.value?.caja_codigo : filtroCaja.value) || filtroCaja.value || "tesla").toLowerCase()
-
-    // Para el formulario de egreso: mostrar todos los disponibles de la caja sin restricción de semana.
-    // El filtro por semana solo aplica al libro de cheques y al control semanal.
-    if (showForm.value && form.value.tipo === "egreso") {
-      const res = await api.getChequesDisponiblesCaja(cajaConsulta, null, null)
-      chequesDisponibles.value = (res.data || []).map((item) => ({
-        ...item,
-        librador_endosante: capitalizarInicial(item.librador_endosante),
-        banco: capitalizarInicial(item.banco),
-      }))
-      return
-    }
 
     const fechaFormulario = String(form.value?.fecha || "").split("T")[0]
     const semanaDesdeFecha = fechaFormulario
@@ -2019,6 +2063,12 @@ const sincronizarChequesSalidaSeleccionados = () => {
 
 const guardarMovimiento = async () => {
   error.value = ""
+
+  if (!semanaActiva.value || semanaEstaCerrada.value) {
+    error.value = "No hay una semana abierta para cargar movimientos"
+    return
+  }
+
   if (!esFormularioValido.value) {
     error.value = "Por favor completa todos los campos correctamente"
     return
@@ -2506,7 +2556,7 @@ onUnmounted(() => {
               {{ generandoPdf ? "Generando PDF..." : "Descargar semana seleccionada" }}
             </button>
           </div>
-          <button class="btn btn-primary" :disabled="semanaEstaCerrada" @click="abrirFormulario">
+          <button class="btn btn-primary" :disabled="!semanaActiva || semanaEstaCerrada" @click="abrirFormulario">
             + Nuevo Movimiento
           </button>
         </div>
@@ -2537,7 +2587,7 @@ onUnmounted(() => {
               <span>Semana</span>
               <select v-model="semanaSeleccionadaId" class="select-sm">
                 <option v-for="semana in semanasCajaVisibles" :key="semana.id" :value="String(semana.id)">
-                  {{ new Date(`${semana.fecha_inicio}T00:00:00`).toLocaleDateString("es-AR") }} - {{ new Date(`${semana.fecha_fin}T00:00:00`).toLocaleDateString("es-AR") }} ({{ String(semana.estado || '').toLowerCase() === 'abierta' ? 'abierta' : 'cerrada' }})
+                  {{ new Date(`${semana.fecha_inicio}T00:00:00`).toLocaleDateString("es-AR") }} - {{ new Date(`${semana.fecha_fin}T00:00:00`).toLocaleDateString("es-AR") }} ({{ normalizarEstadoSemana(semana.estado) === 'abierta' ? 'abierta' : 'cerrada' }})
                 </option>
               </select>
             </label>
@@ -2547,6 +2597,13 @@ onUnmounted(() => {
               @click="abrirModalCerrarSemana"
             >
               Cerrar semana
+            </button>
+            <button
+              v-if="!haySemanaAbierta"
+              class="btn btn-week-open"
+              @click="abrirModalNuevaSemana"
+            >
+              Abrir semana
             </button>
             <span :class="['week-badge', semanaEstaCerrada ? 'week-badge-closed' : 'week-badge-open']">
               {{ semanaEstaCerrada ? "Cerrada" : "Abierta" }}
@@ -2602,13 +2659,29 @@ onUnmounted(() => {
           </article>
         </section>
       </section>
+
+      <section v-if="!semanaActiva" class="caja-semana-shell caja-semana-empty">
+        <div class="caja-semana-header">
+          <div class="caja-semana-copy">
+            <span class="section-kicker">Caja semanal</span>
+            <h3>No hay semana abierta</h3>
+            <p>Abrí una semana manualmente para empezar a cargar movimientos.</p>
+          </div>
+          <div class="caja-semana-actions">
+            <button class="btn btn-week-open" @click="abrirModalNuevaSemana">
+              Abrir semana
+            </button>
+          </div>
+        </div>
+      </section>
             
       <div
-        v-if="semanaActiva.saldo_banco !== null && semanaActiva.saldo_banco !== undefined
+        v-if="semanaActiva && (
+          semanaActiva.saldo_banco !== null && semanaActiva.saldo_banco !== undefined
           || semanaActiva.saldo_pendiente_echeq !== null && semanaActiva.saldo_pendiente_echeq !== undefined
           || semanaActiva.saldo_echeq_depositados !== null && semanaActiva.saldo_echeq_depositados !== undefined
           || semanaActiva.saldo_efectivo !== null && semanaActiva.saldo_efectivo !== undefined
-          || semanaActiva.saldo_cheques !== null && semanaActiva.saldo_cheques !== undefined"
+          || semanaActiva.saldo_cheques !== null && semanaActiva.saldo_cheques !== undefined)"
         class="caja-resumen-bancario-card"
       >
         <span class="caja-resumen-bancario-title">Resumen bancario</span>
@@ -3818,22 +3891,48 @@ onUnmounted(() => {
   </div>
 
   <!-- Modal para cerrar semana y registrar banco -->
+  <div v-if="mostrarModalAbrirSemana" class="modal-overlay" @click.self="mostrarModalAbrirSemana = false">
+    <div class="modal modal-confirmacion">
+      <div class="modal-header modal-header-confirmacion">
+        <div class="modal-header-copy">
+          <span class="section-kicker">Inicio de periodo</span>
+          <h3>Abrir caja semanal</h3>
+          <p>La caja queda abierta desde esta fecha y se cierra cuando presiones Cerrar semana.</p>
+        </div>
+        <button type="button" class="btn-close" @click="mostrarModalAbrirSemana = false">×</button>
+      </div>
+
+      <div class="modal-form">
+        <label class="form-group form-card-field form-card-field-accent">
+          <span>Fecha de apertura *</span>
+          <input v-model="formAbrirSemana.fecha_inicio" type="date" />
+        </label>
+
+        <div class="modal-actions">
+          <button type="button" class="btn btn-primary" :disabled="abriendoSemana" @click="confirmarAbrirSemana">
+            {{ abriendoSemana ? "Abriendo..." : "Abrir semana" }}
+          </button>
+          <button type="button" class="btn btn-secondary" :disabled="abriendoSemana" @click="mostrarModalAbrirSemana = false">
+            Cancelar
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal para cerrar semana y registrar banco -->
   <div v-if="mostrarModalCerrarSemana" class="modal-overlay" @click.self="mostrarModalCerrarSemana = false">
     <div class="modal modal-confirmacion">
       <div class="modal-header modal-header-confirmacion">
         <div class="modal-header-copy">
           <span class="section-kicker">Cierre de periodo</span>
           <h3>Cerrar semana actual</h3>
-          <p>Se bloquearán los movimientos de esta semana. La próxima semana arrancará con el saldo final de hoy.</p>
+          <p>Se bloquearán los movimientos de esta semana. La próxima semana la abrís manualmente cuando quieras.</p>
         </div>
         <button type="button" class="btn-close" @click="mostrarModalCerrarSemana = false">×</button>
       </div>
 
       <div class="modal-form">
-        <div class="info-rango" v-if="proximaSemanaInfo" style="margin-bottom: 1rem;">
-          Próxima semana a iniciar: <strong>{{ proximaSemanaInfo.inicio }} al {{ proximaSemanaInfo.fin }}</strong>
-        </div>
-
         <label class="form-group form-card-field form-card-field-accent">
           <span>Saldo actual en Banco ($)</span>
           <input v-model.number="saldoBancoCierre" type="number" @wheel.prevent placeholder="0.00" step="0.01" />
@@ -4650,6 +4749,17 @@ onUnmounted(() => {
   background: linear-gradient(135deg, #f59e0b, #d97706);
   color: #fff7ed;
   border-color: rgba(251, 191, 36, 0.42);
+}
+
+.btn-week-open {
+  background: linear-gradient(135deg, #16a34a, #15803d);
+  color: #ecfdf5;
+  border-color: rgba(74, 222, 128, 0.42);
+}
+
+.btn-week-open:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 18px rgba(22, 163, 74, 0.28);
 }
 
 .btn-week-close:hover:not(:disabled) {
