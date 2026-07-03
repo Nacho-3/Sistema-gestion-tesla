@@ -122,6 +122,22 @@ export default {
     return api.get(`/clientes/${id}/ficha-historica-pdf`, { responseType: "blob" })
   },
 
+  getNotasCreditoCliente(clienteId) {
+    return api.get("/clientes/" + clienteId + "/notas-credito")
+  },
+
+  createNotaCreditoCliente(clienteId, payload) {
+    return api.post("/clientes/" + clienteId + "/notas-credito", payload)
+  },
+
+  updateNotaCreditoCliente(clienteId, notaCreditoId, payload) {
+    return api.put(`/clientes/${clienteId}/notas-credito/${notaCreditoId}`, payload)
+  },
+
+  deleteNotaCreditoCliente(clienteId, notaCreditoId) {
+    return api.delete(`/clientes/${clienteId}/notas-credito/${notaCreditoId}`)
+  },
+
   // Obras
   getObras(includeAdmin = false) {
     if (includeAdmin) {
@@ -385,6 +401,10 @@ export default {
     if (caja_codigo) params.append("caja_codigo", caja_codigo)
     if (fecha) params.append("fecha", fecha)
     return api.get(`/caja/semana-actual?${params.toString()}`)
+  },
+
+  abrirSemanaCaja(payload) {
+    return api.post("/caja/semanas/abrir", payload)
   },
 
   cerrarSemanaCaja(id, payload) {

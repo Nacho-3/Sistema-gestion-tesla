@@ -37,7 +37,7 @@ const newMaterialItem = (etapaUid = null) => ({ uid: Date.now() + Math.random(),
 const newManoObraItem = (etapaUid = null, bloqueUid = null) => ({ uid: Date.now() + Math.random(), etapa_uid: etapaUid, bloque_uid: bloqueUid, descripcion: "", cantidad: 1, precio_unitario: 0 })
 const newEtapa = (titulo = "") => ({ uid: Date.now() + Math.random(), titulo })
 const newInfoInternaItem = () => ({ uid: Date.now() + Math.random(), descripcion: "", mostrar_en_pdf: false })
-const newManoObraCantidadBloque = () => ({ uid: Date.now() + Math.random(), subtotal: 0 })
+const newManoObraCantidadBloque = () => ({ uid: Date.now() + Math.random(), titulo: "", subtotal: 0 })
 
 const createEmptyForm = () => {
   return {
@@ -687,7 +687,11 @@ const editPresupuesto = async (id) => {
               if (itemsRestantesBloque <= 0) {
                 const cantidadBloque = Math.max(1, Number(item.cantidad) || 1)
                 const subtotalBloque = cantidadBloque * (Number(item.precio_unitario) || 0)
-                const bloque = { uid: Date.now() + Math.random(), subtotal: subtotalBloque }
+                const bloque = {
+                  uid: Date.now() + Math.random(),
+                  titulo: String(item.etapa || "").trim(),
+                  subtotal: subtotalBloque,
+                }
                 bloquesCantidadReconstruidos.push(bloque)
                 bloqueActualUid = bloque.uid
                 itemsRestantesBloque = cantidadBloque
@@ -776,8 +780,10 @@ const savePresupuesto = async () => {
 
     const conteoPorBloque = {}
     const subtotalPorBloque = {}
+    const tituloPorBloque = {}
     for (const bloque of form.value.mano_obra_bloques_cantidad || []) {
       subtotalPorBloque[bloque.uid] = Math.max(0, Number(bloque.subtotal) || 0)
+      tituloPorBloque[bloque.uid] = String(bloque.titulo || "").trim()
     }
     for (const item of form.value.items_mano_obra) {
       const bloqueUid = item.bloque_uid
@@ -802,6 +808,7 @@ const savePresupuesto = async () => {
         const precioUnitario = cantidad > 0 ? (subtotal / cantidad) : 0
         return {
           ...row,
+          etapa: tituloPorBloque[bloqueUid] || row.etapa,
           cantidad,
           precio_unitario: precioUnitario,
         }
@@ -809,6 +816,7 @@ const savePresupuesto = async () => {
 
       return {
         ...row,
+        etapa: tituloPorBloque[bloqueUid] || row.etapa,
         cantidad: 1,
         precio_unitario: 0,
       }
@@ -1342,6 +1350,10 @@ onUnmounted(() => {
                         <button type="button" class="btn-secondary btn-secondary-sm" @click="addManoObraRow(null, bloque.uid)">+ Item bloque</button>
                         <button type="button" class="btn-link danger" @click="removeManoObraCantidadBloque(bloque.uid)">Quitar bloque</button>
                       </div>
+                    </div>
+                    <div class="subtotal-general-box subtotal-bloque-box">
+                      <label>Titulo del bloque (PDF)</label>
+                      <input v-model="bloque.titulo" type="text" placeholder="Ej: Instalacion planta alta" />
                     </div>
                     <table>
                       <thead>
