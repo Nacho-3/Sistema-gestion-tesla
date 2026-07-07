@@ -43,6 +43,7 @@ let libroChequesSchemaReady = false
 let movimientosCajaPresupuestosSchemaReady = false
 let detallesMedioPagoConstraintReady = false
 let movimientosCajaRulesSchemaReady = false
+let cajasSemanalesSchemaReady = false
 
 const roundMoney = (valor) => Math.round((Number(valor) || 0) * 100) / 100
 
@@ -233,6 +234,36 @@ async function ensureMovimientosCajaRulesSchema() {
   `)
 
   movimientosCajaRulesSchemaReady = true
+}
+
+async function ensureCajasSemanalesSchema() {
+  if (cajasSemanalesSchemaReady) return
+
+  await pool.query(`ALTER TABLE IF EXISTS cajas_semanales ALTER COLUMN fecha_fin DROP NOT NULL;`)
+
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF to_regclass('cajas_semanales') IS NULL THEN
+        RETURN;
+      END IF;
+
+      IF EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'chk_cajas_semanales_rango'
+          AND conrelid = 'cajas_semanales'::regclass
+      ) THEN
+        ALTER TABLE cajas_semanales DROP CONSTRAINT chk_cajas_semanales_rango;
+      END IF;
+
+      ALTER TABLE cajas_semanales
+        ADD CONSTRAINT chk_cajas_semanales_rango
+        CHECK (fecha_fin IS NULL OR fecha_fin >= fecha_inicio);
+    END $$;
+  `)
+
+  cajasSemanalesSchemaReady = true
 }
 
 async function ensureDetallesMedioPagoConstraint() {
@@ -718,6 +749,8 @@ async function obtenerChequesDisponiblesSemana({ cajaCodigo, cajaSemanalId, fech
 }
 
 async function obtenerSemanaAbierta(cajaCodigo) {
+  await ensureCajasSemanalesSchema()
+
   const codigo = String(cajaCodigo || "").toLowerCase().trim()
   if (!codigo) return null
 
@@ -732,8 +765,24 @@ async function obtenerSemanaAbierta(cajaCodigo) {
     `,
     [codigo]
   )
+  const semana = result.rows?.[0] || null
+  if (!semana) return null
 
-  return result.rows?.[0] || null
+  // Auto-correccion: una semana abierta no debe tener fecha_fin hasta cerrarse.
+  if (semana.fecha_fin) {
+    const actualizada = await pool.query(
+      `
+        UPDATE cajas_semanales
+        SET fecha_fin = NULL
+        WHERE id = $1
+        RETURNING *
+      `,
+      [semana.id]
+    )
+    return actualizada.rows?.[0] || semana
+  }
+
+  return semana
 }
 
 async function resolverSemanaDestinoMovimiento({ caja_codigo, caja_semanal_id, permitirCerrada = false }) {
@@ -1240,11 +1289,11 @@ function deduplicarSemanasPorRango(semanas = []) {
   semanas.forEach((semana) => {
     const inicio = normalizarFechaISO(semana?.fecha_inicio)
     const fin = normalizarFechaISO(semana?.fecha_fin)
-    if (!inicio || !fin) return
+    if (!inicio) return
 
-    const clave = `${inicio}-${fin}`
-    const existente = mapa.get(clave)
     const estadoSemana = String(semana?.estado || "").toLowerCase()
+    const clave = fin ? `${inicio}-${fin}` : `${inicio}-${estadoSemana || 'abierta'}`
+    const existente = mapa.get(clave)
     const estadoExistente = String(existente?.estado || "").toLowerCase()
 
     if (!existente || (estadoExistente !== "abierta" && estadoSemana === "abierta")) {
@@ -2457,9 +2506,10 @@ router.get("/semana-actual", async (req, res) => {
 
 router.post("/semanas/abrir", async (req, res) => {
   try {
+    await ensureCajasSemanalesSchema()
+
     const cajaCodigoNormalizada = String(req.body?.caja_codigo || "").toLowerCase().trim()
     const fechaInicio = normalizarFechaISO(req.body?.fecha_inicio || new Date())
-    const fechaFin = fechaInicio
 
     if (!CAJAS_DISPONIBLES.includes(cajaCodigoNormalizada)) {
       return res.status(400).json({ error: "Caja inválida" })
@@ -2483,10 +2533,10 @@ router.post("/semanas/abrir", async (req, res) => {
             BTRIM(LOWER(COALESCE(estado, ''))) IN ('cerrada', 'cerrado')
             AND fecha_fin = $2
           )
-          AND NOT (fecha_fin < $2 OR fecha_inicio > $3)
+          AND NOT (COALESCE(fecha_fin, $2) < $2 OR fecha_inicio > $2)
         LIMIT 1
       `,
-      [cajaCodigoNormalizada, fechaInicio, fechaFin]
+      [cajaCodigoNormalizada, fechaInicio]
     )
 
     if (solapeQ.rowCount > 0) {
@@ -2500,7 +2550,7 @@ router.post("/semanas/abrir", async (req, res) => {
       .insert([{
         caja_codigo: cajaCodigoNormalizada,
         fecha_inicio: fechaInicio,
-        fecha_fin: fechaFin,
+        fecha_fin: null,
         saldo_inicial: roundMoney(Number(saldoPrevio.total || 0)),
         total_ingresos: 0,
         total_egresos: 0,
