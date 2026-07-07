@@ -4294,6 +4294,29 @@ router.put("/:id", async (req, res) => {
     }
     await validarPresupuestosCliente(presupuestoIdsFinal, clienteFinal)
 
+    const cajaSemanalAnteriorId = movimientoActual.caja_semanal_id
+    const fechaFinalMovimiento = fecha !== undefined ? fecha : movimientoActual.fecha
+    const cajaFinalMovimiento = caja_codigo !== undefined ? (cajaCodigoNormalizada || "tesla") : movimientoActual.caja_codigo
+
+    let cajaSemanalDestinoId = movimientoActual.caja_semanal_id
+    if (caja_semanal_id !== undefined || caja_codigo !== undefined) {
+      const semanaDestino = await resolverSemanaDestinoMovimiento({
+        caja_codigo: cajaFinalMovimiento,
+        caja_semanal_id,
+        permitirCerrada: false,
+      })
+      cajaSemanalDestinoId = Number(semanaDestino.id)
+
+      const checkPrimerMov = await pool.query(
+        `SELECT COUNT(*)::int AS total FROM movimientos_caja WHERE caja_semanal_id = $1 AND id <> $2`,
+        [Number(cajaSemanalDestinoId), Number(id)]
+      )
+      const cantidadSemana = Number(checkPrimerMov.rows?.[0]?.total || 0)
+      if (cantidadSemana === 0 && !Boolean(movimientoActual?.es_control_semanal)) {
+        return res.status(400).json({ error: "Debe registrar primero el control semanal inicial para comenzar la semana" })
+      }
+    }
+
     // Actualizar movimiento
     const actualizaciones = {}
     if (fecha !== undefined) actualizaciones.fecha = fecha
@@ -4326,29 +4349,6 @@ router.put("/:id", async (req, res) => {
 
     if (tipo !== undefined && tipoFinal === "ingreso" && presupuesto_id === undefined && presupuesto_ids === undefined) {
       actualizaciones.presupuesto_id = presupuestoIdsFinal[0] || null
-    }
-
-    const cajaSemanalAnteriorId = movimientoActual.caja_semanal_id
-    const fechaFinalMovimiento = fecha !== undefined ? fecha : movimientoActual.fecha
-    const cajaFinalMovimiento = caja_codigo !== undefined ? (cajaCodigoNormalizada || "tesla") : movimientoActual.caja_codigo
-
-    let cajaSemanalDestinoId = movimientoActual.caja_semanal_id
-    if (caja_semanal_id !== undefined || caja_codigo !== undefined) {
-      const semanaDestino = await resolverSemanaDestinoMovimiento({
-        caja_codigo: cajaFinalMovimiento,
-        caja_semanal_id,
-        permitirCerrada: false,
-      })
-      cajaSemanalDestinoId = Number(semanaDestino.id)
-
-      const checkPrimerMov = await pool.query(
-        `SELECT COUNT(*)::int AS total FROM movimientos_caja WHERE caja_semanal_id = $1 AND id <> $2`,
-        [Number(cajaSemanalDestinoId), Number(id)]
-      )
-      const cantidadSemana = Number(checkPrimerMov.rows?.[0]?.total || 0)
-      if (cantidadSemana === 0 && !Boolean(movimientoActual?.es_control_semanal)) {
-        return res.status(400).json({ error: "Debe registrar primero el control semanal inicial para comenzar la semana" })
-      }
     }
 
     const { data: movimientoActualizado, error: errorActualizacion } = await db
