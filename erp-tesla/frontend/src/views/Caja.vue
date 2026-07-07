@@ -407,7 +407,7 @@ const semanasCajaVisibles = computed(() => {
 
   const mapa = new Map()
   const registrar = (semana) => {
-    if (!semana?.fecha_inicio || !semana?.fecha_fin) return
+    if (!semana?.fecha_inicio) return
     const clave = claveSemanaCaja(semana)
     const existente = mapa.get(clave)
     if (!existente || (existente.estado !== "abierta" && semana.estado === "abierta")) {
@@ -448,8 +448,9 @@ const claveSemanaLibro = (semana) => {
 }
 
 const etiquetaSemanaLibro = (semana) => {
-  if (!semana?.fecha_inicio || !semana?.fecha_fin) return "Semana"
+  if (!semana?.fecha_inicio) return "Semana"
   const inicio = new Date(`${semana.fecha_inicio}T00:00:00`).toLocaleDateString("es-AR")
+  if (!semana?.fecha_fin) return `${inicio} al día de hoy`
   const fin = new Date(`${semana.fecha_fin}T00:00:00`).toLocaleDateString("es-AR")
   return `${inicio} al ${fin}`
 }
@@ -757,9 +758,29 @@ const todosChequesControlSeleccionados = computed(() => {
   if (!candidatos.length) return false
   return candidatos.every((item) => (chequesControlSemanalSeleccionados.value || []).includes(Number(item.id)))
 })
+
+const etiquetaSemanaRango = (semana) => {
+  if (!semana?.fecha_inicio) return "Semana"
+  const inicio = new Date(`${semana.fecha_inicio}T00:00:00`).toLocaleDateString("es-AR")
+  const estado = normalizarEstadoSemana(semana?.estado)
+  if (estado === "abierta") {
+    return `${inicio} - actualidad (abierta)`
+  }
+  if (!semana?.fecha_fin) {
+    return `${inicio} - ${inicio} (cerrada)`
+  }
+  const fin = new Date(`${semana.fecha_fin}T00:00:00`).toLocaleDateString("es-AR")
+  return `${inicio} - ${fin} (cerrada)`
+}
+
 const etiquetaSemanaActiva = computed(() => {
-  if (!semanaActiva.value?.fecha_inicio || !semanaActiva.value?.fecha_fin) return "Semana actual"
+  if (!semanaActiva.value?.fecha_inicio) return "Semana actual"
   const inicio = new Date(`${semanaActiva.value.fecha_inicio}T00:00:00`).toLocaleDateString("es-AR")
+  const estado = normalizarEstadoSemana(semanaActiva.value?.estado)
+  if (estado === "abierta") {
+    return `${inicio} al día de hoy`
+  }
+  if (!semanaActiva.value?.fecha_fin) return `${inicio} al ${inicio}`
   const fin = new Date(`${semanaActiva.value.fecha_fin}T00:00:00`).toLocaleDateString("es-AR")
   return `${inicio} al ${fin}`
 })
@@ -2587,7 +2608,7 @@ onUnmounted(() => {
               <span>Semana</span>
               <select v-model="semanaSeleccionadaId" class="select-sm">
                 <option v-for="semana in semanasCajaVisibles" :key="semana.id" :value="String(semana.id)">
-                  {{ new Date(`${semana.fecha_inicio}T00:00:00`).toLocaleDateString("es-AR") }} - {{ new Date(`${semana.fecha_fin}T00:00:00`).toLocaleDateString("es-AR") }} ({{ normalizarEstadoSemana(semana.estado) === 'abierta' ? 'abierta' : 'cerrada' }})
+                  {{ etiquetaSemanaRango(semana) }}
                 </option>
               </select>
             </label>

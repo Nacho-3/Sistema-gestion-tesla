@@ -46,6 +46,10 @@ CREATE TABLE IF NOT EXISTS grupos (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+--=========================
+-- CLIENTES Y NOTA DE CREDITO
+--=========================
+
 CREATE TABLE IF NOT EXISTS clientes (
   id SERIAL PRIMARY KEY,
   razon_social VARCHAR(255) NOT NULL,
@@ -66,6 +70,53 @@ ALTER TABLE clientes ADD COLUMN IF NOT EXISTS iva VARCHAR(100) DEFAULT 'Responsa
 ALTER TABLE clientes ADD COLUMN IF NOT EXISTS saldo_inicial_arrastre NUMERIC(12,2) NOT NULL DEFAULT 0;
 ALTER TABLE clientes ADD COLUMN IF NOT EXISTS fecha_saldo_inicial_arrastre DATE NOT NULL DEFAULT CURRENT_DATE;
 ALTER TABLE clientes ADD COLUMN IF NOT EXISTS nota_saldo_inicial_arrastre TEXT DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS notas_credito_cliente(
+  id SERIAL PRIMARY KEY,
+  cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+  fecha DATE NOT NULL DEFAULT CURRENT_DATE,
+  concepto TEXT NOT NULL DEFAULT '',
+  observaciones TEXT DEFAULT '',
+  monto_total NUMERIC(12,2) NOT NULL DEFAULT 0,
+  estado VARCHAR(20) NOT NULL DEFAULT 'activa' CHECK (estado IN ('activa', 'anulada')),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS notas_credito_cliente_presupuestos (
+  nota_credito_id INTEGER NOT NULL REFERENCES notas_credito_cliente(id) ON DELETE CASCADE,
+  presupuesto_id INTEGER NOT NULL REFERENCES presupuestos(id) ON DELETE CASCADE,
+  cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+  monto_asignado NUMERIC(12,2) NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (nota_credito_id, presupuesto_id)
+);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'chk_notas_credito_monto_no_negativo'
+      AND conrelid = 'notas_credito_cliente'::regclass
+  ) THEN
+    ALTER TABLE notas_credito_cliente
+      ADD CONSTRAINT chk_notas_credito_monto_no_negativo
+      CHECK (monto_total >= 0);
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'chk_notas_credito_asignacion_no_negativa'
+      AND conrelid = 'notas_credito_cliente_presupuestos'::regclass
+  ) THEN
+    ALTER TABLE notas_credito_cliente_presupuestos
+      ADD CONSTRAINT chk_notas_credito_asignacion_no_negativa
+      CHECK (monto_asignado >= 0);
+  END IF;
+END $$;
+
+
+
 
 CREATE TABLE IF NOT EXISTS obras (
   id SERIAL PRIMARY KEY,
@@ -417,7 +468,7 @@ CREATE TABLE IF NOT EXISTS cajas_semanales (
   id SERIAL PRIMARY KEY,
   caja_codigo VARCHAR(20) NOT NULL DEFAULT 'tesla' CONSTRAINT chk_cajas_semanales_codigo CHECK (caja_codigo IN ('tesla', 'teslita', 'juani')),
   fecha_inicio DATE NOT NULL,
-  fecha_fin DATE NOT NULL,
+  fecha_fin DATE,
   saldo_inicial NUMERIC(12,2) NOT NULL DEFAULT 0,
   total_ingresos NUMERIC(12,2) NOT NULL DEFAULT 0,
   total_egresos NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -430,9 +481,26 @@ CREATE TABLE IF NOT EXISTS cajas_semanales (
   estado VARCHAR(20) NOT NULL DEFAULT 'abierta' CONSTRAINT chk_cajas_semanales_estado CHECK (estado IN ('abierta', 'cerrada')),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT chk_cajas_semanales_rango CHECK (fecha_fin >= fecha_inicio),
+  CONSTRAINT chk_cajas_semanales_rango CHECK (fecha_fin IS NULL OR fecha_fin >= fecha_inicio),
   CONSTRAINT uq_cajas_semanales_periodo UNIQUE (caja_codigo, fecha_inicio, fecha_fin)
 );
+
+ALTER TABLE cajas_semanales ALTER COLUMN fecha_fin DROP NOT NULL;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'chk_cajas_semanales_rango'
+      AND conrelid = 'cajas_semanales'::regclass
+  ) THEN
+    ALTER TABLE cajas_semanales DROP CONSTRAINT chk_cajas_semanales_rango;
+  END IF;
+
+  ALTER TABLE cajas_semanales
+    ADD CONSTRAINT chk_cajas_semanales_rango
+    CHECK (fecha_fin IS NULL OR fecha_fin >= fecha_inicio);
+END $$;
 
 CREATE TABLE IF NOT EXISTS movimientos_caja (
   id SERIAL PRIMARY KEY,
@@ -886,8 +954,7 @@ WITH numerados AS (
 )
 UPDATE certificados c
 SET
-  secuencia = n.nueva_secuencia,
-  numero = n.nueva_secuencia
+  secuencia = n.nueva_secuencia
 FROM numerados n
 WHERE c.id = n.id;
 
@@ -1005,6 +1072,12 @@ CREATE INDEX IF NOT EXISTS idx_presupuesto_items_tipo ON presupuesto_items(tipo)
 CREATE INDEX IF NOT EXISTS idx_movimientos_categoria ON movimientos_caja(categoria_id);
 CREATE INDEX IF NOT EXISTS idx_categorias_caja_tipo ON categorias_caja(tipo);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_categorias_caja_nombre_tipo ON categorias_caja(LOWER(nombre), tipo);
+
+CREATE INDEX IF NOT EXISTS idx_notas_credito_cliente_cliente ON notas_credito_cliente(cliente_id);
+CREATE INDEX IF NOT EXISTS idx_notas_credito_cliente_fecha ON notas_credito_cliente(fecha);
+CREATE INDEX IF NOT EXISTS idx_notas_credito_cliente_estado ON notas_credito_cliente(estado);
+CREATE INDEX IF NOT EXISTS idx_notas_credito_asig_nota ON notas_credito_cliente_presupuestos(nota_credito_id);
+CREATE INDEX IF NOT EXISTS idx_notas_credito_asig_presupuesto ON notas_credito_cliente_presupuestos(presupuesto_id);
 
 -- =========================
 -- UPDATED_AT AUTOMÁTICO
