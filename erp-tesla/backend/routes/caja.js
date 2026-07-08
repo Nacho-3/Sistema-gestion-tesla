@@ -1554,7 +1554,7 @@ async function obtenerPresupuestosAsignacionesPorMovimiento(movimientoId) {
   return mapa.get(Number(movimientoId)) || []
 }
 
-async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id } = {}) {
+async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id, cliente_id } = {}) {
   await getDetallesSchema()
   await ensureMovimientosCajaPresupuestosSchema()
 
@@ -1583,6 +1583,10 @@ async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_
 
   if (caja_semanal_id) {
     query = query.eq("caja_semanal_id", caja_semanal_id)
+  }
+
+  if (cliente_id) {
+    query = query.eq("cliente_id", cliente_id)
   }
 
   const { data, error } = await query.order("fecha", { ascending: false })
@@ -1637,7 +1641,7 @@ async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_
 // Listar movimientos de caja con filtros
 router.get("/", async (req, res) => {
   try {
-    const { fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id, busqueda } = req.query
+    const { fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id, busqueda, cliente_id } = req.query
 
     if (caja_codigo && !CAJAS_DISPONIBLES.includes(String(caja_codigo).toLowerCase())) {
       return res.status(400).json({ error: "Caja inválida" })
@@ -1649,6 +1653,7 @@ router.get("/", async (req, res) => {
     }
 
     const cajaSemanalIdNormalizada = normalizarCajaSemanalId(caja_semanal_id)
+    const clienteIdNormalizado = Number(cliente_id)
 
     let { movimientos, totales } = await obtenerMovimientosYTotales({
       fecha_inicio,
@@ -1656,6 +1661,7 @@ router.get("/", async (req, res) => {
       tipo,
       caja_codigo: cajaCodigoNormalizada,
       caja_semanal_id: cajaSemanalIdNormalizada,
+      cliente_id: Number.isInteger(clienteIdNormalizado) && clienteIdNormalizado > 0 ? clienteIdNormalizado : undefined,
     })
 
     // Filtro por palabra clave si se envía 'busqueda'
