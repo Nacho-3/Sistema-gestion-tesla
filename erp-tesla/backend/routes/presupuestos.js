@@ -1300,6 +1300,14 @@ router.get("/", async (req, res) => {
 		await ensurePresupuestosMonedaColumn()
 		await ensureMovimientosCajaPresupuestos()
 
+		const clienteIdRaw = req.query?.cliente_id
+		const clienteId = clienteIdRaw !== undefined && clienteIdRaw !== null && String(clienteIdRaw).trim() !== ""
+			? Number(clienteIdRaw)
+			: null
+		if (clienteId !== null && (!Number.isInteger(clienteId) || clienteId <= 0)) {
+			return res.status(400).json({ error: "cliente_id invalido" })
+		}
+
 		const result = await pool.query(
 			`
 				SELECT
@@ -1321,6 +1329,7 @@ router.get("/", async (req, res) => {
 					COALESCE(cert.total_pagado_certificados, 0) AS total_pagado_certificados,
 					COALESCE(cert.tiene_pendientes, false) AS tiene_certificados_pendientes,
 					COALESCE(pc.total_pagado_caja, 0) AS total_pagado_caja,
+					COALESCE(nc.total_notas_credito, 0) AS total_notas_credito,
 					COALESCE(NULLIF(TRIM(c.empresa), ''), c.razon_social) AS cliente,
 					c.telefono AS cliente_telefono,
 					o.nombre AS obra
@@ -1347,8 +1356,19 @@ router.get("/", async (req, res) => {
 					WHERE mc.tipo = 'ingreso'
 					GROUP BY mcp.presupuesto_id
 				) pc ON pc.presupuesto_id = p.id
+				LEFT JOIN (
+					SELECT
+						ncp.presupuesto_id,
+						SUM(ncp.monto_asignado) AS total_notas_credito
+					FROM notas_credito_cliente_presupuestos ncp
+					INNER JOIN notas_credito_cliente nc ON nc.id = ncp.nota_credito_id
+					WHERE LOWER(TRIM(COALESCE(nc.estado, 'activa'))) = 'activa'
+					GROUP BY ncp.presupuesto_id
+				) nc ON nc.presupuesto_id = p.id
+				WHERE ($1::int IS NULL OR p.cliente_id = $1)
 				ORDER BY p.created_at DESC
-			`
+			`,
+			[clienteId]
 		)
 
 		const presupuestos = (result.rows || []).map((row) => {
@@ -1356,14 +1376,16 @@ router.get("/", async (req, res) => {
 			const totalSinIva = roundMoney(row.total_sin_iva)
 			const totalIva = roundMoney(row.total_iva)
 			const pagadoCaja = roundMoney(row.total_pagado_caja)
+			const totalNotasCredito = roundMoney(row.total_notas_credito)
+			const pagadoComputable = roundMoney(pagadoCaja + totalNotasCredito)
 			const deudaComputable = esEstadoConDeuda(row.estado)
-			const saldoRaw = roundMoney(totalConIva - pagadoCaja)
+			const saldoRaw = roundMoney(totalConIva - pagadoComputable)
 			const saldoPendiente = deudaComputable ? roundMoney(Math.max(0, saldoRaw)) : 0
 			const saldoAFavor = deudaComputable ? roundMoney(Math.max(0, -saldoRaw)) : 0
 			const estadoCobro = calcularEstadoCobroPresupuesto({
 				deudaComputable,
 				totalConIva,
-				pagadoCaja,
+				pagadoCaja: pagadoComputable,
 			})
 
 			return {
@@ -1373,6 +1395,8 @@ router.get("/", async (req, res) => {
 				total_sin_iva: totalSinIva,
 				total_iva: totalIva,
 				total_pagado_caja: pagadoCaja,
+				total_notas_credito: totalNotasCredito,
+				total_pagado_computable: pagadoComputable,
 				deuda_computable: deudaComputable,
 				saldo_pendiente_cobro: saldoPendiente,
 				saldo_a_favor_cobro: saldoAFavor,

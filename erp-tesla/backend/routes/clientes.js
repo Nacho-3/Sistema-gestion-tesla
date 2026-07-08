@@ -48,6 +48,67 @@ const normalizeDateOnly = (value) => {
   return parsed.toISOString().slice(0, 10)
 }
 
+const validarNotaCreditoPayload = (payload = {}) => {
+  const fecha = normalizeDateOnly(payload.fecha) || new Date().toISOString().slice(0, 10)
+  const concepto = String(payload.concepto || "").trim()
+  const observaciones = String(payload.observaciones || "").trim()
+  const montoTotal = roundMoney(payload.monto_total)
+  const asignacionesRaw = Array.isArray(payload.presupuestos_asignaciones) ? payload.presupuestos_asignaciones : []
+
+  if (!concepto) return { ok:false, status:400, error:"El concepto de la nota de crédito es obligatorio." }
+  if (!(montoTotal > 0)) return { ok:false, status:400, error:"El monto total de la nota de crédito debe ser mayor a cero." }
+  if (asignacionesRaw.length === 0) return { ok:false, status:400, error:"Debe asignar al menos un presupuesto a la nota de crédito." }
+
+  const asignaciones = asignacionesRaw.map((a) => ({
+    presupuesto_id: Number(a.presupuesto_id || 0),
+    monto_asignado: roundMoney(a.monto_asignado),
+  }))
+
+  if (asignaciones.some((a) => !Number.isInteger(a.presupuesto_id) || a.presupuesto_id <= 0)) {
+    return { ok:false, status:400, error:"Todos los presupuestos asignados deben tener un ID válido." }
+  }
+
+  if (asignaciones.some((a) => !(a.monto_asignado > 0))) {
+    return { ok:false, status:400, error:"Todos los presupuestos asignados deben tener un monto mayor a cero." }
+  }
+
+  const suma = roundMoney(asignaciones.reduce((acc, a) => acc + Number(a.monto_asignado || 0), 0))
+  if (Math.abs(suma - montoTotal) > 0.01) {
+    return { ok:false, status:400, error:"La suma de los montos asignados no coincide con el monto total de la nota de crédito." }
+  }
+
+  return {
+    ok: true,
+    data: {
+      fecha,
+      concepto,
+      observaciones,
+      monto_total: montoTotal,
+      asignaciones,
+    },
+  }
+}
+
+const cargarAsignacionesNotaCredito = async (notaId) => {
+  const q = await pool.query(
+    `
+      SELECT
+        ncp.nota_credito_id,
+        ncp.presupuesto_id,
+        ncp.monto_asignado,
+        p.numero AS presupuesto_numero
+      FROM notas_credito_cliente_presupuestos ncp
+      INNER JOIN presupuestos p ON p.id = ncp.presupuesto_id
+      WHERE ncp.nota_credito_id = $1
+      ORDER BY p.numero ASC
+    `,
+    [Number(notaId)]
+  )
+  return q.rows || []
+}
+
+
+
 const labelMedioPago = (medio = "") => {
   const key = String(medio || "").toLowerCase().trim()
   if (key === "efectivo") return "EFEC"
@@ -515,7 +576,7 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
     const movimientosTienePresupuestoId = await hasTableColumn("movimientos_caja", "presupuesto_id")
 
     const presupuestosTieneIvaMonto = await hasTableColumn("presupuestos", "iva_monto")
-    const selectPresupuestos = ["id", "numero", "fecha", "estado", "total", "obra_id"]
+    const selectPresupuestos = ["id", "numero", "fecha", "created_at", "estado", "total", "obra_id"]
     if (presupuestosTieneIvaMonto) {
       selectPresupuestos.push("iva_monto")
     }
@@ -527,7 +588,7 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
 
     if (presupuestosError) throw presupuestosError
 
-    const selectMovimientos = ["id", "fecha", columnaDetalleMovimiento, "monto_total", "observaciones", "tipo"]
+    const selectMovimientos = ["id", "fecha", "created_at", columnaDetalleMovimiento, "monto_total", "observaciones", "tipo", "destinatario"]
     if (movimientosTienePresupuestoId) {
       selectMovimientos.push("presupuesto_id")
     }
@@ -559,11 +620,7 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
 
     if (movimientoIds.length > 0) {
       const detallesPagosRes = await pool.query(
-        `
-          SELECT movimiento_id, medio_pago
-          FROM detalles_medio_pago
-          WHERE movimiento_id = ANY($1::int[])
-        `,
+        "SELECT movimiento_id, medio_pago FROM detalles_medio_pago WHERE movimiento_id = ANY($1::int[])",
         [movimientoIds]
       )
 
@@ -575,6 +632,67 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
       }
     }
 
+    let asignacionesPorMovimiento = new Map()
+    if (movimientoIds.length > 0) {
+      try {
+        const asigRes = await pool.query(
+          "SELECT mcp.movimiento_id, mcp.presupuesto_id, COALESCE(NULLIF(mcp.monto_asignado, 0), mc.monto_total) AS monto_asignado, p.numero AS presupuesto_numero, COALESCE(o.nombre, 'Sin obra') AS obra_nombre " +
+            "FROM movimientos_caja_presupuestos mcp " +
+            "INNER JOIN movimientos_caja mc ON mc.id = mcp.movimiento_id " +
+            "INNER JOIN presupuestos p ON p.id = mcp.presupuesto_id " +
+            "LEFT JOIN obras o ON o.id = p.obra_id " +
+            "WHERE mcp.movimiento_id = ANY($1::int[])",
+          [movimientoIds]
+        )
+
+        for (const row of asigRes.rows || []) {
+          const movId = Number(row.movimiento_id)
+          const list = asignacionesPorMovimiento.get(movId) || []
+          list.push({
+            presupuesto_id: Number(row.presupuesto_id),
+            presupuesto_numero: row.presupuesto_numero,
+            obra_nombre: row.obra_nombre || "Sin obra",
+            monto_asignado: roundMoney(row.monto_asignado),
+          })
+          asignacionesPorMovimiento.set(movId, list)
+        }
+      } catch (err) {
+        console.warn("[clientes] ficha_historica_pdf_cliente: no se pudieron cargar asignaciones de movimientos_caja_presupuestos", err)
+      }
+    }
+
+    const notasRes = await pool.query(
+      "SELECT nc.id, nc.fecha, nc.created_at, nc.concepto, ncp.presupuesto_id, ncp.monto_asignado, p.numero AS presupuesto_numero " +
+        "FROM notas_credito_cliente nc " +
+        "INNER JOIN notas_credito_cliente_presupuestos ncp ON ncp.nota_credito_id = nc.id " +
+        "INNER JOIN presupuestos p ON p.id = ncp.presupuesto_id " +
+        "WHERE nc.cliente_id = $1 AND LOWER(TRIM(COALESCE(nc.estado, 'activa'))) = 'activa' " +
+        "ORDER BY nc.fecha ASC, nc.created_at ASC, nc.id ASC",
+      [id]
+    )
+
+    const notasMap = new Map()
+    for (const row of notasRes.rows || []) {
+      const noteId = Number(row.id)
+      const existing = notasMap.get(noteId) || {
+        id: noteId,
+        fecha: row.fecha,
+        created_at: row.created_at,
+        concepto: String(row.concepto || "-"),
+        asignaciones: [],
+        monto_total: 0,
+      }
+      const montoAsignado = roundMoney(row.monto_asignado)
+      existing.asignaciones.push({
+        presupuesto_id: Number(row.presupuesto_id),
+        presupuesto_numero: row.presupuesto_numero,
+        monto_asignado: montoAsignado,
+      })
+      existing.monto_total = roundMoney(existing.monto_total + montoAsignado)
+      notasMap.set(noteId, existing)
+    }
+    const notasList = Array.from(notasMap.values())
+
     const saldoInicialArrastre = roundMoney(cliente?.saldo_inicial_arrastre)
     const fechaSaldoInicial = normalizeDateOnly(cliente?.fecha_saldo_inicial_arrastre) || "0000-00-00"
     const notaSaldoInicial = String(cliente?.nota_saldo_inicial_arrastre || "").trim()
@@ -583,88 +701,125 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
     ledgerRows.push({
       kind: "saldo_inicial",
       sortDate: fechaSaldoInicial,
-      nro: "SI",
+      sortCreatedAt: `${fechaSaldoInicial}T00:00:00`,
+      sortOrder: -1,
+      sortId: -1,
       fecha: fechaSaldoInicial !== "0000-00-00" ? new Date(fechaSaldoInicial).toLocaleDateString("es-AR") : "-",
-      obra: notaSaldoInicial || "Arrastre sistema anterior",
-      importe_sin_iva: "",
-      iva: "",
-      total: formatSignedMoneyAr(saldoInicialArrastre),
-      medio: "ARRASTRE",
+      tipo: "Saldo inicial",
+      referencia: notaSaldoInicial || "Arrastre sistema anterior",
+      debe: saldoInicialArrastre > 0 ? formatMoneyAr(saldoInicialArrastre) : "-",
+      haber: saldoInicialArrastre < 0 ? formatMoneyAr(Math.abs(saldoInicialArrastre)) : "-",
       signedAmount: saldoInicialArrastre,
     })
 
     for (const p of presupuestosAceptadosList) {
       const total = roundMoney(p.total)
-      const iva = roundMoney(p.iva_monto)
-      const sinIva = roundMoney(total - iva)
       const obra = obraNombrePorId.get(Number(p.obra_id)) || "Sin obra"
       ledgerRows.push({
-        kind: "cargo",
+        kind: "presupuesto",
         sortDate: p.fecha || "0000-00-00",
-        nro: String(p.numero || "-"),
+        sortCreatedAt: p.created_at || `${p.fecha || "0000-00-00"}T00:00:00`,
+        sortOrder: Number(p.id) || 0,
+        sortId: Number(p.id) || 0,
         fecha: p.fecha ? new Date(p.fecha).toLocaleDateString("es-AR") : "-",
-        obra,
-        importe_sin_iva: formatMoneyAr(sinIva),
-        iva: formatMoneyAr(iva),
-        total: formatMoneyAr(total),
-        medio: "",
+        tipo: "Presupuesto",
+        referencia: `Presupuesto #${String(p.numero || "-")} - ${obra}`,
+        debe: formatMoneyAr(total),
+        haber: "-",
         signedAmount: total,
+      })
+    }
+
+    for (const nota of notasList) {
+      const presupuestosTxt = nota.asignaciones
+        .map((a) => `#${String(a.presupuesto_numero || a.presupuesto_id)}`)
+        .join(", ")
+      const refPres = presupuestosTxt ? ` (Presupuestos: ${presupuestosTxt})` : ""
+
+      ledgerRows.push({
+        kind: "nota_credito",
+        sortDate: nota.fecha || "0000-00-00",
+        sortCreatedAt: nota.created_at || `${nota.fecha || "0000-00-00"}T00:00:00`,
+        sortOrder: Number(nota.id) || 0,
+        sortId: Number(nota.id) || 0,
+        fecha: nota.fecha ? new Date(nota.fecha).toLocaleDateString("es-AR") : "-",
+        tipo: "Nota de crédito",
+        referencia: `Nota de crédito: ${nota.concepto || "-"}${refPres}`,
+        debe: "-",
+        haber: formatMoneyAr(nota.monto_total),
+        signedAmount: -nota.monto_total,
       })
     }
 
     for (const mov of movimientosList) {
       const monto = roundMoney(mov.monto_total)
-      
-      if (String(mov.tipo || "").toLowerCase() === "egreso") {
-        // Egresos (efectivo que nosotros damos al cliente, reduce su saldo a favor)
-        const detalleEgreso = mov[columnaDetalleMovimiento] || mov.detalle || "EGRESO"
+      const movTipo = String(mov.tipo || "").toLowerCase()
+
+      if (movTipo === "egreso") {
+        const detalleEgreso = mov[columnaDetalleMovimiento] || mov.detalle || "Egreso en caja"
+        const destinatario = String(mov.destinatario || "Devolucion al cliente").trim()
         ledgerRows.push({
           kind: "egreso",
           sortDate: mov.fecha || "0000-00-00",
-          nro: "-",
+          sortCreatedAt: mov.created_at || `${mov.fecha || "0000-00-00"}T00:00:00`,
+          sortOrder: Number(mov.id) || 0,
+          sortId: Number(mov.id) || 0,
           fecha: mov.fecha ? new Date(mov.fecha).toLocaleDateString("es-AR") : "-",
-          obra: detalleEgreso,
-          importe_sin_iva: "",
-          iva: "",
-          total: `- ${formatMoneyAr(monto)}`,
-          medio: "-",
+          tipo: "Egreso",
+          referencia: `${detalleEgreso} - ${destinatario}`,
+          debe: formatMoneyAr(monto),
+          haber: "-",
           signedAmount: monto,
         })
-      } else {
-        // Ingresos (pagos)
-        const presupuestoRef = Number(mov.presupuesto_id || 0) > 0 ? presupuestoById.get(Number(mov.presupuesto_id)) : null
-        const obra = presupuestoRef ? (obraNombrePorId.get(Number(presupuestoRef.obra_id)) || "Sin obra") : "PAGO C/CHEQS"
-        const nroFc = presupuestoRef ? String(presupuestoRef.numero || "-") : "-"
-        const medios = [...(mediosPorMovimiento.get(Number(mov.id || 0)) || new Set())]
-        ledgerRows.push({
-          kind: "pago",
-          sortDate: mov.fecha || "0000-00-00",
-          nro: nroFc,
-          fecha: mov.fecha ? new Date(mov.fecha).toLocaleDateString("es-AR") : "-",
-          obra,
-          importe_sin_iva: "",
-          iva: "",
-          total: `- ${formatMoneyAr(monto)}`,
-          medio: medios.join("/") || "-",
-          signedAmount: -monto,
-        })
+        continue
       }
+
+      const asig = asignacionesPorMovimiento.get(Number(mov.id || 0)) || []
+      const numeros = asig.length
+        ? asig.map((a) => `#${String(a.presupuesto_numero || a.presupuesto_id)}`).join(", ")
+        : ""
+      
+      const detalle = String(mov[columnaDetalleMovimiento] || mov.detalle || "Cobro en caja")
+      const referencia = numeros ? `${detalle} - Presupuestos ${numeros}` : `${detalle} - Pago sin imputar`
+
+      ledgerRows.push({
+        kind: "pago",
+        sortDate: mov.fecha || "0000-00-00",
+        sortCreatedAt: mov.created_at || `${mov.fecha || "0000-00-00"}T00:00:00`,
+        sortOrder: Number(mov.id) || 0,
+        sortId: Number(mov.id) || 0,
+        fecha: mov.fecha ? new Date(mov.fecha).toLocaleDateString("es-AR") : "-",
+        tipo: "Pago",
+        referencia,
+        debe: "-",
+        haber: formatMoneyAr(monto),
+        signedAmount: -monto,
+      })
     }
 
     ledgerRows.sort((a, b) => {
-      const aDateKey = toSortableDateKey(a.sortDate)
-      const bDateKey = toSortableDateKey(b.sortDate)
-      if (aDateKey !== bDateKey) return aDateKey.localeCompare(bDateKey)
-      const order = { saldo_inicial: 0, cargo: 1, pago: 2, egreso: 3 }
-      return (order[a.kind] ?? 99) - (order[b.kind] ?? 99)
+      const aDate = toSortableDateKey(a.sortDate)
+      const bDate = toSortableDateKey(b.sortDate)
+      if (aDate !== bDate) return aDate.localeCompare(bDate)
+
+      const aCreated = new Date(a.sortCreatedAt || `${aDate}T00:00:00`).getTime()
+      const bCreated = new Date(b.sortCreatedAt || `${bDate}T00:00:00`).getTime()
+      if (aCreated !== bCreated) return aCreated - bCreated
+
+      if ((a.sortOrder ?? 0) !== (b.sortOrder ?? 0)) {
+        return (a.sortOrder ?? 0) - (b.sortOrder ?? 0)
+      }
+
+      return String(a.referencia || "").localeCompare(String(b.referencia || ""))
     })
 
-    let pendienteAcumulado = 0
-    ledgerRows.forEach((row) => {
-      pendienteAcumulado = roundMoney(pendienteAcumulado + row.signedAmount)
-      row.pendiente = formatMoneyAr(pendienteAcumulado)
-      row.pendienteColor = pendienteAcumulado > 0 ? "#b91c1c" : "#065f46"
-    })
+    let saldoAcumulado = 0
+    for (const row of ledgerRows) {
+      saldoAcumulado = roundMoney(saldoAcumulado + row.signedAmount)
+      row.saldo_num = saldoAcumulado
+      row.saldo = formatSignedMoneyAr(saldoAcumulado)
+      row.saldoColor = saldoAcumulado > 0 ? "#b91c1c" : "#065f46"
+    }
 
     const footerSafe = 80
     let cursorY = headerLineY + 24
@@ -688,25 +843,23 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
       doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(7.2)
 
       const cols = [
-        { key: "nro", label: "NRO", x: 45, width: 40 },
-        { key: "fecha", label: "FECHA", x: 85, width: 56 },
-        { key: "obra", label: "OBRA", x: 141, width: 102 },
-        { key: "importe_sin_iva", label: "IMPORTE S/IVA", x: 243, width: 74 },
-        { key: "iva", label: "IVA", x: 317, width: 50 },
-        { key: "total", label: "TOTAL", x: 367, width: 74 },
-        { key: "medio", label: "MEDIO", x: 441, width: 54 },
-        { key: "pendiente", label: "PENDIENTE", x: 495, width: 55 },
+        { key: "fecha", label: "FECHA", x: 45, width: 74 },
+        { key: "tipo", label: "TIPO", x: 119, width: 84 },
+        { key: "referencia", label: "REFERENCIA", x: 203, width: 206 },
+        { key: "debe", label: "DEBE", x: 409, width: 50 },
+        { key: "haber", label: "HABER", x: 459, width: 50 },
+        { key: "saldo", label: "SALDO", x: 509, width: 41 },
       ]
 
-      cols.forEach((col) => {
+      for (const col of cols) {
         doc.text(col.label, col.x + 1, cursorY + 7, { width: col.width - 2, align: "left" })
-      })
+      }
 
       cursorY += 22
       return cols
     }
 
-    const ledgerCols = drawLedgerHeader()
+    let ledgerCols = drawLedgerHeader()
 
     if (!ledgerRows.length) {
       ensureSpace(24)
@@ -714,36 +867,71 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
       doc.text("No hay movimientos para la cuenta corriente del cliente.", 45, cursorY + 4)
       cursorY += 26
     } else {
-      ledgerRows.forEach((row, idx) => {
-        if (cursorY + 18 > doc.page.height - footerSafe) {
+      const bodyFontSize = 7.4
+      const cellPaddingX = 1
+      const cellPaddingY = 4
+      const minRowHeight = 18
+
+      const medirAlturaFila = (row, cols) => {
+        doc.font("Helvetica").fontSize(bodyFontSize)
+
+        let maxTextHeight = 0
+        for (const col of cols) {
+          const text = String(row[col.key] ?? "")
+          const align = ["debe", "haber", "saldo"].includes(col.key) ? "right" : "left"
+
+          const textHeight = doc.heightOfString(text, {
+            width: Math.max(1, col.width - (cellPaddingX * 2)),
+            align,
+          })
+
+          if (textHeight > maxTextHeight) maxTextHeight = textHeight
+        }
+
+        return Math.max(minRowHeight, Math.ceil(maxTextHeight + (cellPaddingY * 2)))
+      }
+
+      for (let idx = 0; idx < ledgerRows.length; idx++) {
+        const row = ledgerRows[idx]
+        const rowHeight = medirAlturaFila(row, ledgerCols)
+
+        if (cursorY + rowHeight > doc.page.height - footerSafe) {
           doc.addPage()
           cursorY = 60
-          drawLedgerHeader()
+          ledgerCols = drawLedgerHeader()
         }
 
         const fill = idx % 2 === 0 ? PDF_COLORS.light : PDF_COLORS.lightAlt
-        doc.rect(45, cursorY, pageWidth - 90, 18).fill(fill)
-        doc.rect(45, cursorY, pageWidth - 90, 18).lineWidth(0.35).strokeColor(PDF_COLORS.line).stroke()
+        doc.rect(45, cursorY, pageWidth - 90, rowHeight).fill(fill)
+        doc.rect(45, cursorY, pageWidth - 90, rowHeight).lineWidth(0.35).strokeColor(PDF_COLORS.line).stroke()
+
         ledgerCols.forEach((col, colIdx) => {
           if (colIdx === 0) return
-          doc.moveTo(col.x, cursorY).lineTo(col.x, cursorY + 18).lineWidth(0.25).strokeColor(PDF_COLORS.line).stroke()
+          doc.moveTo(col.x, cursorY).lineTo(col.x, cursorY + rowHeight).lineWidth(0.25).strokeColor(PDF_COLORS.line).stroke()
         })
-        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(7.4)
+
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(bodyFontSize)
 
         ledgerCols.forEach((col) => {
           const text = String(row[col.key] ?? "")
-          if (col.key === "pendiente") {
-            doc.fillColor(row.pendienteColor || PDF_COLORS.ink).font("Helvetica-Bold")
-            doc.text(text, col.x + 1, cursorY + 6, { width: col.width - 2, align: "right", ellipsis: true })
+          const align = ["debe", "haber", "saldo"].includes(col.key) ? "right" : "left"
+          const textOptions = {
+            width: Math.max(1, col.width - (cellPaddingX * 2)),
+            align,
+          }
+
+          if (col.key === "saldo") {
+            doc.fillColor(row.saldoColor || PDF_COLORS.ink).font("Helvetica-Bold")
+            doc.text(text, col.x + cellPaddingX, cursorY + cellPaddingY, textOptions)
             doc.fillColor(PDF_COLORS.ink).font("Helvetica")
             return
           }
-          const align = ["importe_sin_iva", "iva", "total", "pendiente"].includes(col.key) ? "right" : "left"
-          doc.text(text, col.x + 1, cursorY + 6, { width: col.width - 2, align, ellipsis: true })
+
+          doc.text(text, col.x + cellPaddingX, cursorY + cellPaddingY, textOptions)
         })
 
-        cursorY += 18
-      })
+        cursorY += rowHeight
+      }
     }
 
     doc.end()
@@ -1021,5 +1209,243 @@ export const saveFileToClientFolder = async (clientName, fileName, buffer, clien
     throw error;
   }
 }
+
+router.get("/:id/notas-credito", async (req, res) => {
+  try{
+    const clienteId = Number(req.params.id)
+    if(!Number.isInteger(clienteId) || clienteId <= 0){
+      return res.status(400).json({ error: "ID de cliente invalido."})
+  }
+
+  const notasQ = await pool.query(
+    `
+      SELECT *
+      FROM notas_credito_cliente
+      WHERE cliente_id = $1
+      ORDER BY fecha DESC, id DESC
+    `,
+    [clienteId]
+  )
+
+  const notas = notasQ.rows || []
+  const enriched = await Promise.all(
+    notas.map(async (n) => ({
+      ...n,
+      presupuestos_asignaciones: await cargarAsignacionesNotaCredito(n.id)
+    }))
+  )
+
+  return res.json(enriched)
+  } catch(err){
+    return handleInternalError(res, err, "listar_notas_credito_cliente") 
+  }     
+})
+
+router.post("/:id/notas-credito", async (req, res) => {
+  const client = await pool.connect()
+  try {
+    const clienteId = Number(req.params.id)
+    if (!Number.isInteger(clienteId) || clienteId <= 0) {
+      return res.status(400).json({ error: "ID de cliente invalido" })
+    }
+
+    const validacion = validarNotaCreditoPayload(req.body || {})
+    if (!validacion.ok) return res.status(validacion.status).json({ error: validacion.error })
+
+    const { fecha, concepto, observaciones, monto_total, asignaciones } = validacion.data
+    const presupuestosIds = [...new Set(asignaciones.map((a) => Number(a.presupuesto_id)))]
+
+    await client.query("BEGIN")
+
+    const presupuestosQ = await client.query(
+      `
+        SELECT id
+        FROM presupuestos
+        WHERE id = ANY($1::int[])
+          AND cliente_id = $2
+      `,
+      [presupuestosIds, clienteId]
+    )
+
+    if ((presupuestosQ.rows || []).length !== presupuestosIds.length) {
+      await client.query("ROLLBACK")
+      return res.status(400).json({ error: "Hay presupuestos que no pertenecen al cliente" })
+    }
+
+    const insertNotaQ = await client.query(
+      `
+        INSERT INTO notas_credito_cliente (cliente_id, fecha, concepto, observaciones, monto_total, estado)
+        VALUES ($1, $2, $3, $4, $5, 'activa')
+        RETURNING *
+      `,
+      [clienteId, fecha, concepto, observaciones, monto_total]
+    )
+
+    const nota = insertNotaQ.rows[0]
+
+    for (const a of asignaciones) {
+      await client.query(
+        `
+          INSERT INTO notas_credito_cliente_presupuestos
+          (nota_credito_id, presupuesto_id, cliente_id, monto_asignado)
+          VALUES ($1, $2, $3, $4)
+        `,
+        [nota.id, a.presupuesto_id, clienteId, a.monto_asignado]
+      )
+    }
+
+    await client.query("COMMIT")
+
+    getIo()?.emit("clientes:changed")
+    getIo()?.emit("presupuestos:changed")
+    getIo()?.emit("notas_credito:changed")
+
+    return res.status(201).json({
+      ...nota,
+      presupuestos_asignaciones: await cargarAsignacionesNotaCredito(nota.id),
+    })
+  } catch (err) {
+    await client.query("ROLLBACK")
+    return handleInternalError(res, err, "crear_nota_credito_cliente")
+  } finally {
+    client.release()
+  }
+})
+
+router.put ("/:id/notas-credito/:notaId", async (req, res) => {
+  const client = await pool.connect()
+  try {
+    const clienteId = Number(req.params.id)
+    const notaId = Number(req.params.notaId)
+    
+    if (!Number.isInteger(clienteId) || clienteId <= 0 || !Number.isInteger(notaId) || notaId <= 0) {
+      return res.status(400).json({ error: "ID de cliente o nota invalido" })
+    }
+
+    const validacion = validarNotaCreditoPayload(req.body || {})
+    if (!validacion.ok) return res.status(validacion.status).json({ error: validacion.error })
+
+    const { fecha, concepto, observaciones, monto_total, asignaciones } = validacion.data
+    const presupuestosIds = [...new Set(asignaciones.map((a) => Number(a.presupuesto_id)))]
+
+    await client.query("BEGIN")
+
+    const notaQ = await client.query(
+      `
+        SELECT *
+        FROM notas_credito_cliente
+        WHERE id = $1 AND cliente_id = $2
+      `,
+      [notaId, clienteId]
+    )
+
+    const nota = notaQ.rows[0]
+    if (!nota) {
+      await client.query("ROLLBACK")
+      return res.status(404).json({ error: "Nota de crédito no encontrada para el cliente" })
+    }
+    if(String(nota.estado || "").toLowerCase() === "anulada"){
+      await client.query("ROLLBACK")
+      return res.status(400).json({ error: "No se puede modificar una nota de crédito anulada" })
+    }
+
+    const presupuestosQ = await client.query(
+      `
+        SELECT id
+        FROM presupuestos
+        WHERE id = ANY($1::int[])
+          AND cliente_id = $2
+      `,
+      [presupuestosIds, clienteId]
+    )
+    if((presupuestosQ.rows || []).length !== presupuestosIds.length) {
+      await client.query("ROLLBACK")
+      return res.status(400).json({ error: "Algunos presupuestos no pertenecen al cliente" })
+    }
+
+    const updQ = await client.query(
+      `
+        UPDATE notas_credito_cliente
+        SET fecha = $3,
+            concepto = $4,
+            observaciones = $5,
+            monto_total = $6,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND cliente_id = $2
+        RETURNING *
+      `,
+      [notaId, clienteId, fecha, concepto, observaciones, monto_total]
+    )
+
+    await client.query(
+      `
+        DELETE FROM notas_credito_cliente_presupuestos WHERE nota_credito_id = $1
+      `,
+      [notaId]
+    )
+
+    for (const a of asignaciones) {
+      await client.query(
+        `
+          INSERT INTO notas_credito_cliente_presupuestos
+          (nota_credito_id, presupuesto_id, cliente_id, monto_asignado)
+          VALUES ($1, $2, $3, $4)
+        `,
+        [notaId, a.presupuesto_id, clienteId, a.monto_asignado]
+      )
+    }
+
+    await client.query("COMMIT")
+
+    getIo()?.emit("clientes:changed")
+    getIo()?.emit("presupuestos:changed")
+    getIo()?.emit("notas_credito:changed")
+
+    return res.json({
+      ...updQ.rows[0],
+      presupuestos_asignaciones: await cargarAsignacionesNotaCredito(notaId),
+    })
+  } catch (err) {
+    await client.query("ROLLBACK")
+    return handleInternalError(res, err, "actualizar_nota_credito_cliente")
+  } finally {
+    client.release()
+  }
+})
+
+router.delete("/:id/notas-credito/:notaId", async (req, res) => {
+  try{
+    const clienteId = Number(req.params.id)
+    const notaId = Number(req.params.notaId)
+
+    if(!Number.isInteger(clienteId) || clienteId <= 0 || !Number.isInteger(notaId) || notaId <= 0){
+      return res.status(400).json({ error: "ID de cliente o nota invalido" })
+    }
+
+    const updQ = await pool.query(
+      `
+        UPDATE notas_credito_cliente
+        SET estado = 'anulada', 
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 
+          AND cliente_id = $2 
+        RETURNING *
+      `,
+      [notaId, clienteId]
+    )
+
+    if (!updQ.rows?.length) {
+      return res.status(404).json({ error: "Nota de crédito no encontrada para el cliente" })
+    }
+
+    getIo()?.emit("clientes:changed")
+    getIo()?.emit("presupuestos:changed")
+    getIo()?.emit("notas_credito:changed")
+
+    return res.json({ ok:true, data: updQ.rows[0] })
+  } catch(err){
+    return handleInternalError(res, err, "anular_nota_credito_cliente")
+  }
+})
 
 export default router
