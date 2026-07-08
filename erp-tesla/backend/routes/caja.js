@@ -872,7 +872,7 @@ async function reconciliarAsignacionesSemanales(cajaCodigo) {
 
   const semanasQ = await pool.query(
     `
-      SELECT id, caja_codigo, fecha_inicio, fecha_fin
+      SELECT id, caja_codigo, fecha_inicio, fecha_fin, estado
       FROM cajas_semanales
       WHERE ($1::text IS NULL OR caja_codigo = $1)
       ORDER BY caja_codigo ASC, fecha_inicio ASC, id ASC
@@ -887,13 +887,14 @@ async function reconciliarAsignacionesSemanales(cajaCodigo) {
     const caja = String(row.caja_codigo || "").toLowerCase().trim()
     const inicio = normalizarFechaISO(row.fecha_inicio)
     const fin = normalizarFechaISO(row.fecha_fin)
-    if (!caja || !inicio || !fin) continue
+    if (!caja || !inicio) continue
 
     const semana = {
       id: Number(row.id),
       caja_codigo: caja,
       fecha_inicio: inicio,
-      fecha_fin: fin,
+      fecha_fin: fin || null,
+      estado: String(row.estado || "").toLowerCase(),
     }
 
     semanaPorId.set(semana.id, semana)
@@ -927,10 +928,8 @@ async function reconciliarAsignacionesSemanales(cajaCodigo) {
       semanaActual
       && String(semanaActual.caja_codigo || "").toLowerCase() === caja
       && fecha >= String(semanaActual.fecha_inicio || "")
-      && fecha <= String(semanaActual.fecha_fin || "")
+      && (!semanaActual.fecha_fin || fecha <= String(semanaActual.fecha_fin || ""))
     )
-
-    if (asignacionActualValida) continue
 
     const candidatas = semanasCaja.filter((semana) => {
       const inicio = String(semana.fecha_inicio || "")
@@ -938,7 +937,7 @@ async function reconciliarAsignacionesSemanales(cajaCodigo) {
       return (!inicio || fecha >= inicio) && (!fin || fecha <= fin)
     })
 
-    let semanaDestinoId = null
+    let semanaDestinoId = asignacionActualValida ? Number(semanaActualId) : null
 
     if (candidatas.length === 1) {
       semanaDestinoId = Number(candidatas[0].id)
@@ -2249,10 +2248,30 @@ router.post("/semanas/abrir", async (req, res) => {
       return res.status(400).json({ error: "Debés informar una fecha de inicio válida" })
     }
 
+    const [anioInicio, mesInicio, diaInicio] = fechaInicio.split("-").map(Number)
+    const fechaInicioDate = new Date(anioInicio, mesInicio - 1, diaInicio)
+    const fechaDiaAnterior = new Date(fechaInicioDate)
+    fechaDiaAnterior.setDate(fechaInicioDate.getDate() - 1)
+    const fechaFinAnterior = normalizarFechaISO(fechaDiaAnterior)
+
     const abierta = await obtenerSemanaAbierta(cajaCodigoNormalizada)
     if (abierta) {
       return res.status(400).json({ error: "Ya existe una semana abierta para esta caja. Cerrala antes de abrir otra" })
     }
+
+    // Evita solapes en el día de borde: si existe una semana cerrada que termina
+    // el mismo día de apertura, se recorta al día anterior.
+    await pool.query(
+      `
+        UPDATE cajas_semanales
+        SET fecha_fin = $3
+        WHERE caja_codigo = $1
+          AND BTRIM(LOWER(COALESCE(estado, ''))) IN ('cerrada', 'cerrado')
+          AND fecha_fin = $2
+          AND fecha_inicio < $2
+      `,
+      [cajaCodigoNormalizada, fechaInicio, fechaFinAnterior]
+    )
 
     const solapeQ = await pool.query(
       `
