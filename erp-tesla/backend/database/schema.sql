@@ -1422,6 +1422,8 @@ CREATE TABLE IF NOT EXISTS recibos_caja (
   moneda VARCHAR(10) NOT NULL DEFAULT 'ARS',
   medio_pago_resumen TEXT NOT NULL DEFAULT '',
   medio_pago_snapshot JSONB NOT NULL DEFAULT '[]'::jsonb,
+  mostrar_saldos_presupuestos BOOLEAN NOT NULL DEFAULT FALSE,
+  presupuestos_ids_snapshot JSONB NOT NULL DEFAULT '[]'::jsonb,
   estado VARCHAR(20) NOT NULL DEFAULT 'emitido' CHECK (estado IN ('emitido', 'anulado')),
   emitido_por INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
   fecha_anulacion TIMESTAMP,

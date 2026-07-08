@@ -76,9 +76,39 @@ const sanitizeMediosPagoSnapshot = (detalles = []) => {
         }))
 }
 
+const sanitizePresupuestosIdsSnapshot = (ids = []) => {
+  const seen = new Set()
+  return (Array.isArray(ids) ? ids : [])
+    .map((id) => Number(id))
+    .filter((id) => Number.isInteger(id) && id > 0)
+    .filter((id) => {
+      if (seen.has(id)) return false
+      seen.add(id)
+      return true
+    })
+}
+
+const parseBooleanFlag = (value, defaultValue = false) => {
+  if (typeof value === "boolean") return value
+  if (value === null || value === undefined) return defaultValue
+  const normalized = String(value).trim().toLowerCase()
+  if (["1", "true", "si", "sí", "on"].includes(normalized)) return true
+  if (["0", "false", "no", "off"].includes(normalized)) return false
+  return defaultValue
+}
+
 let recibosSchemaReady = false
 const ensureRecibosSchema = async () => {
   if (recibosSchemaReady) return
+
+  await db.query(`
+    ALTER TABLE recibos_caja
+    ADD COLUMN IF NOT EXISTS mostrar_saldos_presupuestos BOOLEAN NOT NULL DEFAULT FALSE
+  `)
+  await db.query(`
+    ALTER TABLE recibos_caja
+    ADD COLUMN IF NOT EXISTS presupuestos_ids_snapshot JSONB NOT NULL DEFAULT '[]'::jsonb
+  `)
 
   await db.query(`DROP INDEX IF EXISTS idx_recibos_caja_movimiento`)
   await db.query(`
@@ -92,6 +122,78 @@ const ensureRecibosSchema = async () => {
   `)
 
   recibosSchemaReady = true
+}
+
+const cargarPresupuestoIdsDesdeMovimiento = async (movimientoId) => {
+  const result = await db.query(
+    `
+      SELECT DISTINCT mcp.presupuesto_id
+      FROM movimientos_caja_presupuestos mcp
+      WHERE mcp.movimiento_id = $1
+      ORDER BY mcp.presupuesto_id
+    `,
+    [movimientoId]
+  )
+  return (result.rows || []).map((row) => Number(row.presupuesto_id)).filter((id) => Number.isInteger(id) && id > 0)
+}
+
+const cargarSaldosRestantesPresupuestos = async (presupuestoIds = []) => {
+  const ids = sanitizePresupuestosIdsSnapshot(presupuestoIds)
+  if (!ids.length) return []
+
+  const result = await db.query(
+    `
+      SELECT
+        p.id,
+        p.numero,
+        COALESCE(p.total, 0) AS total,
+        COALESCE(pc.total_pagado_caja, 0) AS total_pagado_caja,
+        COALESCE(nc.total_notas_credito, 0) AS total_notas_credito
+      FROM presupuestos p
+      LEFT JOIN (
+        SELECT
+          mcp.presupuesto_id,
+          SUM(COALESCE(NULLIF(mcp.monto_asignado, 0), mc.monto_total)) AS total_pagado_caja
+        FROM movimientos_caja_presupuestos mcp
+        INNER JOIN movimientos_caja mc ON mc.id = mcp.movimiento_id
+        WHERE mc.tipo = 'ingreso'
+        GROUP BY mcp.presupuesto_id
+      ) pc ON pc.presupuesto_id = p.id
+      LEFT JOIN (
+        SELECT
+          ncp.presupuesto_id,
+          SUM(ncp.monto_asignado) AS total_notas_credito
+        FROM notas_credito_cliente_presupuestos ncp
+        INNER JOIN notas_credito_cliente nc2 ON nc2.id = ncp.nota_credito_id
+        WHERE LOWER(TRIM(COALESCE(nc2.estado, 'activa'))) = 'activa'
+        GROUP BY ncp.presupuesto_id
+      ) nc ON nc.presupuesto_id = p.id
+      WHERE p.id = ANY($1::int[])
+      ORDER BY p.numero ASC
+    `,
+    [ids]
+  )
+
+  const byId = new Map((result.rows || []).map((row) => [Number(row.id), row]))
+  return ids
+    .map((id) => byId.get(id))
+    .filter(Boolean)
+    .map((row) => {
+      const total = Number(row.total || 0)
+      const totalPagadoCaja = Number(row.total_pagado_caja || 0)
+      const totalNotasCredito = Number(row.total_notas_credito || 0)
+      const totalExigible = Math.max(0, total - totalNotasCredito)
+      const saldoRestante = Math.max(0, totalExigible - totalPagadoCaja)
+      return {
+        id: Number(row.id),
+        numero: Number(row.numero || 0),
+        total,
+        total_pagado_caja: totalPagadoCaja,
+        total_notas_credito: totalNotasCredito,
+        total_exigible: totalExigible,
+        saldo_restante: saldoRestante,
+      }
+    })
 }
 
 const cargarMovimientoIngreso = async (movimientoId) => {
@@ -175,6 +277,8 @@ router.post("/", async (req, res) => {
         const pagadorNombre = sanitizeText(req.body.pagador_nombre)
         const conceptoPublico = sanitizeText(req.body.concepto_publico)
         const observacionesPublicas = sanitizeText(req.body.observaciones_publicas)
+  const mostrarSaldosPresupuestos = parseBooleanFlag(req.body.mostrar_saldos_presupuestos, false)
+  let presupuestosIdsSnapshot = sanitizePresupuestosIdsSnapshot(req.body.presupuestos_ids)
 
         if (!Number.isInteger(movimientoId) || movimientoId <= 0) {
             return res.status(400).json({ error: "ID de movimiento inválido" })
@@ -214,6 +318,10 @@ router.post("/", async (req, res) => {
         const snapshot = sanitizeMediosPagoSnapshot(detalles)
         const medioPagoResumen = buildMedioPagoResumen(detalles)
 
+        if (mostrarSaldosPresupuestos && presupuestosIdsSnapshot.length === 0) {
+          presupuestosIdsSnapshot = await cargarPresupuestoIdsDesdeMovimiento(movimiento.id)
+        }
+
         const hoy = new Date().toISOString().split('T')[0]
         const insertResult = await db.query(
       `
@@ -228,10 +336,12 @@ router.post("/", async (req, res) => {
           monto_total,
           medio_pago_resumen,
           medio_pago_snapshot,
+          mostrar_saldos_presupuestos,
+          presupuestos_ids_snapshot,
           emitido_por
         )
         VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12::jsonb, $13
         )
         RETURNING *
       `,
@@ -246,6 +356,8 @@ router.post("/", async (req, res) => {
             movimiento.monto_total,
             medioPagoResumen,
             JSON.stringify(snapshot),
+            mostrarSaldosPresupuestos,
+            JSON.stringify(presupuestosIdsSnapshot),
             req.user?.id || 1,
         ]
     )
@@ -279,6 +391,7 @@ router.get("/por-movimiento/:movimientoId", async (req, res) => {
 
 router.get("/:id/pdf", async (req, res) => {
   try {
+    await ensureRecibosSchema()
     const reciboId = Number(req.params.id)
     if (!Number.isInteger(reciboId) || reciboId <= 0) {
       return res.status(400).json({ error: "id invalido" })
@@ -425,8 +538,49 @@ router.get("/:id/pdf", async (req, res) => {
     doc.text("TOTAL", 58, rowY + 4, { width: 160 })
     doc.text(formatoMoneda(recibo.monto_total), 330, rowY + 4, { width: 80, align: "right" })
 
-    // Firmas - Posición dinámica basada en la cantidad de medios de pago
-    const signY = rowY + 75
+    const mostrarSaldos = parseBooleanFlag(recibo.mostrar_saldos_presupuestos, false)
+    let rowYFinal = rowY
+    if (mostrarSaldos) {
+      let presupuestoIds = sanitizePresupuestosIdsSnapshot(recibo.presupuestos_ids_snapshot)
+      if (!presupuestoIds.length) {
+        presupuestoIds = await cargarPresupuestoIdsDesdeMovimiento(Number(recibo.movimiento_caja_id))
+      }
+
+      if (presupuestoIds.length) {
+        const saldosPresupuestos = await cargarSaldosRestantesPresupuestos(presupuestoIds)
+        const neededHeight = 26 + 18 + (Math.max(1, saldosPresupuestos.length) * 16) + 8
+        if ((rowYFinal + neededHeight) > (doc.page.height - 120)) {
+          doc.addPage()
+          rowYFinal = 60
+        }
+
+        const sectionY = rowYFinal + 24
+        doc.fillColor("#64748b").font("Helvetica-Bold").fontSize(7.5)
+        doc.text("SALDO RESTANTE POR PRESUPUESTO", 45, sectionY)
+
+        const saldosTableY = sectionY + 10
+        doc.rect(45, saldosTableY, pageWidth - 90, 18).fill(PDF_COLORS.navy)
+        doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(8.5)
+        doc.text("PRESUPUESTO", 58, saldosTableY + 5, { width: 200 })
+        doc.text("SALDO RESTANTE", 310, saldosTableY + 5, { width: 100, align: "right" })
+
+        let saldoRowY = saldosTableY + 18
+        ;(saldosPresupuestos.length ? saldosPresupuestos : [{ numero: "-", saldo_restante: 0 }]).forEach((item, index) => {
+          const bg = index % 2 === 0 ? "#ffffff" : "#f8fafc"
+          doc.rect(45, saldoRowY, pageWidth - 90, 16).fill(bg)
+          doc.strokeColor("#e2e8f0").lineWidth(0.5).rect(45, saldoRowY, pageWidth - 90, 16).stroke()
+          doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(8.5)
+          doc.text(`Presupuesto #${item.numero}`, 58, saldoRowY + 4, { width: 200 })
+          doc.text(formatoMoneda(item.saldo_restante), 310, saldoRowY + 4, { width: 100, align: "right" })
+          saldoRowY += 16
+        })
+
+        rowYFinal = saldoRowY
+      }
+    }
+
+    // Firmas - Posición dinámica basada en la cantidad de medios de pago y saldos
+    const signY = rowYFinal + 55
     doc.strokeColor(PDF_COLORS.line).lineWidth(0.8).moveTo(70, signY).lineTo(250, signY).stroke()
     doc.strokeColor(PDF_COLORS.line).lineWidth(0.8).moveTo(320, signY).lineTo(500, signY).stroke()
 

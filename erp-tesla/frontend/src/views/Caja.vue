@@ -90,6 +90,7 @@ const formRecibo = ref({
   concepto_publico: "",
   conceptoTipo: "manual", // "manual" o "presupuestos"
   presupuestosSeleccionados: [],
+  incluir_saldos_presupuestos: true,
   observaciones_publicas: "",
 })
 
@@ -1347,6 +1348,7 @@ const abrirModalRecibo = async () => {
     concepto_publico: movimientoSeleccionado.value?.detalle || "",
     conceptoTipo: "manual", // Siempre comenzar en manual para que el usuario elija
     presupuestosSeleccionados: [],
+    incluir_saldos_presupuestos: true,
     observaciones_publicas: "",
   }
 
@@ -1374,13 +1376,15 @@ const guardarRecibo = async () => {
     // Obtener números de presupuestos seleccionados
     const presupuestosTexto = formRecibo.value.presupuestosSeleccionados
       .map((id) => {
-        const presupuesto = presupuestosMovimiento.value.find((p) => p.id === id)
+        const presupuesto = presupuestosMovimiento.value.find((p) => Number(p.id) === Number(id))
         return presupuesto ? `- Presupuesto #${presupuesto.numero}` : null
       })
       .filter(Boolean)
       .join("\n")
     conceptoFinal = presupuestosTexto
   }
+
+  const presupuestosIdsRecibo = obtenerPresupuestosIdsRecibo()
 
   try {
     emitiendoRecibo.value = true
@@ -1389,6 +1393,8 @@ const guardarRecibo = async () => {
       pagador_nombre: formRecibo.value.pagador_nombre,
       concepto_publico: conceptoFinal,
       observaciones_publicas: formRecibo.value.observaciones_publicas,
+      mostrar_saldos_presupuestos: Boolean(formRecibo.value.incluir_saldos_presupuestos),
+      presupuestos_ids: presupuestosIdsRecibo,
     })
     reciboMovimiento.value = res.data
     await cargarReciboPorMovimiento(Number(movimientoSeleccionado.value.id))
@@ -1406,13 +1412,33 @@ const generarConceptoPresupuestos = () => {
   
   const presupuestosTexto = formRecibo.value.presupuestosSeleccionados
     .map((id) => {
-      const presupuesto = presupuestosMovimiento.value.find((p) => p.id === id)
+      const presupuesto = presupuestosMovimiento.value.find((p) => Number(p.id) === Number(id))
       return presupuesto ? `- Presupuesto #${presupuesto.numero}` : null
     })
     .filter(Boolean)
     .join("\n")
   
   return presupuestosTexto
+}
+
+const obtenerPresupuestosIdsRecibo = () => {
+  const ids = new Set()
+
+  if (formRecibo.value.conceptoTipo === "presupuestos") {
+    ;(formRecibo.value.presupuestosSeleccionados || [])
+      .map((id) => Number(id))
+      .filter((id) => Number.isInteger(id) && id > 0)
+      .forEach((id) => ids.add(id))
+  }
+
+  if (ids.size === 0) {
+    ;(presupuestosMovimiento.value || [])
+      .map((item) => Number(item?.id))
+      .filter((id) => Number.isInteger(id) && id > 0)
+      .forEach((id) => ids.add(id))
+  }
+
+  return Array.from(ids)
 }
 
 const emitirRecibo = abrirModalRecibo
@@ -4100,6 +4126,16 @@ onUnmounted(() => {
               {{ generarConceptoPresupuestos() }}
             </div>
           </div>
+        </div>
+
+        <div v-if="presupuestosMovimiento.length > 0" class="form-group">
+          <label class="presupuesto-checkbox" style="margin-bottom: 0;">
+            <input
+              v-model="formRecibo.incluir_saldos_presupuestos"
+              type="checkbox"
+            />
+            <span>Incluir en el PDF el saldo restante por presupuesto (debajo del total)</span>
+          </label>
         </div>
 
         <div class="form-group">
