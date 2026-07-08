@@ -483,8 +483,13 @@ export default {
 
 
   // Presupuestos
-  getPresupuestos() {
-    return api.get("/presupuestos")
+  getPresupuestos(clienteId = null) {
+    const params = new URLSearchParams()
+    if (clienteId !== null && clienteId !== undefined && String(clienteId).trim() !== "") {
+      params.append("cliente_id", String(clienteId))
+    }
+    const query = params.toString()
+    return api.get(query ? `/presupuestos?${query}` : "/presupuestos")
   },
 
   getPresupuesto(id) {

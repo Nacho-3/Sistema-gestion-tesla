@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, onMounted, onUnmounted } from "vue"
+import { computed, ref, onMounted, onBeforeUnmount } from "vue"
 import api, { extractApiErrorMessage } from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
@@ -7,10 +7,40 @@ import socket from '../socket.js'
 // Estado para movimientos de caja del cliente
 const movimientosCajaCliente = ref([])
 const loadingMovimientosCaja = ref(false)
+const movimientoEditando=ref(null)
+const formEdicionMovimiento=ref({
+  detalle: "",
+  observaciones: "",
+  monto_total: 0,
+})
+const asignacionesEnEdicion=ref([])
+
+// Estado para notas de credito
+const notasCreditoCliente = ref([])
+const loadingNotasCredito = ref(false)
+const notaCreditoEditando = ref(null)
+const showNotaCreditoModal = ref(false)
+const formNotaCredito = ref({
+  fecha: new Date().toISOString().slice(0, 10),
+  concepto: "",
+  observaciones: "",
+  monto_total: 0,
+  presupuestos_asignaciones: [],
+})
+
+const notasActivasExpandida = ref(true)
+const notasAnuladasExpandida = ref(false)
+
+const notasCreditoAnuladas = computed(() =>
+  (notasCreditoCliente.value || []).filter((n) => String(n.estado || "").toLowerCase() === "anulada")
+)
+
+const esNotaAnulada = (nota) => String(nota.estado || "").toLowerCase() === "anulada"
 
 // Estado
 const clientes = ref([])
 const loading = ref(false)
+const loadingFicha = ref(false)
 const error = ref("")
 const showForm = ref(false)
 // Modal now only closes via the close button. Clicks outside no longer close it.
@@ -20,6 +50,8 @@ const clienteSeleccionado = ref(null)
 const obrasCliente = ref([])
 const presupuestosCliente = ref([])
 const presupuestosAceptados = ref([])
+const loadingPresupuestosCliente = ref(false)
+const presupuestosInicializados = ref(false)
 const downloadingPdf = ref(false)
 const downloadingHistoricoPdf = ref(false)
 const filtroBusqueda = ref("")
@@ -136,12 +168,31 @@ const labelEstadoCobro = (estado) => {
 
 const claseEstadoCobro = (estado) => `estado-cobro estado-cobro-${String(estado || "sin_deuda").toLowerCase()}`
 
+const movimientoTieneImputacion = (mov) => {
+  if (mov?.tipo !== "ingreso") return false
+
+  if (
+    Array.isArray(mov.presupuestos_asignaciones) &&
+    mov.presupuestos_asignaciones.some(
+      (a) => Number(a.presupuestoId) > 0 && (Number(a.monto_asignado) || 0) > 0
+    )
+  ) {
+    return true
+  }
+
+  if (Array.isArray(mov.presupuestos_ids) && mov.presupuestos_ids.some((id) => Number(id) > 0)) {
+    return true
+  }
+
+  return Number(mov.presupuesto_id) > 0
+}
+
 const pagosImputados = computed(() =>
-  (movimientosCajaCliente.value || []).filter((m) => m.tipo === "ingreso" && Number(m.presupuesto_id) > 0)
+  (movimientosCajaCliente.value || []).filter((m) => movimientoTieneImputacion(m))
 )
 
 const pagosNoImputados = computed(() =>
-  (movimientosCajaCliente.value || []).filter((m) => m.tipo === "ingreso" && !Number(m.presupuesto_id))
+  (movimientosCajaCliente.value || []).filter((m) => m.tipo === "ingreso" && !movimientoTieneImputacion(m))
 )
 
 const egresosCliente = computed(() =>
@@ -150,32 +201,98 @@ const egresosCliente = computed(() =>
 
 const pagosImputadosPorPresupuesto = computed(() => {
   const map = new Map()
-  for (const mov of pagosImputados.value) {
-    const presupuestoId = Number(mov.presupuesto_id)
-    const acumulado = Number(map.get(presupuestoId) || 0)
-    map.set(presupuestoId, acumulado + (Number(mov.monto_total) || 0))
+
+  for (const mov of movimientosCajaCliente.value || []) {
+    if (mov.tipo !== "ingreso") continue
+
+    if (
+      Array.isArray(mov.presupuestos_asignaciones) &&
+      mov.presupuestos_asignaciones.length > 0
+    ) {
+      for (const asignacion of mov.presupuestos_asignaciones) {
+        const presupuestoId = Number(asignacion.presupuesto_id)
+        const montoAsignado = Number(asignacion.monto_asignado) || 0
+        if (!(presupuestoId > 0 || !(montoAsignado > 0))) continue
+
+        map.set(
+          presupuestoId,
+          Number(map.get(presupuestoId) || 0) + montoAsignado
+        )
+      }
+      continue
+    }
+
+    if (Array.isArray(mov.presupuestos_ids) && mov.presupuestos_ids.length === 1){
+      const presupuestoId = Number(mov.presupuestos_ids[0])
+      const monto = Number(mov.monto_total) || 0
+      if (presupuestoId > 0 && monto > 0) {
+        map.set(
+          presupuestoId,
+          Number(map.get(presupuestoId) || 0) + monto
+        )
+      }
+      continue
+    }
+
+    if (Number(mov.presupuesto_id) > 0) {
+      const presupuestoId = Number(mov.presupuesto_id)
+      const monto = Number(mov.monto_total) || 0
+      if (monto > 0) {
+        map.set(
+          presupuestoId,
+          Number(map.get(presupuestoId) || 0) + monto
+        )
+      }
+    }
+  }
+  return map
+})
+
+const notasCreditoActivas = computed(() =>
+  (notasCreditoCliente.value || []).filter((n) => String(n.estado ||"").toLowerCase() === "activa")
+)
+
+const notasCreditoPorPresupuesto = computed(() => {
+  const map = new Map()
+  for (const n of notasCreditoActivas.value) {
+    const asignaciones = Array.isArray(n.presupuestos_asignaciones) ? n.presupuestos_asignaciones : []
+    for (const a of asignaciones){
+      const pid = Number(a.presupuesto_id)
+      const monto = Number(a.monto_asignado) || 0
+      map.set(pid, Number(map.get(pid) || 0) + monto)
+    }
   }
   return map
 })
 
 const estadoCuentaPresupuestos = computed(() => {
   return (presupuestosAceptados.value || []).map((p) => {
-    const totalConIva = Number(p.total) || 0
+    const totalOriginal = Number(p.total) || 0
     const totalIva = Number(p.total_iva ?? p.iva_monto ?? 0) || 0
-    const totalSinIva = Number(p.total_sin_iva ?? (totalConIva - totalIva)) || 0
+    const totalSinIva = Number(p.total_sin_iva ?? (totalOriginal - totalIva)) || 0
     const deudaComputable = Boolean(p.deuda_computable ?? esEstadoAceptado(p.estado))
+
+    const descuentoNotas = Number(notasCreditoPorPresupuesto.value.get(Number(p.id)) || 0)
+    const totalExigible = deudaComputable ? Math.max(0, totalOriginal - descuentoNotas) : 0
+
     const pagadoCaja = Number(p.total_pagado_caja)
     const pagadoFallback = Number(pagosImputadosPorPresupuesto.value.get(Number(p.id)) || 0)
     const pagado = Number.isFinite(pagadoCaja) ? pagadoCaja : pagadoFallback
-    const saldoPendiente = deudaComputable ? Math.max(0, totalConIva - pagado) : 0
-    const saldoAFavor = deudaComputable ? Math.max(0, pagado - totalConIva) : 0
-    const estadoCobro = String(p.estado_cobro || "") || calcularEstadoCobro(deudaComputable, totalConIva, pagado)
 
+    const saldoPendiente = deudaComputable ? Math.max(0, totalExigible - pagado) : 0
+    const saldoAFavor = deudaComputable ? Math.max(0, pagado - totalExigible) : 0
+
+    const estadoCobro = totalExigible <= 0.01
+      ? "sin_deuda"
+      : calcularEstadoCobro(deudaComputable, totalExigible, pagado)
+    
     return {
       ...p,
+      total_original: totalOriginal,
+      total_descuento_nc: descuentoNotas,
       total_sin_iva: totalSinIva,
       total_iva: totalIva,
-      total: totalConIva,
+      total: totalExigible,
       pagado,
       saldo_pendiente: saldoPendiente,
       saldo_a_favor: saldoAFavor,
@@ -218,7 +335,7 @@ const saldoPendienteFinalCliente = computed(() =>
   roundMoney(saldoInicialArrastreCliente.value + totalCargosPresupuestosCliente.value - totalPagosCajaCliente.value)
 )
 
-const movimientosCuentaCorriente = computed(() => {
+const movimientosCuentaCorriente = computed (() => {
   const rows = []
   const fechaArrastre = toDateInputValue(clienteSeleccionado.value?.fecha_saldo_inicial_arrastre)
   const notaArrastre = String(clienteSeleccionado.value?.nota_saldo_inicial_arrastre || "").trim()
@@ -226,6 +343,8 @@ const movimientosCuentaCorriente = computed(() => {
   rows.push({
     tipo: "saldo_inicial",
     fechaRaw: fechaArrastre,
+    fechaCreacionRaw: `${fechaArrastre}T00:00:00`,
+    ordenDia: -1,
     fecha: formatDateAr(fechaArrastre),
     referencia: notaArrastre || "Arrastre sistema anterior",
     debe: roundMoney(Math.max(0, saldoInicialArrastreCliente.value)),
@@ -234,10 +353,13 @@ const movimientosCuentaCorriente = computed(() => {
   })
 
   for (const p of estadoCuentaPresupuestos.value) {
-    const total = roundMoney(p.total)
+    const total = roundMoney(p.total_original ?? p.total)
+
     rows.push({
       tipo: "presupuesto",
       fechaRaw: p.fecha,
+      fechaCreacionRaw: p.created_at || p.fecha,
+      ordenDia: Number(p.id) || 0,
       fecha: formatDateAr(p.fecha),
       referencia: `Presupuesto #${p.numero || "-"} - ${p.obra || "Sin obra"}`,
       debe: total,
@@ -246,11 +368,41 @@ const movimientosCuentaCorriente = computed(() => {
     })
   }
 
+  for (const nota of notasCreditoActivas.value) {
+    const asignaciones = Array.isArray(nota.presupuestos_asignaciones) ? nota.presupuestos_asignaciones : []
+    const nums = asignaciones
+      .map((a) => presupuestosPorId.value.get(Number(a.presupuesto_id))?.numero || a.presupuesto_id)
+      .filter(Boolean)
+    const refPres = nums.length > 0 ? ` (Presupuestos: ${nums.join(", ")})` : ""
+    const monto = roundMoney(nota.monto_total)
+
+    rows.push({
+      tipo: "nota_credito",
+      fechaRaw: nota.fecha,
+      fechaCreacionRaw: nota.created_at || nota.fecha,
+      ordenDia: Number(nota.id) || 0,
+      fecha: formatDateAr(nota.fecha),
+      referencia: `Nota de crédito: ${nota.concepto || "-"}${refPres}`,
+      debe: 0,
+      haber: monto,
+      impacto: -monto,
+    })
+  }
+
   for (const mov of movimientosCajaCliente.value || []) {
-    const presupuestoNumero = Number(mov.presupuesto_id) > 0
-      ? (presupuestosPorId.value.get(Number(mov.presupuesto_id))?.numero || mov.presupuesto_id)
-      : null
+    let presupuestosNumeros = []
+
+    if (Array.isArray(mov.presupuestos_ids) && mov.presupuestos_ids.length > 0) {
+      presupuestosNumeros = mov.presupuestos_ids
+        .map((id) => presupuestosPorId.value.get(Number(id))?.numero || id)
+        .filter(Boolean)
+    } else if (Number(mov.presupuesto_id) > 0) {
+      const num = presupuestosPorId.value.get(Number(mov.presupuesto_id))?.numero || mov.presupuesto_id
+      presupuestosNumeros = [num]
+    }
+
     const monto = roundMoney(mov.monto_total)
+
     if (mov.tipo === "egreso") {
       const detalle = String(mov.detalle || "Egreso en caja")
       const destinatario = String(mov.destinatario || "Devolucion al cliente").trim()
@@ -258,6 +410,8 @@ const movimientosCuentaCorriente = computed(() => {
       rows.push({
         tipo: "egreso",
         fechaRaw: mov.fecha,
+        fechaCreacionRaw: mov.created_at || mov.fecha,
+        ordenDia: Number(mov.id) || 0,
         fecha: formatDateAr(mov.fecha),
         referencia: `${detalle} - ${destinatario}`,
         debe: monto,
@@ -268,13 +422,15 @@ const movimientosCuentaCorriente = computed(() => {
     }
 
     const detalle = String(mov.detalle || "Cobro en caja")
-    const referencia = presupuestoNumero
-      ? `${detalle} - Presupuesto #${presupuestoNumero}`
+    const referencia = presupuestosNumeros.length > 0
+      ? `${detalle} - Presupuestos #${presupuestosNumeros.join(", #")}`
       : `${detalle} - Pago sin imputar`
 
     rows.push({
       tipo: "pago",
       fechaRaw: mov.fecha,
+      fechaCreacionRaw: mov.created_at || mov.fecha,
+      ordenDia: Number(mov.id) || 0,
       fecha: formatDateAr(mov.fecha),
       referencia,
       debe: 0,
@@ -283,15 +439,26 @@ const movimientosCuentaCorriente = computed(() => {
     })
   }
 
-  rows.sort((a, b) => {
-    const aKey = String(toDateInputValue(a.fechaRaw || "1900-01-01"))
-    const bKey = String(toDateInputValue(b.fechaRaw || "1900-01-01"))
-    if (aKey !== bKey) return aKey.localeCompare(bKey)
-    const order = { saldo_inicial: 0, presupuesto: 1, pago: 2, egreso: 3 }
-    return (order[a.tipo] ?? 99) - (order[b.tipo] ?? 99)
+  rows.sort((a,b) => {
+    const aDate = String(toDateInputValue(a.fechaRaw || "1900-01-01"))
+    const bDate = String(toDateInputValue(b.fechaRaw || "1900-01-01"))
+
+    if (aDate !== bDate) return aDate.localeCompare(bDate)
+
+    const aCreated = new Date (a.fechaCreacionRaw || `${aDate}T00:00:00`).getTime()
+    const bCreated = new Date (b.fechaCreacionRaw || `${bDate}T00:00:00`).getTime()
+
+    if (aCreated !== bCreated) return aCreated - bCreated
+
+    if ((a.ordenDia ?? 0) !== (b.ordenDia ?? 0)) {
+      return (a.ordenDia ?? 0) - (b.ordenDia ?? 0)
+    }
+
+    return String(a.referencia || "").localeCompare(String(b.referencia || ""))
   })
 
   let saldo = 0
+
   return rows.map((row) => {
     saldo = roundMoney(saldo + row.impacto)
     return {
@@ -324,39 +491,99 @@ const loadClientes = async () => {
   }
 }
 
+onMounted(() => {
+  loadClientes()
+  socket.on('clientes:changed', loadClientes)
+  socket.on('presupuestos:changed', handlePresupuestosChanged)
+  socket.on('caja:changed', handleCajaChanged)
+  socket.on('notas_credito:changed', handleNotasCreditoChanged)
+})
+
+const handleNotasCreditoChanged = () => {
+  if (vistaActual.value === "ficha" && clienteSeleccionado.value?.id) {
+    cargarNotasCreditoCliente(clienteSeleccionado.value.id).catch((err) => {
+      console.error("Error al actualizar notas de crédito del cliente:", err)
+    })
+  }
+}
+
 const cargarPresupuestosCliente = async (clienteId) => {
-  const resPresupuestos = await api.getPresupuestos()
-  const presupuestos = (resPresupuestos.data || []).filter(p => Number(p.cliente_id) === Number(clienteId))
-  const isAceptado = (p) => ["aprobado", "aceptado"].includes(String(p.estado || "").toLowerCase())
-  presupuestosAceptados.value = presupuestos.filter(isAceptado)
-  presupuestosCliente.value = presupuestos.filter(p => !isAceptado(p))
+  loadingPresupuestosCliente.value = true
+  try {
+    let resPresupuestos
+    try {
+      // Fast path: backend-side filter when available.
+      resPresupuestos = await api.getPresupuestos(clienteId)
+    } catch (errFiltrado) {
+      console.warn("Fallo carga filtrada de presupuestos; aplicando fallback general:", errFiltrado)
+      resPresupuestos = await api.getPresupuestos()
+    }
+
+    const presupuestos = (resPresupuestos.data || []).filter(p => Number(p.cliente_id) === Number(clienteId))
+    const isAceptado = (p) => ["aprobado", "aceptado"].includes(String(p.estado || "").toLowerCase().trim())
+    presupuestosAceptados.value = presupuestos.filter(isAceptado)
+    presupuestosCliente.value = presupuestos.filter(p => !isAceptado(p))
+    presupuestosInicializados.value = true
+  } catch (err) {
+    console.error("Error al cargar presupuestos del cliente:", err)
+    // No limpiar datos existentes para evitar pantallas vacias por errores transitorios.
+  } finally {
+    loadingPresupuestosCliente.value = false
+  }
+}
+
+const cargarMovimientosCajaCliente = async (clienteId) => {
+  loadingMovimientosCaja.value = true
+  try {
+    const resMovimientos = await api.getMovimientosCaja(null, null, null, null, null, null, clienteId)
+    movimientosCajaCliente.value = (resMovimientos.data?.movimientos || [])
+  } catch (err) {
+    console.error("Error al cargar movimientos del cliente:", err)
+    movimientosCajaCliente.value = []
+  } finally {
+    loadingMovimientosCaja.value = false
+  }
+}
+
+const cargarNotasCreditoCliente = async (clienteId) => {
+  loadingNotasCredito.value = true
+  try {
+    const res = await api.getNotasCreditoCliente(clienteId)
+    notasCreditoCliente.value = res.data || []
+  } catch (err) {
+    console.error("Error al cargar notas de crédito del cliente:", err)
+    notasCreditoCliente.value = []
+  } finally {
+    loadingNotasCredito.value = false
+  }
 }
 
 // Ver ficha del cliente
 const verFicha = async (cliente) => {
-  clienteSeleccionado.value = cliente
-  vistaActual.value = "ficha"
+  if (loadingFicha.value) return
+  loadingFicha.value = true
 
-  // Cargar obras y movimientos de caja del cliente
-  loading.value = true
-  loadingMovimientosCaja.value = true
   try {
-    const [resObras, resMovimientos] = await Promise.all([
+    clienteSeleccionado.value = cliente
+    const [obrasRes] = await Promise.allSettled([
       api.getObras(),
-      api.getMovimientosCaja(null, null, null, null, null)
+      cargarPresupuestosCliente(cliente.id),
+      cargarMovimientosCajaCliente(cliente.id),
+      cargarNotasCreditoCliente(cliente.id),
     ])
-    obrasCliente.value = resObras.data?.filter(o => o.cliente_id === cliente.id) || []
 
-    await cargarPresupuestosCliente(cliente.id)
+    if (obrasRes.status === "fulfilled") {
+      obrasCliente.value = obrasRes.value.data?.filter(o => o.cliente_id === cliente.id) || []
+    } else {
+      console.error("Error al cargar obras del cliente:", obrasRes.reason)
+      obrasCliente.value = []
+    }
 
-    // Filtrar movimientos de caja por cliente_id
-    movimientosCajaCliente.value = (resMovimientos.data.movimientos || []).filter(m => Number(m.cliente_id) === Number(cliente.id))
+    vistaActual.value = "ficha"
   } catch (err) {
-    console.error("Error al cargar datos del cliente:", err)
-    movimientosCajaCliente.value = []
+    console.error("Error inesperado al abrir la ficha:", err)
   } finally {
-    loading.value = false
-    loadingMovimientosCaja.value = false
+    loadingFicha.value = false
   }
 }
 
@@ -367,12 +594,22 @@ const volverALista = () => {
   obrasCliente.value = []
   presupuestosCliente.value = []
   presupuestosAceptados.value = []
+  presupuestosInicializados.value = false
+  notasCreditoCliente.value = []
 }
 
 const handlePresupuestosChanged = () => {
   if (vistaActual.value === "ficha" && clienteSeleccionado.value?.id) {
     cargarPresupuestosCliente(clienteSeleccionado.value.id).catch((err) => {
       console.error("Error al actualizar presupuestos del cliente:", err)
+    })
+  }
+}
+
+const handleCajaChanged = () => {
+  if (vistaActual.value === "ficha" && clienteSeleccionado.value?.id) {
+    cargarMovimientosCajaCliente(clienteSeleccionado.value.id).catch((err) => {
+      console.error("Error al actualizar movimientos del cliente:", err)
     })
   }
 }
@@ -549,14 +786,289 @@ const descargarFichaHistoricaPdf = async () => {
   }
 }
 
-onMounted(() => {
-  loadClientes()
-  socket.on('clientes:changed', loadClientes)
-  socket.on('presupuestos:changed', handlePresupuestosChanged)
+//Edicion de movimientos de caja
+
+const abrirEdicionMovimiento = (movimiento) => {
+  movimientoEditando.value = movimiento.id
+  formEdicionMovimiento.value ={
+    detalle: movimiento.detalle || "",
+    observaciones: movimiento.observaciones || "",
+    monto_total: movimiento.monto_total || 0,
+  }
+  
+  // Cargar asignaciones existentes o crear nuevas
+  if (Array.isArray(movimiento.presupuestos_asignaciones) && movimiento.presupuestos_asignaciones.length > 0) {
+    asignacionesEnEdicion.value = JSON.parse(JSON.stringify(movimiento.presupuestos_asignaciones))
+  } else if (Array.isArray(movimiento.presupuestos_ids) && movimiento.presupuestos_ids.length > 0) {
+    // Si no hay asignaciones pero hay presupuestos, crear distribución equitativa
+    const monto = Number(movimiento.monto_total) || 0
+    const montosPorPresupuesto = monto / movimiento.presupuestos_ids.length
+    asignacionesEnEdicion.value = movimiento.presupuestos_ids.map(id => ({
+      presupuesto_id: id,
+      monto_asignado: montosPorPresupuesto
+    }))
+  } else {
+    asignacionesEnEdicion.value = []
+  }
+}
+
+const cancelarEdicion = () => {
+  movimientoEditando.value = null
+  formEdicionMovimiento.value = {
+    detalle: "",
+    observaciones: "",
+    monto_total: 0,
+  }
+  asignacionesEnEdicion.value = []
+}
+
+const guardarEdicionMovimiento = async () => {
+  try {
+    // Obtener movimiento original
+    const movOriginal = movimientosCajaCliente.value.find(m => m.id === movimientoEditando.value)
+    if (!movOriginal) {
+      alert("Error: Movimiento no encontrado")
+      return
+    }
+
+    // Construir payload
+    const payload = {
+      detalle: formEdicionMovimiento.value.detalle,
+      observaciones: formEdicionMovimiento.value.observaciones,
+      monto_total: formEdicionMovimiento.value.monto_total,
+    }
+
+    // Si hay asignaciones editables, enviarlas tal como estén
+    if (Array.isArray(asignacionesEnEdicion.value) && asignacionesEnEdicion.value.length > 0) {
+      payload.presupuestos_asignaciones = asignacionesEnEdicion.value.map(a => ({
+        presupuesto_id: a.presupuesto_id,
+        monto_asignado: Number(a.monto_asignado) || 0
+      }))
+    }
+
+    const { data: movimientoActualizado } = await api.updateMovimientoCaja(movimientoEditando.value, payload)
+
+    // Actualizar localmente con la respuesta del backend para reflejar asignaciones y presupuestos
+    const idx = movimientosCajaCliente.value.findIndex(m => Number(m.id) === Number(movimientoEditando.value))
+    if (idx >= 0 && movimientoActualizado) {
+      movimientosCajaCliente.value[idx] = movimientoActualizado
+    }
+
+    if (clienteSeleccionado.value?.id) {
+      await Promise.all([
+        cargarMovimientosCajaCliente(clienteSeleccionado.value.id),
+        cargarPresupuestosCliente(clienteSeleccionado.value.id),
+      ])
+    }
+
+    cancelarEdicion()
+  } catch (error) {
+    console.error("Error actualizando movimiento:", error)
+    alert("Error al actualizar movimiento")
+  }
+}
+
+const abrirNuevaNotaCredito = () => {
+  notaCreditoEditando.value = null
+  formNotaCredito.value = {
+    fecha: new Date().toISOString().slice(0, 10),
+    concepto: "",
+    observaciones: "",
+    monto_total: 0,
+    presupuestos_asignaciones: [],
+  }
+  showNotaCreditoModal.value = true
+}
+
+const editarNotaCredito = (nota) => {
+  notaCreditoEditando.value = nota.id
+  formNotaCredito.value = {
+    fecha: nota.fecha ? String(nota.fecha).slice(0,10) : new Date().toISOString().slice(0, 10),
+    concepto: nota.concepto || "",
+    observaciones: nota.observaciones || "",
+    monto_total: Number(nota.monto_total) || 0,
+    presupuestos_asignaciones: (nota.presupuestos_asignaciones || []).map((a) => ({
+      presupuesto_id: Number(a.presupuesto_id),
+      monto_asignado: Number(a.monto_asignado) || 0,
+    })),
+  }
+  showNotaCreditoModal.value = true
+}
+
+const agregarAsignacionNotaCredito = () => {
+  formNotaCredito.value.presupuestos_asignaciones.push({
+    presupuesto_id: "",
+    monto_asignado: 0,
+  })
+}
+
+const eliminarAsignacionNotaCredito = (index) => {
+  formNotaCredito.value.presupuestos_asignaciones.splice(index, 1)
+}
+
+const totalNcNotaCredito = computed(() => 
+  roundMoney(Number(formNotaCredito.value.monto_total) || 0)
+)
+
+const totalAsignadoNotaCredito = computed(() =>
+  roundMoney(
+    (formNotaCredito.value.presupuestos_asignaciones || []).reduce(
+      (acc, a) => acc + (Number(a.monto_asignado) || 0),
+      0
+    )
+  )
+)
+
+const diferenciaNotaCredito = computed(() =>
+  roundMoney(totalNcNotaCredito.value - totalAsignadoNotaCredito.value)
+)
+
+const claseDiferenciaAsignacionNotaCredito = computed(() => {
+  if (diferenciaNotaCredito.value > 0.01) return "diferencia-positiva"
+  if (diferenciaNotaCredito.value < -0.01) return "diferencia-negativa"
+  return "diferencia-cero"
 })
-onUnmounted(() => {
+
+const saldoPendientePorPresupuesto = computed(() => {
+  const map = new Map()
+  for (const p of estadoCuentaPresupuestos.value) {
+    map.set(Number(p.id), Number(p.saldo_pendiente) || 0)
+  }
+  return map
+})
+
+const opcionesPresupuestosPorFila = (index) => {
+  const filas = formNotaCredito.value.presupuestos_asignaciones || []
+  const actualId = Number(filas[index]?.presupuesto_id) || 0
+
+  const usadosEnOtrasFilas = new Set(
+    filas
+      .filter((_, i) => i !== index)
+      .map((f) => Number(f.presupuesto_id))
+      .filter((id) => id > 0)
+  )
+
+  return (presupuestosAceptados.value || []).filter((p) => {
+    const pid = Number(p.id)
+    const pendiente = Number(saldoPendientePorPresupuesto.value.get(pid) || 0)
+    const esActual = pid === actualId
+    return (pendiente > 0.01 || esActual) && !usadosEnOtrasFilas.has(pid)
+  })
+}
+
+const calcularValorResultantePresupuesto = (presupuestoId, montoAsignado) => {
+  const total = Number(presupuestosPorId.value.get(Number(presupuestoId))?.total || 0)
+  const asignado = Number(montoAsignado) || 0
+  return roundMoney(total - asignado)
+}
+
+const guardarNotaCredito = async () => {
+  if (!clienteSeleccionado.value?.id) return
+
+  try {
+    const asignaciones = (formNotaCredito.value.presupuestos_asignaciones || []).map((a) => ({
+      presupuesto_id: Number(a.presupuesto_id),
+      monto_asignado: Number(a.monto_asignado) || 0,
+    }))
+
+    const montoTotal = Number(formNotaCredito.value.monto_total) || 0
+    const sumaAsignaciones = roundMoney(
+      asignaciones.reduce((acc, a) => acc + (Number(a.monto_asignado) || 0), 0)
+    )
+
+    if (!String(formNotaCredito.value.concepto || "").trim()) {
+      alert("El concepto es obligatorio")
+      return
+    }
+
+    if (!(montoTotal > 0)) {
+      alert("El monto total debe ser mayor a cero")
+      return
+    }
+
+    if (asignaciones.length === 0) {
+      alert("Debe asignar al menos un presupuesto a la nota de crédito")
+      return
+    }
+
+    if (asignaciones.some((a) => !Number.isInteger(a.presupuesto_id) || a.presupuesto_id <= 0)) {
+      alert("Todos los presupuestos asignados deben tener un ID válido")
+      return
+    }
+
+    if (asignaciones.some((a) => !(a.monto_asignado > 0))) {
+      alert("Todos los montos asignados deben ser mayores a cero")
+      return
+    }
+
+    if (Math.abs(sumaAsignaciones - montoTotal) > 0.01) {
+      alert("La suma de los montos asignados debe coincidir con el monto total")
+      return
+    }
+
+    const payload = {
+      fecha: formNotaCredito.value.fecha,
+      concepto: formNotaCredito.value.concepto,
+      observaciones: formNotaCredito.value.observaciones,
+      monto_total: montoTotal,
+      presupuestos_asignaciones: asignaciones,
+    }
+
+    if (notaCreditoEditando.value) {
+      await api.updateNotaCreditoCliente(clienteSeleccionado.value.id, notaCreditoEditando.value, payload)
+    } else {
+      await api.createNotaCreditoCliente(clienteSeleccionado.value.id, payload)
+    }
+
+    showNotaCreditoModal.value = false
+    await Promise.all([
+      cargarNotasCreditoCliente(clienteSeleccionado.value.id),
+      cargarPresupuestosCliente(clienteSeleccionado.value.id),
+    ])
+  } catch (error) {
+    alert(extractApiErrorMessage(error, "No se pudo guardar la nota de crédito"))
+  }
+}
+
+const anularNotaCredito = async (notaId) => {
+  if (!clienteSeleccionado.value?.id) return
+
+  const nota = (notasCreditoCliente.value || []).find(
+    (n) => Number(n.id) === Number(notaId)
+  )
+
+  if (nota && esNotaAnulada(nota)) return
+
+  if (!confirm("¿Anular nota de crédito?")) return
+  
+  try{
+    await api.deleteNotaCreditoCliente(clienteSeleccionado.value.id, notaId)
+    await Promise.all([
+      cargarNotasCreditoCliente(clienteSeleccionado.value.id),
+      cargarPresupuestosCliente(clienteSeleccionado.value.id)
+    ])
+  } catch (error) {
+    alert(extractApiErrorMessage(error, "No se pudo anular la nota de crédito"))
+  }
+}
+
+const calcularDiferencia = (presupuestoId, montoAsignado) => {
+  const total = presupuestosPorId.value.get(Number(presupuestoId))?.total || 0
+  return total - montoAsignado
+}
+
+const obtenerClaseDiferencia = (presupuestoId, montoAsignado) => {
+  const diff = calcularDiferencia(presupuestoId, montoAsignado)
+  if (diff > 0.01) return 'diferencia-positiva'
+  if (diff < -0.01) return 'diferencia-negativa'
+  return 'diferencia-cero'
+}
+
+onBeforeUnmount(() => {
   socket.off('clientes:changed', loadClientes)
   socket.off('presupuestos:changed', handlePresupuestosChanged)
+  socket.off('caja:changed', handleCajaChanged)
+  socket.off('notas_credito:changed', handleNotasCreditoChanged)
 })
 </script>
 
@@ -810,7 +1322,10 @@ onUnmounted(() => {
             <span v-if="clienteSeleccionado.nota_saldo_inicial_arrastre"> | Nota: {{ clienteSeleccionado.nota_saldo_inicial_arrastre }}</span>
           </div>
 
-          <div v-if="estadoCuentaPresupuestos.length > 0" class="tabla-shell">
+          <div v-if="loadingPresupuestosCliente && !presupuestosInicializados">
+            <span class="spinner">Cargando presupuestos del cliente...</span>
+          </div>
+          <div v-else-if="estadoCuentaPresupuestos.length > 0" class="tabla-shell">
             <table class="tabla">
               <thead>
                 <tr>
@@ -869,12 +1384,31 @@ onUnmounted(() => {
                 <tr v-for="(mov, idx) in movimientosCuentaCorriente" :key="`${mov.tipo}-${idx}`">
                   <td>{{ mov.fecha }}</td>
                   <td>
-                    <span class="estado-cobro" :class="mov.tipo === 'pago'
-                      ? 'estado-cobro-pagado'
-                      : (mov.tipo === 'egreso' ? 'estado-cobro-egreso' : (mov.tipo === 'presupuesto' ? 'estado-cobro-pendiente' : 'estado-cobro-sin_deuda'))">
-                      {{ mov.tipo === 'saldo_inicial'
-                        ? 'Saldo inicial'
-                        : (mov.tipo === 'presupuesto' ? 'Presupuesto' : (mov.tipo === 'egreso' ? 'Egreso' : 'Pago')) }}
+                    <span 
+                      class="estado-cobro"
+                      :class="
+                        mov.tipo === 'pago'
+                          ? 'estado-cobro-pagado'
+                          : mov.tipo === 'egreso'
+                            ? 'estado-cobro-egreso'
+                            : mov.tipo === 'presupuesto'
+                              ? 'estado-cobro-pendiente'
+                              : mov.tipo === 'nota_credito'
+                                ? 'estado-cobro-parcial'
+                                : 'estado-cobro-sin_deuda'
+                      "
+                    >
+                      {{
+                        mov.tipo === 'saldo_inicial'
+                          ? 'Saldo inicial'
+                          : mov.tipo === 'presupuesto'
+                            ? 'Presupuesto'
+                            : mov.tipo === 'egreso'
+                              ? 'Egreso'
+                              : mov.tipo === 'nota_credito'
+                                ? 'Nota de crédito'
+                                : 'Pago'
+                      }}
                     </span>
                   </td>
                   <td>{{ mov.referencia }}</td>
@@ -901,13 +1435,14 @@ onUnmounted(() => {
 
 
         <!-- Historial de movimientos -->
+        
         <div class="ficha-seccion">
           <h3>💰 Historial de movimientos</h3>
-          <div v-if="loadingMovimientosCaja">
+          <div v-if="loadingMovimientosCaja && movimientosCajaCliente.length === 0">
             <span class="spinner">Cargando movimientos...</span>
           </div>
           <div v-else-if="movimientosCajaCliente.length === 0">
-            <p class="sin-datos">No hay movimientos de caja asociados a este cliente.</p>
+            <p class="sin-datos">No hay movimientos registrados a este cliente.</p>
           </div>
           <div v-else class="tabla-shell">
             <table class="tabla">
@@ -915,41 +1450,256 @@ onUnmounted(() => {
                 <tr>
                   <th>Fecha</th>
                   <th>Detalle</th>
-                  <th>Presupuesto</th>
-                  <th>Imputación</th>
-                  <th>Monto</th>
                   <th>Observaciones</th>
+                  <th>Monto total</th>
+                  <th>Presupuestos asignados</th>
+                  <th>Acciones</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-for="mov in movimientosCajaCliente" :key="mov.id">
                   <td>{{ new Date(mov.fecha).toLocaleDateString('es-AR') }}</td>
                   <td>{{ mov.tipo === 'egreso' ? `${mov.detalle} (egreso)` : mov.detalle }}</td>
+                  <td>{{ mov.observaciones || '-' }}</td>
+                  <td>{{ mov.tipo === 'egreso' ? `-${formatMoney(mov.monto_total)}` : formatMoney(mov.monto_total) }}</td>
                   <td>
-                    <span v-if="mov.tipo === 'ingreso' && Number(mov.presupuesto_id) > 0">
-                      #{{ presupuestosPorId.get(Number(mov.presupuesto_id))?.numero || mov.presupuesto_id }}
+                    <span v-if="mov.tipo === 'ingreso' && Array.isArray(mov.presupuestos_ids) && mov.presupuestos_ids.length > 0">
+                      {{ mov.presupuestos_ids.map(id => `#${presupuestosPorId.get(Number(id))?.numero || id}`).join(', ') }}
                     </span>
                     <span v-else>-</span>
                   </td>
                   <td>
-                    <span :class="mov.tipo === 'egreso'
-                      ? 'estado-cobro estado-cobro-pendiente'
-                      : (Number(mov.presupuesto_id) > 0 ? 'estado-cobro estado-cobro-parcial' : 'estado-cobro estado-cobro-sin_deuda')">
-                      {{ mov.tipo === 'egreso' ? 'Devolucion' : (Number(mov.presupuesto_id) > 0 ? 'Imputado' : 'No imputado') }}
-                    </span>
+                    <button class="btn-edit-movimiento" @click="abrirEdicionMovimiento(mov)" title="Editar movimiento">
+                      ✏️ Editar
+                    </button>
                   </td>
-                  <td>{{ mov.tipo === 'egreso' ? `-${formatMoney(mov.monto_total)}` : formatMoney(mov.monto_total) }}</td>
-                  <td>{{ mov.observaciones || '-' }}</td>
                 </tr>
               </tbody>
             </table>
           </div>
         </div>
 
-        <!-- Cargando -->
-        <div v-if="loading" class="loading-overlay">
-          Cargando datos...
+        <!-- Notas de credito -->
+        <div class="ficha-seccion">
+          <div class="ficha-seccion-header">
+            <h3>💳 Notas de crédito</h3>
+            <button class="btn-edit-movimiento" @click="abrirNuevaNotaCredito">
+              + Nueva nota de crédito
+            </button>
+          </div>
+
+          <div v-if="loadingNotasCredito && notasCreditoCliente.length === 0">
+            <span class="spinner">Cargando notas de crédito...</span>
+          </div>
+
+          <div v-else-if="notasCreditoCliente.length === 0">
+            <p class="sin-datos">No hay notas de crédito disponibles.</p>
+          </div>
+
+
+          <template v-else>
+            <div class="notas-credito-subseccion">
+              <div class="notas-credito-subseccion-header">
+                <h4>Activas ({{ notasCreditoActivas.length }}) </h4>
+                <button class="btn-toggle-seccion" @click="notasActivasExpandida = !notasActivasExpandida">
+                  {{ notasActivasExpandida ? "▾ Contraer" : "▸ Expandir" }}
+                </button>
+              </div>
+
+              <div v-if="notasActivasExpandida">
+                <div v-if="notasCreditoActivas.length === 0">
+                  <p class="sin-datos">No hay notas de crédito activas.</p>
+                </div>
+                <div v-else class="tabla-shell">
+                  <table class="tabla">
+                    <thead>
+                      <tr>
+                        <th>Fecha</th>
+                        <th>Concepto</th>
+                        <th>Monto</th>
+                        <th>Estado</th>
+                        <th>Acciones</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="n in notasCreditoActivas" :key="n.id">
+                        <td>{{ formatDateAr(n.fecha) }}</td>
+                        <td>{{ n.concepto || "-" }}</td>
+                        <td>{{ formatMoney(n.monto_total) }}</td>
+                        <td>
+                          <span class="estado-cobro estado-cobro-pagado">
+                            {{ n.estado || "-" }}
+                          </span>
+                        </td>
+                        <td>
+                          <div class="acciones-nota-credito">
+                            <button class="btn-edit-movimiento" @click="editarNotaCredito(n)" title="Editar nota de crédito">
+                              ✏️ Editar
+                            </button>
+                            <button
+                              class="btn-edit-movimiento"
+                              @click="anularNotaCredito(n.id)"
+                              :disabled="esNotaAnulada(n)"
+                              title="Anular nota de crédito"
+                            >
+                              🗑️ Anular
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div class="notas-credito-subseccion">
+              <div class="notas-credito-subseccion-header">
+                <h4>Anuladas ({{ notasCreditoAnuladas.length }})</h4>
+                <button class="btn-toggle-seccion" @click="notasAnuladasExpandida = !notasAnuladasExpandida">
+                  {{ notasAnuladasExpandida ? "▾ Contraer" : "▸ Expandir" }}
+                </button>
+              </div>
+
+              <div v-if="notasAnuladasExpandida">
+                <div v-if="notasCreditoAnuladas.length === 0">
+                  <p class="sin-datos">No hay notas de crédito anuladas.</p>
+                </div>
+                <div v-else class="tabla-shell">
+                  <table class="tabla">
+                    <thead>
+                      <tr>
+                        <th>Fecha</th>
+                        <th>Concepto</th>
+                        <th>Monto</th>
+                        <th>Estado</th>
+                        <th>Acción</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="n in notasCreditoAnuladas" :key="n.id">
+                        <td>{{ formatDateAr(n.fecha) }}</td>
+                        <td>{{ n.concepto || "-" }}</td>
+                        <td>{{ formatMoney(n.monto_total) }}</td>
+                        <td>
+                          <span class="estado-cobro estado-cobro-pendiente">
+                            {{ n.estado || "-" }}
+                          </span>
+                        </td>
+                        <td>
+                          <div class="acciones-nota-credito">
+                            <button class="btn-edit-movimiento" @click="editarNotaCredito(n)" title="Editar nota de crédito">
+                              ✏️ Editar
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </template>
         </div>
+ 
+
+          <!-- Modal de edición de movimiento -->
+          <div v-if="movimientoEditando" class="modal-overlay">
+            <div class="modal">
+              <div class="modal-header">
+                <div class="modal-header-copy">
+                  <span class="section-kicker modal-kicker">Editar movimiento</span>
+                  <h3>Modificar pago</h3>
+                </div>
+                <button class="btn-close" @click="cancelarEdicion">×</button>
+              </div>
+
+              <form @submit.prevent="guardarEdicionMovimiento" class="modal-form">
+                <div class="modal-form-grid">
+                  <label class="form-group form-group-full">
+                    <span>Detalle *</span>
+                    <input
+                      v-model="formEdicionMovimiento.detalle"
+                      type="text"
+                      required
+                    />
+                  </label>
+
+                  <label class="form-group form-group-full">
+                    <span>Observaciones</span>
+                    <textarea
+                      v-model="formEdicionMovimiento.observaciones"
+                      placeholder="Notas adicionales (opcional)"
+                      rows="3"
+                    ></textarea>
+                  </label>
+
+                  <label class="form-group">
+                    <span>Monto</span>
+                    <input
+                      v-model.number="formEdicionMovimiento.monto_total"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                    />
+                  </label>
+                </div>
+
+                <!-- Tabla de distribución de presupuestos -->
+                <div v-if="asignacionesEnEdicion.length > 0" class="modal-form-grid">
+                  <div class="form-group form-group-full">
+                    <span>Distribución por presupuesto</span>
+                    <table class="tabla-asignaciones">
+                      <thead>
+                        <tr>
+                          <th>Presupuesto</th>
+                          <th>Total presupuesto</th>
+                          <th>Monto a asignar</th>
+                          <th>Diferencia</th>
+                          <th>Acción</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="asig in asignacionesEnEdicion" :key="asig.presupuesto_id">
+                          <td class="presupuesto-num">#{{ presupuestosPorId.get(Number(asig.presupuesto_id))?.numero || asig.presupuesto_id }}</td>
+                          <td class="presupuesto-total">{{ formatMoney(presupuestosPorId.get(Number(asig.presupuesto_id))?.total || 0) }}</td>
+                          <td class="presupuesto-input">
+                            <input
+                              v-model.number="asig.monto_asignado"
+                              type="number"
+                              min="0"
+                              step="0.01"
+                            />
+                          </td>
+                          <td class="presupuesto-diferencia">
+                            <span :class="obtenerClaseDiferencia(asig.presupuesto_id, asig.monto_asignado)">{{ formatMoney(calcularDiferencia(asig.presupuesto_id, asig.monto_asignado)) }}</span>
+                          </td>
+                          <td class="presupuesto-accion">
+                            <button
+                              type="button"
+                              class="btn-usar-total"
+                              @click="asig.monto_asignado = presupuestosPorId.get(Number(asig.presupuesto_id))?.total || 0"
+                              title="Usar el monto total del presupuesto"
+                            >
+                              Usar total
+                            </button>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div class="modal-footer">
+                  <button type="button" class="btn btn-secondary" @click="cancelarEdicion">Cancelar</button>
+                  <button type="submit" class="btn btn-primary">Guardar cambios</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        
+
+
       </div>
 
       <!-- Modal formulario -->
@@ -1075,6 +1825,126 @@ onUnmounted(() => {
           </form>
         </div>
       </div>
+    
+      <div v-if="showNotaCreditoModal" class="modal-overlay">
+        <div class="modal modal-nota-credito">
+          <div class="modal-header">
+            <div class="modal-header-copy">
+              <span class="section-kicker modal-kicker">Nota de crédito</span>
+              <h3>{{ notaCreditoEditando ? "Editar nota de crédito" : "Nueva nota de crédito" }}</h3>
+            </div>
+            <button class="btn-close" @click="showNotaCreditoModal = false">×</button>
+          </div>
+
+          <form @submit.prevent="guardarNotaCredito" class="modal-form">
+            <div class="modal-form-grid">
+              <label class="form-group">
+                <span>Fecha</span>
+                <input v-model="formNotaCredito.fecha" type="date" required/>
+              </label>
+
+              <label class="form-group form-group-full">
+                <span>Concepto</span>
+                <input v-model="formNotaCredito.concepto" type="text" required/>
+              </label>
+
+              <label class="form-group">
+                <span>Monto total</span>
+                <input v-model.number="formNotaCredito.monto_total" type="number" min="0" step="0.01" required/>
+              </label>
+
+              <label class="form-group form-group-full">
+                <span>Observaciones</span>
+                <textarea 
+                  v-model="formNotaCredito.observaciones"
+                  class="textarea-observaciones-nc"
+                  placeholder="Notas adicionales (opcional)"
+                ></textarea>
+              </label>
+            </div>
+
+            <div class="nota-credito-resumen">
+              <div class="nota-credito-resumen-item">
+                <span>Total NC: </span>
+                <strong>{{ formatMoney(totalNcNotaCredito) }}</strong>
+              </div>
+              <div class="nota-credito-resumen-item">
+                <span>Total asignado: </span>
+                <strong>{{ formatMoney(totalAsignadoNotaCredito) }}</strong>
+              </div>
+              <div class="nota-credito-resumen-item">
+                <span>Diferencia: </span>
+                <strong :class="claseDiferenciaAsignacionNotaCredito">
+                  {{ formatMoney(diferenciaNotaCredito) }}
+                </strong>
+              </div>
+            </div>
+
+            <div class="form-group form-group-full">
+              <div class="ficha-seccion-header">
+                <h3 class="asignaciones-titulo">Asignaciones por presupuestos</h3>
+                <button type="button" class="btn-agregar-asignacion" @click="agregarAsignacionNotaCredito">
+                  + Agregar asignación
+                </button>
+              </div>
+
+              <table class="tabla-asignaciones" v-if="formNotaCredito.presupuestos_asignaciones.length">
+                <thead>
+                  <tr>
+                    <th>Presupuesto</th>
+                    <th>Total Presupuesto</th>
+                    <th>Monto Asignado</th>
+                    <th>Valor resultante</th>
+                    <th>Acción</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(a, index) in formNotaCredito.presupuestos_asignaciones" :key="index">
+                    <td>
+                      <select v-model="a.presupuesto_id">
+                        <option :value="0" disabled>Seleccione un presupuesto</option>
+                        <option v-for="p in presupuestosAceptados" :key="p.id" :value="Number(p.id)">
+                          #{{ p.numero }} - {{ p.obra || 'Sin obra' }}
+                        </option>
+                      </select>
+                    </td>
+
+                    <td class="presupuesto-total">
+                      {{ formatMoney(presupuestosPorId.get(Number(a.presupuesto_id))?.total || 0) }}
+                    </td>
+
+                    <td>
+                      <input v-model.number="a.monto_asignado" type="number" min="0" step="0.01" required/>
+                    </td>
+
+                    <td class="presupuesto-diferencia">
+                      <span class="diferencia-cero">
+                        {{ formatMoney(calcularValorResultantePresupuesto(a.presupuesto_id, a.monto_asignado)) }}
+                      </span>
+                    </td>
+
+                    <td class="presupuesto-accion">
+                      <button type="button" class="btn-delete-icon" @click="eliminarAsignacionNotaCredito(index)">
+                        🗑️
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="modal-footer">
+              <button type="button" class="btn-secondary" @click="showNotaCreditoModal = false">
+                Cancelar
+              </button>
+              <button type="button" class="btn-primary" @click="guardarNotaCredito">
+                Guardar
+              </button>
+            </div>
+          </form>  
+      </div>
+    </div>
+
     </div>
   </LayoutShell>
 </template>
@@ -1530,6 +2400,20 @@ td {
   display: flex;
   gap: 0.75rem;
   margin-top: 0.15rem;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.85rem;
+  margin-top: 0.4rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.modal-footer .btn {
+  min-width: 136px;
 }
 
 .modal-actions .btn-primary,
@@ -2004,5 +2888,397 @@ td {
   border-color: rgba(56, 189, 248, 0.6);
   box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
 }
+
+.tabla-asignaciones {
+  width: 100%;
+  border-collapse: collapse;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.tabla-asignaciones thead {
+  background: rgba(30, 41, 59, 0.8);
+}
+
+.tabla-asignaciones th {
+  padding: 0.75rem;
+  text-align: left;
+  color: #cbd5e1;
+  font-weight: 600;
+  font-size: 0.85rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.tabla-asignaciones td {
+  padding: 0.75rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+  color: #e2e8f0;
+}
+
+.tabla-asignaciones tbody tr:hover {
+  background: rgba(56, 189, 248, 0.05);
+}
+
+.tabla-asignaciones input {
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  color: #e2e8f0;
+  padding: 0.5rem;
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+}
+
+.tabla-asignaciones input:focus {
+  outline: none;
+  border-color: rgba(56, 189, 248, 0.6);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
+}
+
+.btn-edit-movimiento {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 1.1rem;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.9), rgba(37, 99, 235, 0.9));
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  border-radius: 0.5rem;
+  color: #e0e7ff;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25);
+}
+
+.btn-edit-movimiento:hover {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 1), rgba(37, 99, 235, 1));
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35);
+  transform: translateY(-1px);
+}
+
+.btn-edit-movimiento:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 6px rgba(59, 130, 246, 0.25);
+}
+
+.presupuesto-num {
+  font-weight: 600;
+  color: #e2e8f0;
+  min-width: 60px;
+}
+
+.presupuesto-total {
+  color: #cbd5e1;
+  text-align: right;
+  min-width: 120px;
+  font-family: 'Courier New', monospace;
+}
+
+.presupuesto-input {
+  min-width: 150px;
+}
+
+.presupuesto-input input {
+  width: 100%;
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  color: #e2e8f0;
+  padding: 0.6rem;
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+  font-family: 'Courier New', monospace;
+  transition: border-color 0.2s ease;
+}
+
+.presupuesto-input input:focus {
+  outline: none;
+  border-color: rgba(56, 189, 248, 0.6);
+  background: rgba(15, 23, 42, 0.95);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
+}
+
+.presupuesto-diferencia {
+  text-align: right;
+  min-width: 110px;
+  font-family: 'Courier New', monospace;
+  font-weight: 500;
+}
+
+.diferencia-cero {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.1);
+  padding: 0.3rem 0.6rem;
+  border-radius: 0.25rem;
+  display: inline-block;
+}
+
+.diferencia-positiva {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.1);
+  padding: 0.3rem 0.6rem;
+  border-radius: 0.25rem;
+  display: inline-block;
+}
+
+.diferencia-negativa {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.1);
+  padding: 0.3rem 0.6rem;
+  border-radius: 0.25rem;
+  display: inline-block;
+}
+
+.presupuesto-accion {
+  min-width: 110px;
+  text-align: right;
+}
+
+.btn-usar-total {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem 0.8rem;
+  background: rgba(34, 197, 94, 0.15);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  border-radius: 0.375rem;
+  color: #22c55e;
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.btn-usar-total:hover {
+  background: rgba(34, 197, 94, 0.25);
+  border-color: rgba(34, 197, 94, 0.5);
+  box-shadow: 0 2px 6px rgba(34, 197, 94, 0.2);
+}
+
+.btn-usar-total:active {
+  transform: scale(0.98);
+}
+
+@media (max-width: 768px) {
+  .modal-footer {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+
+  .modal-footer .btn {
+    width: 100%;
+  }
+}
+
+.modal-nota-credito{
+  width:min(1040px, 96vw);
+  max-height: min(84vh, 860px);
+}
+
+.nota-credito-resumen{
+  display:grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.nota-credito-resumen-card{
+  background: rgba(15, 23, 42, 0.75);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 0.7rem;
+  padding: 0.7rem 0.85rem;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.nota-credito-resumen-item span{
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #93c5fd;
+}
+
+.nota-credito-resumen-item strong{
+  color: #e2e8f0;
+  font-size: 1rem;
+}
+
+@media (max-width: 760px){
+  .modal-nota-credito{
+    width: 100%;
+    max-height: 90vh;
+  }
+
+  .nota-credito-resumen{
+    grid-template-columns: 1fr;
+  }
+}
+
+.textarea-observaciones-nc{
+  width: 100%;
+  min-height: 88px;
+  max-height: 88px;
+  resize: none;
+}
+
+.asignaciones-header{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.85rem;
+  margin-bottom: 0.9rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 0.7rem;
+  background: rgba(15, 23, 42, 0.46);
+}
+
+.asignaciones-titulo {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #dbeafe;
+  letter-spacing: 0.01em;
+}
+
+.btn-agregar-asignacion {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.52rem 0.9rem;
+  border: 1px solid rgba(96, 165, 250, 0.45);
+  border-radius: 0.5rem;
+  background: rgba(30, 64, 175, 0.28);
+  color: #bfdbfe;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-agregar-asignacion:hover {
+  background: rgba(37, 99, 235, 0.35);
+  border-color: rgba(147, 197, 253, 0.62);
+}
+
+.acciones-nota-credito{
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.btn-delete-movimiento{
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 1.1rem;
+  background: linear-gradient(135deg, rgba(220, 38, 38, 0.9), rgba(185,28,28,0.9));
+  border: 1px solid rgba(248, 113, 113, 0.38);
+  border-radius: 0.5rem;
+  color: #fee2e2;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px rgba(220, 38, 38, 0.24);
+}
+
+.btn-delete-movimiento:hover{
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.95), rgba(220,38,38,0.95));
+  box-shadow: 0 4px 12px rgba(220, 38, 38, 0.34);
+  transform: translateY(-1px);
+}
+
+.btn-delete-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.15rem;
+  height: 2.15rem;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 0.48rem;
+  background: rgba(127, 29, 29, 0.32);
+  color: #fecaca;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-delete-icon:hover {
+  background: rgba(185, 28, 28, 0.42);
+  border-color: rgba(252, 165, 165, 0.52);
+}
+
+@media (max-width: 760px) {
+  .asignaciones-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .btn-agregar-asignacion {
+    width: 100%;
+  }
+
+  .acciones-nota-credito {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+.notas-credito-subseccion{
+  margin-top: 0.9rem;
+}
+
+.notas-credito-subseccion-header {
+  display:flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.65rem;
+}
+
+.notas-credito-subseccion-header h4{
+  margin: 0;
+  color: #e2e8f0;
+  font-size: 0.98rem;
+  font-weight: 700;
+}
+
+.btn-delete-movimiento:disabled{
+  opacity: 0.6;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.btn-toggle-seccion {
+margin-left: auto;
+display: inline-flex;
+align-items: center;
+gap: 0.35rem;
+padding: 0.4rem 0.75rem;
+border-radius: 999px;
+border: 1px solid rgba(148, 163, 184, 0.34);
+background: rgba(15, 23, 42, 0.72);
+color: #cbd5e1;
+font-size: 0.8rem;
+font-weight: 700;
+cursor: pointer;
+transition: all 0.18s ease;
+}
+
+.btn-toggle-seccion:hover {
+border-color: rgba(147, 197, 253, 0.55);
+color: #e2e8f0;
+background: rgba(30, 41, 59, 0.9);
+}
+
+@media (max-width: 760px) {
+.btn-toggle-seccion {
+width: fit-content;
+align-self: flex-end;
+}
+}
+
 </style>
 
