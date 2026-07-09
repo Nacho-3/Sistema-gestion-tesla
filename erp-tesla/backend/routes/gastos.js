@@ -158,6 +158,14 @@ const seedCatalogoFijosDefaults = async (client) => {
       activos.length === legacy.size &&
       [...legacy].every((item) => activosSet.has(item));
 
+    //Solo resembrar en dos cosas:
+    // 1) instalación vacia
+    // 2) catalogo Legacy detectado
+
+    if (activos.length > 0 && !detectedLegacy) {
+      continue;
+    }
+
     if (detectedLegacy) {
       await client.query(
         `
@@ -326,7 +334,8 @@ router.put("/catalogo-fijos/:id", async (req, res) => {
         UPDATE gastos
         SET tipo = $1, descripcion = $2
         WHERE tipo = $3
-          AND LOWER(BTRIM(descripcion)) = LOWER(BTRIM($4))
+          AND LOWER(REGEXP_REPLACE(BTRIM(descripcion), '\\s+', ' ', 'g')) =
+          LOWER(REGEXP_REPLACE(BTRIM($4), '\\s+', ' ', 'g'))
       `,
       [tipo, descripcion, previo.tipo, previo.descripcion]
     );
@@ -384,7 +393,8 @@ router.delete("/catalogo-fijos/:id", async (req, res) => {
       `
         DELETE FROM gastos
         WHERE tipo = $1
-          AND LOWER(BTRIM(descripcion)) = LOWER(BTRIM($2))
+          AND LOWER(REGEXP_REPLACE(BTRIM(descripcion), '\\s+', ' ', 'g')) =
+          LOWER(REGEXP_REPLACE(BTRIM($2), '\\s+', ' ', 'g'))
       `,
       [row.tipo, row.descripcion]
     );

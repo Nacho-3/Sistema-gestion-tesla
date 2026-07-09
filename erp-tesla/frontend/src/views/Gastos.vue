@@ -129,7 +129,20 @@ const cargarGastos = async () => {
 }
 
 const agregarTemporal = (tipo) => {
-  gastos.value[tipo].temporales.push(nuevaFila(""))
+  const descripcion = window.prompt(`Nuevo gasto temporal para ${tipo.toUpperCase()}:`)
+  if (descripcion === null) return
+
+  const descripcionLimpia = String(descripcion || "").trim()
+  if (!descripcionLimpia) {
+    error.value = "La descripcion del gasto temporal no puede quedar vacia"
+    return
+  }
+
+  //evitar duplicado
+
+  const existe = (gastos.value[tipo]?.temporales || []).some(
+    (row) => normalizarDescripcion(row.descripcion) === normalizarDescripcion(descripcionLimpia)
+  )
 }
 
 const agregarFijo = async (tipo) => {
@@ -199,6 +212,26 @@ const editarFijoDescripcion = async (tipo, row) => {
   } catch (err) {
     error.value = "Error al editar gasto fijo: " + (err?.response?.data?.error || err.message)
   }
+}
+
+const abrirEditarFijo = async (tipo, row) => {
+  if (!row?.catalogo_id) return
+
+  const actual = String(row.descripcion || "").trim()
+  const nuevo = window.prompt(
+    "Editar descripcion del gasto fijo:",
+    actual
+  )
+  if(nuevo === null) return
+
+  const descripcion = String(nuevo || "").trim()
+
+  if (!descripcion || descripcion === actual) return
+
+  await editarFijoDescripcion(tipo, {
+    ...row,
+    descripcion,
+  })
 }
 
 const totalizar = (rows = []) =>
@@ -407,7 +440,7 @@ onMounted(async () => {
                   <th>Subtotal</th>
                   <th>Total</th>
                   <th>Pago tesla</th>
-                  <th></th>
+                  <th>Acciones</th>
                 </tr>
               </thead>
               <tbody>
@@ -417,7 +450,19 @@ onMounted(async () => {
                   <td><input v-model.number="row.subtotal" type="number" step="0.01" min="0" @change="programarGuardadoTipo(tipo.key)" /></td>
                   <td><input v-model.number="row.total" type="number" step="0.01" min="0" @change="programarGuardadoTipo(tipo.key)" /></td>
                     <td><input v-model.number="row.pago_tesla" type="number" step="0.01" min="0" @change="programarGuardadoTipo(tipo.key)" /></td>
-                  <td><button class="btn-eliminar" @click="quitarFijo(tipo.key, idx)">Quitar</button></td>
+
+                  <td>
+                    <div class="acciones-fijo">
+                      <button class="btn-editar" @click="abrirEditarFijo(tipo.key, row)">
+                        Editar
+                      </button>
+
+                      <button class="btn-eliminar" @click="quitarFijo(tipo.key, idx)">
+                        Quitar
+                      </button>
+                    </div>
+                  </td>
+
                 </tr>
                 <tr v-if="gastos[tipo.key].fijos.length === 0">
                   <td colspan="6" class="sin-datos">No hay items fijos definidos para este tipo</td>
@@ -655,6 +700,22 @@ onMounted(async () => {
   background: rgba(239, 68, 68, 0.14);
   color: #fca5a5;
   border: 1px solid rgba(239, 68, 68, 0.22);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.acciones-fijo {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.btn-editar {
+  padding: 0.3rem 0.65rem;
+  background: rgba(59, 130, 246, 0.14);
+  color: #93c5fd;
+  border: 1px solid rgba(59, 130, 246, 0.22);
   border-radius: 6px;
   font-size: 0.78rem;
   cursor: pointer;
