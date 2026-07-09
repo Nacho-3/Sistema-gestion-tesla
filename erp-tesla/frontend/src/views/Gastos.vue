@@ -140,9 +140,31 @@ const agregarTemporal = (tipo) => {
 
   //evitar duplicado
 
-  const existe = (gastos.value[tipo]?.temporales || []).some(
+  const existeTemporal = (gastos.value[tipo]?.temporales || []).some(
     (row) => normalizarDescripcion(row.descripcion) === normalizarDescripcion(descripcionLimpia)
   )
+
+  if (existeTemporal) {
+    error.value = "Ya existe un gasto temporal con esa descripcion"
+    return
+  }
+
+  //Evitar descripcion que ya es fijo
+
+  const existeFijo = (gastos.value[tipo]?.fijos || []).some(
+    (row) => normalizarDescripcion(row.descripcion) === normalizarDescripcion(descripcionLimpia)
+  )
+
+  if (existeFijo) {
+    error.value = "Ya existe un gasto fijo con esa descripcion"
+    return
+  }
+
+  error.value = ""
+  ok.value = ""
+
+  gastos.value[tipo].temporales.push(nuevaFila(descripcionLimpia))
+  programarGuardadoTipo(tipo)
 }
 
 const agregarFijo = async (tipo) => {
