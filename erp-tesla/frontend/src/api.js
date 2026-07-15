@@ -420,6 +420,10 @@ export default {
     return api.post(`/caja/semanas/${id}/cerrar`, payload)
   },
 
+  reabrirSemanaCaja(id, codigo_admin) {
+    return api.post(`/caja/semanas/${id}/reabrir`, { codigo_admin })
+  },
+
   updateSemanaCajaSaldos(id, payload) {
     return api.post(`/caja/semanas/${id}/saldos`, payload)
   },
@@ -488,6 +492,24 @@ export default {
 
   anularReciboCaja(id, motivo_anulacion) {
     return api.post(`/recibos/${id}/anular`, { motivo_anulacion })
+  },
+
+  getRecibosCaja(clienteId = null, estado = null, limit = 200) {
+    const params = new URLSearchParams()
+    if (clienteId !== null && clienteId !== undefined && String(clienteId).trim() !== "") {
+      params.append("cliente_id", String(clienteId))
+    }
+
+    if (estado) {
+      params.append("estado", String(estado))
+    }
+
+    if (limit) {
+      params.append("limit", String(limit))
+    }
+
+    const query = params.toString()
+    return api.get(query ? "/recibos?" + query : "/recibos")
   },
 
 

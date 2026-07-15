@@ -1,15 +1,25 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from "vue"
+import { useRouter } from "vue-router"
 import api from "../api"
 import socket from "../socket.js"
 import LayoutShell from "../components/LayoutShell.vue"
 import { formatHoursAsClock } from "../utils/hourFormat"
 
-const CAJAS_DASHBOARD = [
+const router = useRouter()
+
+// Regla de negocio: el dashboard trabaja siempre con estas 3 cajas fijas.
+const CAJAS_DASHBOARD = Object.freeze([
   { key: "tesla", label: "Caja Tesla" },
   { key: "teslita", label: "Caja Teslita" },
   { key: "juani", label: "Caja Juani" },
-]
+])
+
+const crearCajasMesDefault = () => ({
+  tesla: { ingresos: 0, egresos: 0, saldo: 0 },
+  teslita: { ingresos: 0, egresos: 0, saldo: 0 },
+  juani: { ingresos: 0, egresos: 0, saldo: 0 },
+})
 
 const resumen = ref({
   obras_activas: 0,
@@ -17,11 +27,7 @@ const resumen = ref({
   sueldos_mes: 0,
   ingresos_mes: 0,
   egresos_mes: 0,
-  cajas_mes: {
-    tesla: { ingresos: 0, egresos: 0, saldo: 0 },
-    teslita: { ingresos: 0, egresos: 0, saldo: 0 },
-    juani: { ingresos: 0, egresos: 0, saldo: 0 },
-  },
+  cajas_mes: crearCajasMesDefault(),
   presupuestos_pendientes: []
 })
 
@@ -32,9 +38,73 @@ let claveMesActual = ""
 const cargando = ref(false)
 const error = ref("")
 
+const irAObras = () => {
+  router.push({ path: "/obras" })
+}
+
+const irAHoras = () => {
+  router.push({ path: "/horas" })
+}
+
+const irASueldos = () => {
+  router.push({ path: "/sueldos" })
+}
+
+const irACajaDashboard = (cajaCodigo) => {
+  router.push({
+    path: "/caja",
+    query: { caja_codigo: String(cajaCodigo || "tesla").toLowerCase() },
+  })
+}
+
+
+const irAmovimientoCaja = (movimiento) => {
+  if (!movimiento?.id) return
+
+  const query = {
+    movimiento_id: String(movimiento.id)
+  }
+
+  if (movimiento.caja_codigo) {
+    query.caja_codigo = String(movimiento.caja_codigo).toLowerCase()
+  }
+
+  router.push({
+    path:"/caja",
+    query,
+  })
+}
+
+const irAEditarPresupuesto = (presupuesto) => {
+  if (!presupuesto?.id) return
+
+  router.push({
+    path: "/presupuestos",
+    query: {
+      presupuesto_id: String(presupuesto.id)
+    }
+  })
+}
+
 const toNumber = (valor) => {
   const num = Number(valor)
   return Number.isFinite(num) ? num : 0
+}
+
+const normalizarCajasMes = (cajasMesApi) => {
+  const origen = (cajasMesApi && typeof cajasMesApi === "object") ? cajasMesApi : {}
+  const normalizado = crearCajasMesDefault()
+
+  CAJAS_DASHBOARD.forEach(({ key }) => {
+    const caja = origen[key] || {}
+    normalizado[key] = {
+      ingresos: toNumber(caja.ingresos),
+      egresos: toNumber(caja.egresos),
+      saldo: toNumber(caja.saldo),
+    }
+  })
+
+  return normalizado
 }
 
 const getCajaResumen = (codigo) => {
@@ -58,11 +128,7 @@ const resetearResumenMensual = () => {
   resumen.value.sueldos_mes = 0
   resumen.value.ingresos_mes = 0
   resumen.value.egresos_mes = 0
-  resumen.value.cajas_mes = {
-    tesla: { ingresos: 0, egresos: 0, saldo: 0 },
-    teslita: { ingresos: 0, egresos: 0, saldo: 0 },
-    juani: { ingresos: 0, egresos: 0, saldo: 0 },
-  }
+  resumen.value.cajas_mes = crearCajasMesDefault()
   resumen.value.presupuestos_pendientes = []
   ultimosMovimientos.value = []
 }
@@ -79,6 +145,7 @@ const verificarCambioMes = async () => {
 }
 
 const cargarResumen = async () => {
+  if (cargando.value) return
   cargando.value = true
   error.value = ""
   try {
@@ -92,11 +159,7 @@ const cargarResumen = async () => {
       sueldos_mes: toNumber(data.sueldos_mes),
       ingresos_mes: toNumber(data.ingresos_mes),
       egresos_mes: toNumber(data.egresos_mes),
-      cajas_mes: data.cajas_mes || {
-        tesla: { ingresos: 0, egresos: 0, saldo: 0 },
-        teslita: { ingresos: 0, egresos: 0, saldo: 0 },
-        juani: { ingresos: 0, egresos: 0, saldo: 0 },
-      },
+      cajas_mes: normalizarCajasMes(data.cajas_mes),
       presupuestos_pendientes: Array.isArray(data.presupuestos_pendientes) ? data.presupuestos_pendientes : [],
     }
     ultimosMovimientos.value = Array.isArray(data.ultimos_movimientos) ? data.ultimos_movimientos : []
@@ -154,21 +217,42 @@ onUnmounted(() => {
       </section>
 
       <section class="grid-cards">
-        <article class="stat-card stat-card-primary">
+        <article
+          class="stat-card stat-card-primary stat-card-clickable"
+          role="button"
+          tabindex="0"
+          @click="irAObras"
+          @keyup.enter="irAObras"
+          @keyup.space.prevent="irAObras"
+        >
           <span class="stat-kicker">Producción</span>
           <h2>Obras activas</h2>
           <p class="stat-value">{{ resumen.obras_activas }}</p>
           <p class="stat-caption">Proyectos actualmente en ejecución</p>
         </article>
 
-        <article class="stat-card stat-card-hours">
+        <article
+          class="stat-card stat-card-hours stat-card-clickable"
+          role="button"
+          tabindex="0"
+          @click="irAHoras"
+          @keyup.enter="irAHoras"
+          @keyup.space.prevent="irAHoras"
+        >
           <span class="stat-kicker">Rendimiento</span>
           <h2>Horas del mes</h2>
           <p class="stat-value">{{ formatHoursAsClock(resumen.horas_mes) }}</p>
           <p class="stat-caption">Total de horas registradas</p>
         </article>
 
-        <article class="stat-card stat-card-payroll">
+        <article
+          class="stat-card stat-card-payroll stat-card-clickable"
+          role="button"
+          tabindex="0"
+          @click="irASueldos"
+          @keyup.enter="irASueldos"
+          @keyup.space.prevent="irASueldos"
+        >
           <span class="stat-kicker">Salarios</span>
           <h2>Sueldos a pagar</h2>
           <p class="stat-value">
@@ -177,13 +261,21 @@ onUnmounted(() => {
           <p class="stat-caption">Monto estimado del período actual</p>
         </article>
 
-        <article v-for="caja in CAJAS_DASHBOARD" :key="caja.key" class="stat-card stat-card-caja">
+        <article
+          v-for="caja in CAJAS_DASHBOARD"
+          :key="caja.key"
+          class="stat-card stat-card-caja stat-card-clickable"
+          role="button"
+          tabindex="0"
+          @click="irACajaDashboard(caja.key)"
+          @keyup.enter="irACajaDashboard(caja.key)"
+          @keyup.space.prevent="irACajaDashboard(caja.key)"
+        >
           <div class="stat-card-head">
             <div>
               <span class="stat-kicker">Caja</span>
               <h2>{{ caja.label }}</h2>
             </div>
-            <!--<span class="caja-pill">{{ caja.key }}</span>-->
           </div>
           <p class="stat-value saldo">
             $ {{ getCajaResumen(caja.key).saldo.toLocaleString("es-AR", { minimumFractionDigits: 2 }) }}
@@ -199,7 +291,6 @@ onUnmounted(() => {
           <p class="stat-caption">Saldo, ingresos y egresos de la caja</p>
         </article>
       </section>
-
       <section class="panel-secundario">
         <div class="panel-col">
           <div class="panel-head">
@@ -211,10 +302,21 @@ onUnmounted(() => {
           </div>
           <template v-if="ultimosMovimientos.length">
             <ul class="movimientos-list">
-              <li v-for="m in ultimosMovimientos" :key="m.id" class="movimiento-item">
+              <li 
+                v-for="m in ultimosMovimientos" 
+                :key="m.id" 
+                class="movimiento-item movimiento-item-clickable"
+                role="button"
+                tabindex="0"
+                @click="irAmovimientoCaja(m)"
+                @keyup.enter="irAmovimientoCaja(m)"
+                @keyup.space.prevent="irAmovimientoCaja(m)"
+              >
                 <span class="mov-fecha">{{ new Date(m.fecha).toLocaleDateString('es-AR') }}</span>
                 <span class="mov-detalle">{{ m.concepto ?? m.detalle }}</span>
-                <span :class="['mov-monto', m.tipo]">{{ m.tipo === 'ingreso' ? '+' : '−' }} $ {{ toNumber(m.monto_total).toLocaleString('es-AR', { minimumFractionDigits: 2 }) }}</span>
+                <span :class="['mov-monto', m.tipo]">
+                  {{ m.tipo === 'ingreso' ? '+' : '−' }} $ {{ toNumber(m.monto_total ?? m.monto).toLocaleString('es-AR', { minimumFractionDigits: 2 }) }}
+                </span>
               </li>
             </ul>
           </template>
@@ -231,10 +333,19 @@ onUnmounted(() => {
           </div>
           <template v-if="resumen.presupuestos_pendientes.length">
             <ul class="movimientos-list">
-              <li v-for="p in resumen.presupuestos_pendientes" :key="p.id" class="movimiento-item">
+              <li
+                v-for="p in resumen.presupuestos_pendientes"
+                :key="p.id"
+                class="movimiento-item movimiento-item-clickable"
+                role="button"
+                tabindex="0"
+                @click="irAEditarPresupuesto(p)"
+                @keyup.enter="irAEditarPresupuesto(p)"
+                @keyup.space.prevent="irAEditarPresupuesto(p)"
+              >
                 <span class="mov-fecha">{{ new Date(p.fecha).toLocaleDateString('es-AR') }}</span>
                 <span class="mov-detalle">#{{ p.numero }} - {{ p.cliente }}</span>
-                <span class="mov-monto">$ {{ toNumber(p.total).toLocaleString('es-AR', { minimumFractionDigits: 2 }) }}</span>
+                <span class="mov-monto">${{ toNumber(p.total).toLocaleString('es-AR', { minimumFractionDigits: 2 }) }}</span>
               </li>
             </ul>
           </template>
@@ -496,6 +607,24 @@ onUnmounted(() => {
   border-bottom: 1px solid rgba(148, 163, 184, 0.1);
 }
 
+.movimiento-item-clickable {
+  cursor: pointer;
+  transition: 
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    background 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.movimiento-item-clickable:hover,
+.movimiento-item-clickable:focus-visible {
+  transform: translateY(-1px);
+  border-color: rgba(96, 165, 250, 0.35);
+  background: rgba(59, 130, 246, 0.08);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.22);
+  outline: none;
+}
+
 .mov-fecha {
   color: #9ca3af;
   font-size: 0.8rem;
@@ -557,5 +686,24 @@ onUnmounted(() => {
     grid-template-columns: 1fr;
     gap: 0.35rem;
   }
+}
+
+.stat-card-clickable {
+  cursor: pointer;
+  transition: 
+    transform 0.2s ease,
+    border-color 0.2s ease,
+    background 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.stat-card-clickable:hover,
+.stat-card-clickable:focus-visible {
+  transform: translateY(-2px);
+  border-color: rgba(96, 165, 250, 0.35);
+  box-shadow:
+    0 20px 40px rgba(15, 23, 42, 0.42),
+    0 0 0 1px rgba(59, 130, 246, 0.2);
+  outline: none;
 }
 </style>

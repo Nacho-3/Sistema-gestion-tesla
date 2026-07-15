@@ -1,11 +1,12 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, watch } from "vue"
-import { useRouter } from "vue-router"
+import { useRouter, useRoute } from "vue-router"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
 
 const router = useRouter()
+const route = useRoute()
 const presupuestos = ref([])
 const clientes = ref([])
 const obras = ref([])
@@ -738,6 +739,13 @@ const closeForm = () => {
   resetForm()
 }
 
+const abrirPresupuestoDesdeQuery = async () => {
+  const presupuestoId = Number(route.query.presupuesto_id || 0)
+  if (!presupuestoId) return
+
+  await editPresupuesto(presupuestoId)
+}
+
 const openDeleteConfirm = (presupuesto) => {
   presupuestoAEliminar.value = presupuesto
   showDeleteConfirm.value = true
@@ -935,7 +943,7 @@ const triggerBlobDownload = (blob, numero, mode = "presupuesto") => {
   document.body.appendChild(a)
   a.click()
   a.remove()
-  // Some browsers/slow PCs can fail if URL is revoked immediately after click.
+
   window.setTimeout(() => {
     window.URL.revokeObjectURL(url)
   }, 60_000)
@@ -962,7 +970,6 @@ const enviarWhatsapp = async (presupuesto) => {
       }
     }
 
-    // Fallback desktop/web: abre WhatsApp para elegir contacto y descarga el PDF para adjuntar manualmente.
     triggerBlobDownload(pdfBlob, presupuesto.numero)
     const link = `https://wa.me/?text=${encodeURIComponent(mensaje)}`
     window.open(link, "_blank", "noopener,noreferrer")
@@ -1028,12 +1035,15 @@ const eliminarPresupuesto = async () => {
 
 onMounted(async () => {
   await loadData()
+  await abrirPresupuestoDesdeQuery()
+
   try {
     const res = await api.getIndicesCac()
-    indicesCac.value = res.data
+    indicesCac.value = res.data || []
   } catch (_) { /* no bloquear */ }
   socket.on('presupuestos:changed', loadData)
 })
+
 onUnmounted(() => {
   socket.off('presupuestos:changed', loadData)
 })

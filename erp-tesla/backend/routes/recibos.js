@@ -258,16 +258,42 @@ const cargarReciboPorId = async (reciboId) => {
 }
 
 router.get("/", async (req, res) => {
-    try {
-        const result = await db.query(`
-            SELECT * FROM recibos_caja 
-            ORDER BY numero DESC
-            LIMIT 100
-        `)
-        return res.json({ recibos: result.rows || [] })
-    } catch (error) {
-        return res.status(500).json({ error: error.message || "No se pudieron obtener los recibos" })
+  try {
+    await ensureRecibosSchema()
+
+    const clienteId = Number(req.query.cliente_id)
+    const estado = String(req.query.estado || "").trim().toLowerCase()
+    const limitInput = Number(req.query.limit)
+    const limit = Number.isInteger(limitInput) && limitInput > 0
+      ? Math.min(limitInput, 1000)
+      : 200
+
+    const where = []
+    const params = []
+
+    if (Number.isInteger(clienteId) && clienteId > 0) {
+      params.push(clienteId)
+      where.push("cliente_id = $" + params.length)
     }
+
+    if (estado === "emitido" || estado === "anulado"){
+      params.push(estado)
+      where.push("estado = $" + params.length)
+    }
+
+    const whereClause = where.length ? "WHERE " + where.join(" AND ") : ""
+    params.push(limit)
+
+    const sql =
+      "SELECT * FROM recibos_caja" +
+      whereClause +
+      " ORDER BY numero DESC LIMIT $" + params.length
+
+    const result = await db.query(sql, params)
+    return res.json({ recibos: result.rows || [] })
+  } catch (error) {
+    return res.status(500).json({ error: error.message || "No se pudo obtener los recibos" })
+  }
 })
 
 router.post("/", async (req, res) => {

@@ -1,9 +1,12 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, watch } from "vue"
+import { useRoute } from "vue-router"
 import api from "../api"
 import LayoutShell from "../components/LayoutShell.vue"
 import socket from '../socket.js'
 import * as API from "../api.js"
+
+const route = useRoute()
 
 const CAJAS_DISPONIBLES = [
   { id: "tesla", label: "Caja Tesla" },
@@ -47,9 +50,16 @@ const saldoChequesEditable = ref("")
 const guardandoSaldosSemana = ref(false)
 const confirmandoCierre = ref(false)
 const abriendoSemana = ref(false)
+const fechaCierreFijada = ref("")
+const fechaCierreManual = ref("") // Fecha manual para cerrar semana
+const horaCierreManual = ref("") // Hora manual para cerrar semana
 const formAbrirSemana = ref({
   fecha_inicio: "",
 })
+const mostrarModalReabrirSemana = ref(false)
+const semanaAReabrir = ref(null)
+const codigoAdminReabrir = ref("")
+const reabriendo = ref(false)
 const libroCheques = ref([])
 const chequesDisponibles = ref([])
 const loadingLibroCheques = ref(false)
@@ -248,7 +258,57 @@ const getRangoSemanaLocal = (fechaValor) => {
   }
 }
 
-const normalizarFechaSemana = (valor) => String(valor || "").split("T")[0]
+const normalizarFechaSemana = (valor) => {
+  const texto = String(valor || "").trim()
+  if (!texto) return ""
+  return texto.split(/[T ]/)[0]
+}
+
+const normalizarFechaHoraSemana = (valor) => {
+  const texto = String(valor || "").trim()
+  if (!texto) return null
+
+  const incluyeZona = /(?:z|[+-]\d{2}:?\d{2})$/i.test(texto)
+  if (incluyeZona) {
+    const fechaConZona = new Date(texto)
+    if (Number.isNaN(fechaConZona.getTime())) return null
+
+    const y = fechaConZona.getFullYear()
+    const m = String(fechaConZona.getMonth() + 1).padStart(2, "0")
+    const d = String(fechaConZona.getDate()).padStart(2, "0")
+    const hh = String(fechaConZona.getHours()).padStart(2, "0")
+    const mm = String(fechaConZona.getMinutes()).padStart(2, "0")
+    const ss = String(fechaConZona.getSeconds()).padStart(2, "0")
+    return `${y}-${m}-${d} ${hh}:${mm}:${ss}`
+  }
+
+  const match = texto.match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/)
+  if (match) {
+    const [, fecha, hh = "00", mm = "00", ss = "00"] = match
+    return `${fecha} ${hh}:${mm}:${ss}`
+  }
+
+  const fecha = new Date(texto)
+  if (Number.isNaN(fecha.getTime())) return null
+
+  const y = fecha.getFullYear()
+  const m = String(fecha.getMonth() + 1).padStart(2, "0")
+  const d = String(fecha.getDate()).padStart(2, "0")
+  const hh = String(fecha.getHours()).padStart(2, "0")
+  const mm = String(fecha.getMinutes()).padStart(2, "0")
+  const ss = String(fecha.getSeconds()).padStart(2, "0")
+  return `${y}-${m}-${d} ${hh}:${mm}:${ss}`
+}
+
+const formatearFechaHoraSemana = (valor) => {
+  const normalizada = normalizarFechaHoraSemana(valor)
+  if (!normalizada) return "-"
+
+  const [fecha, hora] = normalizada.split(" ")
+  const [anio, mes, dia] = String(fecha || "").split("-")
+  const [hh, mm] = String(hora || "00:00:00").split(":")
+  return `${dia}/${mes}/${anio} ${hh}:${mm}`
+}
 
 const normalizarEstadoSemana = (estado) => {
   const valor = String(estado || "").trim().toLowerCase()
@@ -259,11 +319,15 @@ const normalizarEstadoSemana = (estado) => {
 
 const normalizarSemanaCaja = (semana, defaults = {}) => {
   if (!semana) return null
+  const fechaInicioRaw = semana.fecha_inicio_ts || semana.fecha_inicio || defaults.fecha_inicio_ts || defaults.fecha_inicio
+  const fechaFinRaw = semana.fecha_fin_ts || semana.fecha_fin || defaults.fecha_fin_ts || defaults.fecha_fin
   return {
     ...defaults,
     ...semana,
-    fecha_inicio: normalizarFechaSemana(semana.fecha_inicio || defaults.fecha_inicio),
-    fecha_fin: normalizarFechaSemana(semana.fecha_fin || defaults.fecha_fin),
+    fecha_inicio_ts: normalizarFechaHoraSemana(fechaInicioRaw),
+    fecha_fin_ts: normalizarFechaHoraSemana(fechaFinRaw),
+    fecha_inicio: normalizarFechaSemana(fechaInicioRaw),
+    fecha_fin: normalizarFechaSemana(fechaFinRaw),
     saldo_inicial: Number(semana.saldo_inicial ?? defaults.saldo_inicial ?? 0),
     saldo_inicial_efectivo: Number(semana.saldo_inicial_efectivo ?? defaults.saldo_inicial_efectivo ?? 0),
     saldo_inicial_cheques: Number(semana.saldo_inicial_cheques ?? defaults.saldo_inicial_cheques ?? 0),
@@ -283,9 +347,13 @@ const normalizarSemanaCaja = (semana, defaults = {}) => {
 
 const claveSemanaCaja = (semana) => {
   if (!semana) return ""
+  const id = extraerSemanaIdNumerica(semana.id)
+  if (id) return `id-${id}`
+
   const inicio = normalizarFechaSemana(semana.fecha_inicio)
   const fin = normalizarFechaSemana(semana.fecha_fin)
-  return inicio && fin ? `${inicio}-${fin}` : String(semana.id || "")
+  if (inicio && fin) return `${inicio}-${fin}`
+  return inicio || ""
 }
 
 const extraerSemanaIdNumerica = (valor) => {
@@ -762,15 +830,15 @@ const todosChequesControlSeleccionados = computed(() => {
 
 const etiquetaSemanaRango = (semana) => {
   if (!semana?.fecha_inicio) return "Semana"
-  const inicio = new Date(`${semana.fecha_inicio}T00:00:00`).toLocaleDateString("es-AR")
+  const inicio = formatearFechaHoraSemana(semana.fecha_inicio_ts || semana.fecha_inicio)
   const estado = normalizarEstadoSemana(semana?.estado)
   if (estado === "abierta") {
     return `${inicio} - actualidad (abierta)`
   }
-  if (!semana?.fecha_fin) {
+  if (!semana?.fecha_fin && !semana?.fecha_fin_ts) {
     return `${inicio} - ${inicio} (cerrada)`
   }
-  const fin = new Date(`${semana.fecha_fin}T00:00:00`).toLocaleDateString("es-AR")
+  const fin = formatearFechaHoraSemana(semana.fecha_fin_ts || semana.fecha_fin)
   return `${inicio} - ${fin} (cerrada)`
 }
 
@@ -996,9 +1064,17 @@ const confirmarAbrirSemana = async () => {
 
   try {
     abriendoSemana.value = true
+    const hoy = formatFechaISO(new Date())
+    let fechaInicioPayload = fechaInicio
+    if (fechaInicio === hoy) {
+      const ahora = new Date()
+      const pad2 = (n) => String(n).padStart(2, "0")
+      fechaInicioPayload = `${fechaInicio}T${pad2(ahora.getHours())}:${pad2(ahora.getMinutes())}:${pad2(ahora.getSeconds())}`
+    }
+
     const res = await api.abrirSemanaCaja({
       caja_codigo: filtroCaja.value,
-      fecha_inicio: fechaInicio,
+      fecha_inicio: fechaInicioPayload,
     })
 
     const nuevaSemanaId = res?.data?.id
@@ -1022,6 +1098,21 @@ const abrirModalCerrarSemana = () => {
   saldoEcheqDepositadosCierre.value = saldoEcheqDepositadosEditable.value
   saldoEfectivoCierre.value = saldoEfectivoEditable.value
   saldoChequesCierre.value = saldoChequesEditable.value
+  
+  // Limpiar campos de fecha/hora manual
+  fechaCierreManual.value = ""
+  horaCierreManual.value = ""
+  
+  // Precargar fecha de cierre original si existe
+  if (semanaActiva.value?.fecha_fin) {
+    const fecha = new Date(semanaActiva.value.fecha_fin)
+    if (!Number.isNaN(fecha.getTime())) {
+      fechaCierreFijada.value = fecha.toISOString()
+    }
+  } else {
+    fechaCierreFijada.value = ""
+  }
+  
   mostrarModalCerrarSemana.value = true
 }
 
@@ -1083,7 +1174,32 @@ const confirmarCerrarSemana = async () => {
   
   try {
     confirmandoCierre.value = true
+
+    let fechaCierreAUsar = null
+
+    // Si el usuario ingresó fecha manual, usarla (con hora manual o 00:00:00)
+    if (fechaCierreManual.value) {
+      let fechaHora = fechaCierreManual.value
+      if (horaCierreManual.value) {
+        fechaHora = `${fechaCierreManual.value}T${horaCierreManual.value}:00`
+      } else {
+        fechaHora = `${fechaCierreManual.value}T00:00:00`
+      }
+      const fechaParsed = new Date(fechaHora)
+      if (!Number.isNaN(fechaParsed.getTime())) {
+        fechaCierreAUsar = fechaHora
+      }
+    } else if (semanaActiva.value?.fecha_fin) {
+      // Semana reabierta: si no hay ingreso manual, conservar cierre original.
+      fechaCierreAUsar = String(semanaActiva.value.fecha_fin)
+    } else {
+      const ahora = new Date()
+      const pad2 = (n) => String(n).padStart(2, "0")
+      fechaCierreAUsar = `${ahora.getFullYear()}-${pad2(ahora.getMonth() + 1)}-${pad2(ahora.getDate())}T${pad2(ahora.getHours())}:${pad2(ahora.getMinutes())}:${pad2(ahora.getSeconds())}`
+    }
+    
     const body = {
+      fecha_cierre: fechaCierreAUsar,
       saldo_banco: saldoBancoCierre.value !== "" ? Number(saldoBancoCierre.value) : null,
       saldo_pendiente_echeq: saldoPendienteEcheqCierre.value !== "" ? Number(saldoPendienteEcheqCierre.value) : null,
       saldo_echeq_depositados: saldoEcheqDepositadosCierre.value !== "" ? Number(saldoEcheqDepositadosCierre.value) : null,
@@ -1094,11 +1210,56 @@ const confirmarCerrarSemana = async () => {
     await refrescarCaja({ mantenerSeleccion: true })
     mostrarModalCerrarSemana.value = false
     semanaSeleccionadaId.value = ""
+    fechaCierreManual.value = ""
+    horaCierreManual.value = ""
   } catch (err) {
     error.value = `Error al cerrar semana: ${err.response?.data?.error || err.message}`
   } finally {
     confirmandoCierre.value = false
   }
+}
+
+const abrirModalReabrir = (semana) => {
+  semanaAReabrir.value = semana
+  codigoAdminReabrir.value = ""
+  error.value = ""
+
+  if (semana?.fecha_fin) {
+    const fecha = new Date(semana.fecha_fin)
+    if (!Number.isNaN(fecha.getTime())) {
+      fechaCierreFijada.value = fecha.toISOString()
+    }
+  }
+  mostrarModalReabrirSemana.value = true
+}
+
+const confirmarReabrir = async() => {
+  if (!semanaAReabrir.value?.id) return
+
+  const codigo = String(codigoAdminReabrir.value || "").trim()
+  if (!codigo) {
+    error.value = "Debe ingresar el código de administrador para reabrir la semana"
+    return
+  }
+
+  reabriendo.value = true
+  error.value = ""
+
+  try{
+    await api.reabrirSemanaCaja(Number(semanaAReabrir.value.id), codigo)
+    mostrarModalReabrirSemana.value = false
+    await cargarSemanasCaja(false)
+  } catch (err) {
+    error.value = `Error al reabrir semana: ${err.response?.data?.error || err.message}`
+  } finally {
+    reabriendo.value = false
+  }
+}
+
+const cerrarModalReabrir = () => {
+  mostrarModalReabrirSemana.value = false
+  semanaAReabrir.value = null
+  codigoAdminReabrir.value = ""
 }
 
 const textoTipoFiltro = () => {
@@ -2159,6 +2320,34 @@ const volverALista = () => {
   resetReciboMovimiento()
 }
 
+const abrirMovimientoDesdeQuery = async () => {
+  const movimientoId = Number(route.query.movimiento_id || 0)
+  if (!movimientoId) return
+
+  const cajaCodigoQuery = String(route.query.caja_codigo || "").toLowerCase()
+  const cajaValida = cajaCodigoQuery && CAJAS_DISPONIBLES.some((caja) => caja.id === cajaCodigoQuery)
+  if (cajaValida) {
+    filtroCaja.value = cajaCodigoQuery
+    await refrescarCaja({ mantenerSeleccion: false })
+  }
+
+  const movimiento = (movimientos.value || []).find((item) => Number(item.id) === movimientoId)
+  if (!movimiento) {
+    error.value = `No se encontró el movimiento con ID ${movimientoId}`
+    return
+  }
+
+  await verDetalle(movimiento)
+}
+
+const aplicarCajaDesdeQuery = async () => {
+  const cajaCodigoQuery = String(route.query.caja_codigo || "").toLowerCase()
+  const cajaValida = CAJAS_DISPONIBLES.some((caja) => caja.id === cajaCodigoQuery)
+  if (cajaValida) {
+    filtroCaja.value = cajaCodigoQuery
+  }
+}
+
 const confirmarEliminar = (movimiento) => {
   movimientoAEliminar.value = movimiento
   showConfirm.value = true
@@ -2571,12 +2760,15 @@ watch(() => transferenciaChequesForm.value.caja_destino, (destino) => {
   transferenciaChequesForm.value.detalle = `Pasan cheques a ${getLabelCaja(destino)}`
 })
 
-onMounted(() => {
-  refrescarCaja({ mantenerSeleccion: false })
-  cargarReferencias()
-  cargarCategorias()
+onMounted(async () => {
+  aplicarCajaDesdeQuery()
+  await refrescarCaja({ mantenerSeleccion: false })
+  await cargarReferencias()
+  await cargarCategorias()
+  await abrirMovimientoDesdeQuery()
   socket.on('caja:changed', handleCajaChanged)
 })
+
 onUnmounted(() => {
   socket.off('caja:changed', handleCajaChanged)
 })
@@ -2633,7 +2825,11 @@ onUnmounted(() => {
             <label class="caja-semana-select">
               <span>Semana</span>
               <select v-model="semanaSeleccionadaId" class="select-sm">
-                <option v-for="semana in semanasCajaVisibles" :key="semana.id" :value="String(semana.id)">
+                <option
+                  v-for="semana in semanasCajaVisibles"
+                  :key="claveSemanaCaja(semana)"
+                  :value="String(semana.id)"
+                >
                   {{ etiquetaSemanaRango(semana) }}
                 </option>
               </select>
@@ -2645,6 +2841,16 @@ onUnmounted(() => {
             >
               Cerrar semana
             </button>
+
+            <button
+              v-if="normalizarEstadoSemana(semanaActiva?.estado) === 'cerrada'"
+              class="btn-reabrir-semana"
+              @click="abrirModalReabrir(semanaActiva)"
+              title="Reabrir semana cerrada (requiere codigo Admin)"
+            >
+              🔓 Reabrir
+            </button>
+
             <button
               v-if="!haySemanaAbierta"
               class="btn btn-week-open"
@@ -2898,7 +3104,7 @@ onUnmounted(() => {
           <div class="toolbar toolbar-caja toolbar-libro-cheques">
             <label class="toolbar-search-label toolbar-search">
               <span>Buscar cheque</span>
-              <input v-model="filtroBusquedaLibroCheques" type="text" class="input-sm input-search" placeholder="Numero, banco, librador, endosado..." />
+              <input v-model="filtroBusquedaLibroCheques" type="text" class="input-sm input-search" placeholder="Numero, banco, librador, endosado..." autocomplete="off" />
             </label>
             <label class="toolbar-filter-label">
               <span>Semana</span>
@@ -3981,6 +4187,18 @@ onUnmounted(() => {
 
       <div class="modal-form">
         <label class="form-group form-card-field form-card-field-accent">
+          <span>Fecha de cierre (opcional)</span>
+          <input v-model="fechaCierreManual" type="date" />
+          <small class="form-help">Dejá vacío para usar hoy. O especificá una fecha anterior si estás reabriendo una semana vieja.</small>
+        </label>
+
+        <label class="form-group form-card-field form-card-field-accent">
+          <span>Hora de cierre (opcional)</span>
+          <input v-model="horaCierreManual" type="time" />
+          <small class="form-help">Dejá vacío para usar la hora actual.</small>
+        </label>
+
+        <label class="form-group form-card-field form-card-field-accent">
           <span>Saldo actual en Banco ($)</span>
           <input v-model.number="saldoBancoCierre" type="number" @wheel.prevent placeholder="0.00" step="0.01" />
           <small class="form-help">Ingresá el saldo de la cuenta bancaria al día de hoy.</small>
@@ -4014,7 +4232,7 @@ onUnmounted(() => {
           <button type="button" class="btn btn-primary" :disabled="confirmandoCierre" @click="confirmarCerrarSemana">
             {{ confirmandoCierre ? "Cerrando..." : "Confirmar y Cerrar Semana" }}
           </button>
-          <button type="button" class="btn btn-secondary" @click="mostrarModalCerrarSemana = false">
+          <button type="button" class="btn btn-secondary" @click="mostrarModalCerrarSemana = false; fechaCierreManual = ''; horaCierreManual = ''">
             Cancelar
           </button>
         </div>
@@ -4265,6 +4483,58 @@ onUnmounted(() => {
           </div>
         </section>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal Reabrir Semana -->
+
+<div v-if="mostrarModalReabrirSemana" class="modal-overlay" @click.self="cerrarModalReabrir">
+  <div class="modal modal-confirmacion">
+    <div class="modal-header modal-header-confirmacion">
+      <div class="modal-header-copy">
+        <span class="section-kicker">Acción Restringida</span>
+        <h3>Reabrir semana cerrada</h3>
+        <p>Esta acción requiere código de administrador</p>
+      </div>
+      <button type="button" class="btn-close" @click="cerrarModalReabrir">x</button>
+    </div>
+
+    <div class="modal-form">
+      <div class="form-group">
+        <label>Código de administrador</label>
+        <input 
+          v-model="codigoAdminReabrir" 
+          type="text" 
+          placeholder="Ingresá el código de administrador"
+          class="form-control"
+          autocomplete="off"
+          @keyup.enter="confirmarReabrir"
+          />
+      </div>
+
+      <p style="font-size: 0.85rem; color: #94a3b8; margin-top:0.5rem;">
+        Semana: {{ etiquetaSemanaRango(semanaAReabrir) }}
+      </p>
+    </div>
+
+    <div class="modal-actions">
+      <button
+        type="button"
+        class="btn-primary btn-danger"
+        :disabled="reabriendo"
+        @click.stop="confirmarReabrir"
+      >
+        {{ reabriendo ? "Reabriendo..." : "Reabrir semana" }}
+      </button>
+      <button
+        type="button"
+        class="btn-secondary"
+        :disabled="reabriendo"
+        @click.stop="cerrarModalReabrir"
+      >
+        Cancelar
+      </button>
     </div>
   </div>
 </div>
@@ -7179,13 +7449,17 @@ onUnmounted(() => {
 
 .modal-actions {
   display: flex;
-  gap: 1rem;
-  margin-top: 1rem;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  padding-bottom: 1rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.15);
+  justify-content: center;
 }
 
 .modal-actions .btn-primary {
   flex: 1;
-  padding: 0.75rem;
+  padding: 0.5rem 1.5rem;
   background-color: #3b82f6;
   color: white;
   border: none;
@@ -7193,6 +7467,7 @@ onUnmounted(() => {
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s;
+  font-size: 0.9rem;
 }
 
 .modal-actions .btn-primary:hover:not(:disabled) {
@@ -7214,7 +7489,7 @@ onUnmounted(() => {
 
 .modal-actions .btn-secondary {
   flex: 1;
-  padding: 0.75rem;
+  padding: 0.5rem 1.5rem;
   background-color: transparent;
   color: #cbd5e1;
   border: 1px solid rgba(148, 163, 184, 0.3);
@@ -7222,6 +7497,7 @@ onUnmounted(() => {
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s;
+  font-size: 0.9rem;
 }
 
 .modal-actions .btn-secondary:hover {
@@ -7723,5 +7999,19 @@ onUnmounted(() => {
   cursor: not-allowed;
 }
 
+.btn-reabrir-semana {
+  padding: 0.45rem 0.75rem;
+  background: rgba(59, 130, 246, 0.15);
+  color: #93c5fd;
+  border: 1px solid rgba(59,130,246,0.3);
+  border-radius: 0.6rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  font-weight: 600;
+}
 
+.btn-reabrir-semana:hover:not(:disabled) {
+  background: rgba(59, 130, 246, 0.25);
+  border-color: rgba(59 ,130 ,246 ,0.5);
+}
 </style>

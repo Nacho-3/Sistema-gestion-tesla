@@ -515,13 +515,46 @@ const normalizarFechaISO = (valor) => {
     return texto
   }
 
-  const fecha = new Date(valor)
-  if (Number.isNaN(fecha.getTime())) return null
+  return null
+}
 
-  const y = fecha.getFullYear()
-  const m = String(fecha.getMonth() + 1).padStart(2, "0")
-  const d = String(fecha.getDate()).padStart(2, "0")
-  return `${y}-${m}-${d}`
+const normalizarFechaISO_conHora = (valor) => {
+  if (!valor) return null
+
+  const formatearLocal = (fecha) => {
+    const y = fecha.getFullYear()
+    const m = String(fecha.getMonth() + 1).padStart(2, "0")
+    const d = String(fecha.getDate()).padStart(2, "0")
+    const hh = String(fecha.getHours()).padStart(2, "0")
+    const mm = String(fecha.getMinutes()).padStart(2, "0")
+    const ss = String(fecha.getSeconds()).padStart(2, "0")
+    return `${y}-${m}-${d} ${hh}:${mm}:${ss}`
+  }
+
+  if (valor instanceof Date && !Number.isNaN(valor.getTime())) {
+    return formatearLocal(valor)
+  }
+
+  const texto = String(valor).trim()
+
+  // Si ya viene timestamp textual (YYYY-MM-DDTHH:mm[:ss] o con espacio),
+  // conservarlo sin convertir zona horaria.
+  const matchFechaHora = texto.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/) 
+  if (matchFechaHora) {
+    const [, fecha, hh, mm, ss] = matchFechaHora
+    return `${fecha} ${hh}:${mm}:${ss || "00"}`
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(texto)) {
+    return `${texto} 00:00:00`
+  }
+
+  const fecha = new Date(texto)
+  if (!Number.isNaN(fecha.getTime())) {
+    return formatearLocal(fecha)
+  }
+
+  return null
 }
 
 const normalizarCajaSemanalId = (valor) => {
@@ -924,12 +957,17 @@ async function reconciliarAsignacionesSemanales(cajaCodigo) {
     const semanaActualId = normalizarCajaSemanalId(movimiento.caja_semanal_id)
     const semanaActual = semanaActualId ? semanaPorId.get(semanaActualId) : null
 
+    // Si el movimiento ya está asignado a una semana válida de la misma caja,
+    // preservar esa asignación para evitar migraciones indeseadas entre semanas
+    // (especialmente cuando existen cierres/aperturas en el mismo día).
     const asignacionActualValida = Boolean(
       semanaActual
       && String(semanaActual.caja_codigo || "").toLowerCase() === caja
-      && fecha >= String(semanaActual.fecha_inicio || "")
-      && (!semanaActual.fecha_fin || fecha <= String(semanaActual.fecha_fin || ""))
     )
+
+    if (asignacionActualValida) {
+      continue
+    }
 
     const candidatas = semanasCaja.filter((semana) => {
       const inicio = String(semana.fecha_inicio || "")
@@ -937,7 +975,7 @@ async function reconciliarAsignacionesSemanales(cajaCodigo) {
       return (!inicio || fecha >= inicio) && (!fin || fecha <= fin)
     })
 
-    let semanaDestinoId = asignacionActualValida ? Number(semanaActualId) : null
+    let semanaDestinoId = null
 
     if (candidatas.length === 1) {
       semanaDestinoId = Number(candidatas[0].id)
@@ -2244,7 +2282,18 @@ router.post("/semanas/abrir", async (req, res) => {
     await ensureCajasSemanalesSchema()
 
     const cajaCodigoNormalizada = String(req.body?.caja_codigo || "").toLowerCase().trim()
-    const fechaInicio = normalizarFechaISO(req.body?.fecha_inicio || new Date())
+    const fechaInicioRaw = req.body?.fecha_inicio || new Date()
+    const fechaInicioSoloDia = normalizarFechaISO(fechaInicioRaw)
+    let fechaInicio = normalizarFechaISO_conHora(fechaInicioRaw)
+
+    // Si viene solo fecha (input type="date") y es hoy, usar hora actual para
+    // permitir cerrar y reabrir en el mismo día sin solape artificial.
+    if (fechaInicioSoloDia && !String(fechaInicioRaw).includes("T")) {
+      const hoy = normalizarFechaISO(new Date())
+      if (fechaInicioSoloDia === hoy) {
+        fechaInicio = new Date().toISOString()
+      }
+    }
 
     if (!CAJAS_DISPONIBLES.includes(cajaCodigoNormalizada)) {
       return res.status(400).json({ error: "Caja inválida" })
@@ -2254,41 +2303,42 @@ router.post("/semanas/abrir", async (req, res) => {
       return res.status(400).json({ error: "Debés informar una fecha de inicio válida" })
     }
 
-    const [anioInicio, mesInicio, diaInicio] = fechaInicio.split("-").map(Number)
-    const fechaInicioDate = new Date(anioInicio, mesInicio - 1, diaInicio)
-    const fechaDiaAnterior = new Date(fechaInicioDate)
-    fechaDiaAnterior.setDate(fechaInicioDate.getDate() - 1)
-    const fechaFinAnterior = normalizarFechaISO(fechaDiaAnterior)
-
     const abierta = await obtenerSemanaAbierta(cajaCodigoNormalizada)
     if (abierta) {
       return res.status(400).json({ error: "Ya existe una semana abierta para esta caja. Cerrala antes de abrir otra" })
     }
 
-    // Evita solapes en el día de borde: si existe una semana cerrada que termina
-    // el mismo día de apertura, se recorta al día anterior.
-    await pool.query(
+    const cierreMismoDiaQ = await pool.query(
       `
-        UPDATE cajas_semanales
-        SET fecha_fin = $3
+        SELECT fecha_fin
+        FROM cajas_semanales
         WHERE caja_codigo = $1
-          AND BTRIM(LOWER(COALESCE(estado, ''))) IN ('cerrada', 'cerrado')
-          AND fecha_fin = $2
-          AND fecha_inicio < $2
+          AND fecha_fin IS NOT NULL
+          AND DATE(fecha_fin) = DATE($2::timestamp)
+        ORDER BY fecha_fin DESC
+        LIMIT 1
       `,
-      [cajaCodigoNormalizada, fechaInicio, fechaFinAnterior]
+      [cajaCodigoNormalizada, fechaInicio]
     )
+
+    const ultimoCierreMismoDia = cierreMismoDiaQ.rows?.[0]?.fecha_fin
+    if (ultimoCierreMismoDia) {
+      const aperturaComparable = normalizarFechaISO_conHora(fechaInicio)
+      const cierreComparable = normalizarFechaISO_conHora(ultimoCierreMismoDia)
+      if (aperturaComparable && cierreComparable && aperturaComparable <= cierreComparable) {
+        return res.status(400).json({
+          error: "Si abrís una semana el mismo día, la hora de apertura debe ser estrictamente posterior al cierre de la semana anterior",
+        })
+      }
+    }
 
     const solapeQ = await pool.query(
       `
         SELECT id
         FROM cajas_semanales
         WHERE caja_codigo = $1
-          AND NOT (
-            BTRIM(LOWER(COALESCE(estado, ''))) IN ('cerrada', 'cerrado')
-            AND fecha_fin = $2
-          )
-          AND NOT (COALESCE(fecha_fin, $2) < $2 OR fecha_inicio > $2)
+          AND fecha_inicio <= $2
+          AND COALESCE(fecha_fin, 'infinity'::timestamp) >= $2
         LIMIT 1
       `,
       [cajaCodigoNormalizada, fechaInicio]
@@ -2567,7 +2617,7 @@ router.post("/semanas/:id/saldos", async (req, res) => {
 router.post("/semanas/:id/cerrar", async (req, res) => {
   try {
     const { id } = req.params
-    const { saldo_banco, saldo_pendiente_echeq, saldo_echeq_depositados, saldo_efectivo, saldo_cheques } = req.body
+    const { fecha_cierre, saldo_banco, saldo_pendiente_echeq, saldo_echeq_depositados, saldo_efectivo, saldo_cheques } = req.body
 
     const idNumerico = Number(id)
     if (!Number.isInteger(idNumerico) || idNumerico <= 0) {
@@ -2585,12 +2635,15 @@ router.post("/semanas/:id/cerrar", async (req, res) => {
       return res.status(404).json({ error: "Semana de caja no encontrada" })
     }
 
-    const fechaCierre = normalizarFechaISO(new Date())
+    const fechaCierre = normalizarFechaISO_conHora(
+      fecha_cierre || semana.fecha_fin || new Date()
+    )
+
     if (!fechaCierre) {
       return res.status(400).json({ error: "No se pudo determinar la fecha de cierre" })
     }
 
-    const fechaInicioSemana = normalizarFechaISO(semana.fecha_inicio)
+    const fechaInicioSemana = normalizarFechaISO_conHora(semana.fecha_inicio)
     if (fechaInicioSemana && fechaCierre < fechaInicioSemana) {
       return res.status(400).json({ error: "La fecha de cierre no puede ser anterior a la fecha de apertura" })
     }
@@ -2646,6 +2699,70 @@ router.post("/semanas/:id/cerrar", async (req, res) => {
       semanaCerrada: data,
       semanasCerradasAdicionalmente: (abiertasRestantesQ.rows || []).map((row) => Number(row.id)),
       movimientosDesasignados: (movimientosReasignablesQ.rows || []).map((row) => Number(row.id)),
+    })
+  } catch (err) {
+    res.status(400).json({ error: err.message })
+  }
+})
+
+router.post("/semanas/:id/reabrir", async (req, res) => {
+  try {
+    const { id } = req.params
+    const { codigo_admin } = req.body
+
+    const idNumerico = Number(id)
+    if (!Number.isInteger(idNumerico) || idNumerico <= 0) {
+      return res.status(400).json({ error: "ID de semana inválido" })
+    }
+
+    if (!codigo_admin) {
+      return res.status(400).json({ error: "Código de administrador requerido" })
+    }
+
+    const CODIGO_ADMIN_SECRETO = "ADMIN1234"
+
+    if (String(codigo_admin).trim() !== CODIGO_ADMIN_SECRETO) {
+      return res.status(403).json({ error: "Código de administrador incorrecto" })
+    }
+
+    const semana = await recalcularCajaSemanal(idNumerico)
+    if (!semana) {
+      return res.status(404).json({ error: "Semana de caja no encontrada" })
+    }
+
+    if (String(semana.estado || "").toLowerCase() !== "cerrada") {
+      return res.status(400).json({ error: "La semana no está cerrada" })
+    }
+
+    // Cerrar todas las demás semanas abiertas en la misma caja
+    const abiertasQ = await pool.query(
+      `
+        UPDATE cajas_semanales
+        SET estado = 'cerrada'
+        WHERE caja_codigo = $1
+          AND id <> $2
+          AND BTRIM(LOWER(COALESCE(estado, ''))) IN ('abierta', 'abierto')
+        RETURNING id
+      `,
+      [String(semana.caja_codigo || "").toLowerCase(), idNumerico]
+    )
+
+    // Reabrir la semana
+    const { data, error } = await db
+      .from("cajas_semanales")
+      .update({
+        estado: "abierta",
+      })
+      .eq("id", idNumerico)
+      .select()
+      .single()
+
+    if (error) throw error
+
+    getIo()?.emit('caja:changed')
+    res.json({
+      semanaReabierta: data,
+      semanasClosedForReopen: (abiertasQ.rows || []).map((row) => Number(row.id)),
     })
   } catch (err) {
     res.status(400).json({ error: err.message })
@@ -5114,41 +5231,95 @@ router.post("/importar-sueldos", async (req, res) => {
         continue
       }
 
-      // Crear nuevo
-      const { data: movimiento, error: errMov } = await db
-        .from("movimientos_caja")
-        .insert([{
-          fecha: fechaImportacion,
+      // Crear nuevo (atómico: movimiento + detalle + semana)
+      let semanaDestino
+      try {
+        semanaDestino = await resolverSemanaDestinoMovimiento({
           caja_codigo: "tesla",
-          tipo: "egreso",
-          [detalleColumn]: detalleValor,
-          observaciones: null,
-          monto_total: bucket.monto,
-          destinatario: "Pago de sueldos",
-          con_iva: false,
-        }])
-        .select()
-
-      if (errMov) return res.status(500).json({ error: errMov.message })
-
-      const movimientoId = movimiento[0].id
-
-      try {
-        await insertarDetalle(movimientoId)
-      } catch (errDet) {
-        await db.from("movimientos_caja").delete().eq("id", movimientoId)
-        return res.status(500).json({ error: "Error detalles: " + errDet.message })
-      }
-
-      try {
-        await asignarCajaSemanalAMovimiento({ movimientoId, fecha: fechaImportacion, caja_codigo: "tesla" })
+          permitirCerrada: false,
+      })
       } catch (errSemana) {
-        await db.from("detalles_medio_pago").delete().eq("movimiento_id", movimientoId)
-        await db.from("movimientos_caja").delete().eq("id", movimientoId)
-        return res.status(400).json({ error: `No se pudo asignar el movimiento a la semana actual de Caja Tesla: ${errSemana.message}` })
+        return res.status(400).json({
+          error: `No se pudo asignar el movimiento a la semana actual de Caja Tesla: ${errSemana.message}`
+        })
       }
 
-      resultados.push({ medio: bucket.medio, status: "creado", monto: bucket.monto })
+      const client = await pool.connect()
+      let movimientoId = null
+      try{
+        await client.query("BEGIN")
+
+        const insertMovRes = await client.query(
+          `
+            INSERT INTO movimientos_caja (
+              fecha,
+              caja_codigo,
+              caja_semanal_id,
+              tipo,
+              ${detalleColumn},
+              observaciones,
+              monto_total,
+              categoria,
+              destinatario,
+              con_iva
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            RETURNING id
+          `,
+          [
+            fechaImportacion,
+            "tesla",
+            semanaDestino.id,
+            "egreso",
+            detalleValor,
+            null,
+            bucket.monto,
+            null,
+            "Pago de sueldos",
+            false
+          ]
+        )
+
+        movimientoId = Number(insertMovRes.rows?.[0]?.id || 0)
+
+        if (!movimientoId) {
+          throw new Error("No se pudo obtener el id del movimiento insertado")
+        }
+
+        if (detallesSchema.mode === "filas") {
+          await client.query(
+            `INSERT INTO detalles_medio_pago (movimiento_id, medio_pago, monto) VALUES ($1,$2,$3)`,
+            [movimientoId, bucket.medio, bucket.monto]
+          )
+        } else {
+          const efectivo = bucket.medio === "efectivo" ? bucket.monto : 0
+          const transferencia = bucket.medio === "transferencia" ? bucket.monto : 0
+          const cheque = bucket.medio === "cheque" ? bucket.monto : 0
+          const echeq = bucket.medio === "echeq" ? bucket.monto : 0
+          const retencion = bucket.medio === "retencion" ? bucket.monto : 0
+
+          await client.query(
+            `INSERT INTO detalles_medio_pago (movimiento_id, efectivo, transferencia, cheque, echeq, retencion) VALUES ($1,$2,$3,$4,$5,$6)`,
+            [movimientoId, efectivo, transferencia, cheque, echeq, retencion]
+          )
+        }
+
+        await client.query("COMMIT")
+      } catch (errTX) {
+        try { await client.query("ROLLBACK") } catch (_) {}
+        return res.status(500).json({ error: `Error al crear el movimiento de forma atómica: ${errTX.message}` })
+      } finally {
+        client.release()
+      }
+
+      try {
+        await recalcularCajaSemanal(semanaDestino.id)
+      } catch (_) {
+        // No rompe consistencia financiera; solo puede quedar desactualizado el agregado semanal
+      }
+
+      resultados.push({ medio: bucket.medio, status: "creado", monto: bucket.monto})
+  
     }
 
     getIo()?.emit("caja:changed")

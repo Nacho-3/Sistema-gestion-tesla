@@ -1,31 +1,49 @@
 import express from "express"
 import db from "../db.js"
 import { getPeriodo, syncLiquidacionesPeriodo } from "./liquidaciones.js"
+import { requireAuth } from "../middleware/auth.js"
 
 const router = express.Router()
 
-const withTimeout = async (promise, ms = 1000) => {
-  return Promise.race([
-    promise,
-    new Promise((resolve) => setTimeout(() => resolve(null), ms)),
-  ])
-}
-
 const CAJAS_DISPONIBLES = ["tesla", "teslita", "juani"]
+
+const withTimeoutReject = async (promise, ms, message) => {
+  let timeoutId = null
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(message)), ms)
+      }),
+    ])
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId)
+  }
+}
 
 const toNumber = (value) => {
   const numberValue = Number(value)
   return Number.isFinite(numberValue) ? numberValue : 0
 }
 
-router.get("/resumen", async (req, res) => {
+router.get("/resumen", requireAuth, async (req, res) => {
   try {
     const now = new Date()
     const mes = Number(req.query.mes || now.getMonth() + 1)
     const anio = Number(req.query.anio || now.getFullYear())
     const { inicioISO, finISO } = getPeriodo(mes, anio)
 
-    await withTimeout(syncLiquidacionesPeriodo(mes, anio), 1000)
+    let syncWarning = null
+    try {
+      await withTimeoutReject(
+        syncLiquidacionesPeriodo(mes, anio),
+        5000,
+        "SYNC_TIMEOUT_DASHBOARD"
+      )
+    } catch (syncErr) {
+      console.error("[Dashboard] syncLiquidacionesPeriodo fallo: ", syncErr)
+      syncWarning = "No se pudo sincronizar liquidaciones del período en este intento"
+    }
 
     const finExclusive = new Date(finISO)
     finExclusive.setDate(finExclusive.getDate() + 1)
@@ -114,9 +132,12 @@ router.get("/resumen", async (req, res) => {
     }, {})
 
     cajaMovimientos.forEach((mov) => {
-      const codigo = CAJAS_DISPONIBLES.includes(String(mov.caja_codigo || "").toLowerCase())
-        ? String(mov.caja_codigo || "").toLowerCase()
-        : "tesla, teslita, juani"
+      const codigo = String(mov.caja_codigo || "").toLowerCase()
+
+      if (!CAJAS_DISPONIBLES.includes(codigo)) {
+        return
+      }
+
       if (mov.tipo === "ingreso") {
         cajasMes[codigo].ingresos += toNumber(mov.monto_total)
       } else if (mov.tipo === "egreso") {
@@ -146,6 +167,7 @@ router.get("/resumen", async (req, res) => {
       egresos_mes: Math.round(egresosMes * 100) / 100,
       cajas_mes: cajasMes,
       ultimos_movimientos: cajaMovimientos.slice(0, 5),
+      sync_warning: syncWarning,
       presupuestos_pendientes: (presupuestosRes.rows || []).map((item) => ({
         ...item,
         total: toNumber(item.total),

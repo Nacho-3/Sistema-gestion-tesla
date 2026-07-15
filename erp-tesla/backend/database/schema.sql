@@ -5,6 +5,18 @@ ALTER TABLE IF EXISTS cajas_semanales ADD COLUMN IF NOT EXISTS saldo_echeq_depos
 ALTER TABLE IF EXISTS cajas_semanales ADD COLUMN IF NOT EXISTS saldo_efectivo NUMERIC(12,2);
 ALTER TABLE IF EXISTS cajas_semanales ADD COLUMN IF NOT EXISTS saldo_cheques NUMERIC(12,2);
 
+-- MIGRACIÓN SEGURA: Cambiar fecha_inicio y fecha_fin a TIMESTAMP para precisión horaria
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cajas_semanales' AND column_name = 'fecha_inicio' AND data_type = 'date') THEN
+    ALTER TABLE cajas_semanales ALTER COLUMN fecha_inicio TYPE TIMESTAMP USING fecha_inicio::timestamp;
+  END IF;
+  
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'cajas_semanales' AND column_name = 'fecha_fin' AND data_type = 'date') THEN
+    ALTER TABLE cajas_semanales ALTER COLUMN fecha_fin TYPE TIMESTAMP USING fecha_fin::timestamp;
+  END IF;
+END $$;
+
 -- MIGRACIÓN SEGURA: detalle en pagos_sueldo y reajuste_porcentaje en liquidaciones
 ALTER TABLE IF EXISTS pagos_sueldo ADD COLUMN IF NOT EXISTS detalle TEXT DEFAULT '';
 ALTER TABLE IF EXISTS liquidaciones ADD COLUMN IF NOT EXISTS reajuste_porcentaje NUMERIC(6,2) DEFAULT 0;
@@ -467,8 +479,8 @@ CREATE TABLE IF NOT EXISTS categorias_caja (
 CREATE TABLE IF NOT EXISTS cajas_semanales (
   id SERIAL PRIMARY KEY,
   caja_codigo VARCHAR(20) NOT NULL DEFAULT 'tesla' CONSTRAINT chk_cajas_semanales_codigo CHECK (caja_codigo IN ('tesla', 'teslita', 'juani')),
-  fecha_inicio DATE NOT NULL,
-  fecha_fin DATE,
+  fecha_inicio TIMESTAMP NOT NULL,
+  fecha_fin TIMESTAMP,
   saldo_inicial NUMERIC(12,2) NOT NULL DEFAULT 0,
   total_ingresos NUMERIC(12,2) NOT NULL DEFAULT 0,
   total_egresos NUMERIC(12,2) NOT NULL DEFAULT 0,

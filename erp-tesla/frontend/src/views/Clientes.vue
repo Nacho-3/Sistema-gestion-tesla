@@ -14,6 +14,8 @@ const formEdicionMovimiento=ref({
   monto_total: 0,
 })
 const asignacionesEnEdicion=ref([])
+const recibosCliente = ref([])
+const loadingRecibosCliente = ref(false)
 
 // Estado para notas de credito
 const notasCreditoCliente = ref([])
@@ -545,6 +547,19 @@ const cargarMovimientosCajaCliente = async (clienteId) => {
   }
 }
 
+const cargarRecibosCliente = async (clienteId) => {
+  loadingRecibosCliente.value = true
+  try {
+    const res = await api.getRecibosCaja(clienteId, "emitido", 300)
+    recibosCliente.value = Array.isArray(res.data?.recibos) ? res.data.recibos : []
+  } catch (err) {
+    console.error("Error al cargar recibos del cliente:", err)
+    recibosCliente.value = []
+  } finally {
+    loadingRecibosCliente.value = false
+  }
+}
+
 const cargarNotasCreditoCliente = async (clienteId) => {
   loadingNotasCredito.value = true
   try {
@@ -570,6 +585,7 @@ const verFicha = async (cliente) => {
       cargarPresupuestosCliente(cliente.id),
       cargarMovimientosCajaCliente(cliente.id),
       cargarNotasCreditoCliente(cliente.id),
+      cargarRecibosCliente(cliente.id),
     ])
 
     if (obrasRes.status === "fulfilled") {
@@ -596,6 +612,7 @@ const volverALista = () => {
   presupuestosAceptados.value = []
   presupuestosInicializados.value = false
   notasCreditoCliente.value = []
+  recibosCliente.value = []
 }
 
 const handlePresupuestosChanged = () => {
@@ -608,8 +625,11 @@ const handlePresupuestosChanged = () => {
 
 const handleCajaChanged = () => {
   if (vistaActual.value === "ficha" && clienteSeleccionado.value?.id) {
-    cargarMovimientosCajaCliente(clienteSeleccionado.value.id).catch((err) => {
-      console.error("Error al actualizar movimientos del cliente:", err)
+    Promise.all([
+      cargarMovimientosCajaCliente(clienteSeleccionado.value.id),
+      cargarRecibosCliente(clienteSeleccionado.value.id),
+    ]).catch((err) => {
+      console.error("Error al actualizar movimientos/recibos del cliente:", err)
     })
   }
 }
@@ -1433,6 +1453,41 @@ onBeforeUnmount(() => {
           <p class="sin-datos">Funcionalidad disponible cuando se implemente el módulo de Facturas</p>
         </div>
 
+        <!-- Recibos emitidos -->
+        <div class="ficha-seccion">
+          <h3>🧾 Recibos emitidos</h3>
+
+          <div v-if="loadingRecibosCliente && recibosCliente.length === 0">
+            <span class="spinner">Cargando recibos...</span>
+          </div>
+
+          <div v-else-if="recibosCliente.length === 0">
+            <p class="sin-datos">No hay recibos emitidos para este cliente.</p>
+          </div>
+
+          <div v-else class="tabla-shell">
+            <table class="tabla">
+              <thead>
+                <tr>
+                  <th>Número</th>
+                  <th>Fecha emisión</th>
+                  <th>Pagador</th>
+                  <th>Concepto</th>
+                  <th>Monto</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="rec in recibosCliente" :key="rec.id">
+                  <td>#{{ String(rec.numero || 0).padStart(6, "0") }}</td>
+                  <td>{{ formatDateAr(rec.fecha_emision) }}</td>
+                  <td>{{ rec.pagador_nombre || "-" }}</td>
+                  <td>{{ rec.concepto_publico || "-" }}</td>
+                  <td>{{ formatMoney(rec.monto_total) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
 
         <!-- Historial de movimientos -->
         
