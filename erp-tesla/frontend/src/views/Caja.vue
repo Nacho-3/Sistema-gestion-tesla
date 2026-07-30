@@ -1684,34 +1684,37 @@ const descargarLibroChequesPdf = async () => {
   }
 }
 
-const crearFormularioVacio = () => ({
-  fecha: formatFechaISO(new Date()),
-  caja_codigo: filtroCaja.value || "tesla",
-  tipo: "ingreso",
-  categoria: "",
-  categoria_id: "",
-  con_iva: true,
-  destinatario: "",
-  cliente_id: "",
-  presupuesto_id: "",
-  presupuesto_ids: [],
-  presupuestos_asignaciones: [],
-  detalle: "",
-  observaciones: "",
-  monto_total: 0,
-  desglose: {
-    efectivo: 0,
-    transferencia: 0,
-    banco: 0,
-    retencion: 0
-  },
-  cheques: [],
-  usar_cheques_libro: false,
-  usar_echeqs_libro: false,
-  cheques_salida: [],
-  fecha_salida_cheques: formatFechaISO(new Date()),
-  endosado_a_cheques: ""
-})
+const crearFormularioVacio = () => {
+  const fechaBase = formatFechaISO(new Date())
+  return {
+    fecha: fechaBase,
+    caja_codigo: filtroCaja.value || "tesla",
+    tipo: "ingreso",
+    categoria: "",
+    categoria_id: "",
+    con_iva: true,
+    destinatario: "",
+    cliente_id: "",
+    presupuesto_id: "",
+    presupuesto_ids: [],
+    presupuestos_asignaciones: [],
+    detalle: "",
+    observaciones: "",
+    monto_total: 0,
+    desglose: {
+      efectivo: 0,
+      transferencia: 0,
+      banco: 0,
+      retencion: 0
+    },
+    cheques: [],
+    usar_cheques_libro: false,
+    usar_echeqs_libro: false,
+    cheques_salida: [],
+    fecha_salida_cheques: fechaBase,
+    endosado_a_cheques: ""
+  }
+}
 
 const normalizarAsignacionesPresupuestos = (asignaciones = [], { excluirCeros = false } = {}) => {
   return (Array.isArray(asignaciones) ? asignaciones : [])
@@ -2640,6 +2643,19 @@ watch(() => semanaActiva.value?.id, () => {
 
 watch(() => form.value.fecha, () => {
   if (!(showForm.value && form.value.tipo === "egreso" && usaLibroCualquiera.value)) return
+
+  const fechaMovimientoActual = String(form.value.fecha || "").split("T")[0]
+  const fechaSalidaActual = String(form.value.fecha_salida_cheques || "").split("T")[0]
+
+  // Si la fecha de salida no fue ajustada manualmente, la mantenemos alineada
+  // con la fecha del movimiento para evitar salidas corridas a la fecha de hoy.
+  if (fechaMovimientoActual && (!fechaSalidaActual || fechaSalidaActual !== fechaMovimientoActual)) {
+    const fechaSalidaCoincideConHoy = fechaSalidaActual === formatFechaISO(new Date())
+    if (!fechaSalidaActual || fechaSalidaCoincideConHoy) {
+      form.value.fecha_salida_cheques = fechaMovimientoActual
+    }
+  }
+
   cargarChequesDisponibles()
 })
 
@@ -2659,6 +2675,16 @@ watch(() => form.value.tipo, (tipo) => {
     form.value.presupuesto_id = ""
     form.value.presupuesto_ids = []
     form.value.presupuestos_asignaciones = []
+
+    if (!editandoMovimientoId.value) {
+      const fechaMovimiento = String(form.value.fecha || "").split("T")[0]
+      const fechaSalida = String(form.value.fecha_salida_cheques || "").split("T")[0]
+      const hoy = formatFechaISO(new Date())
+      if (fechaMovimiento && (!fechaSalida || fechaSalida === hoy)) {
+        form.value.fecha_salida_cheques = fechaMovimiento
+      }
+    }
+
     return
   }
 
@@ -2686,6 +2712,13 @@ watch(() => filtroTipo.value, (tipo) => {
 watch(() => form.value.usar_cheques_libro, (usar) => {
   if (form.value.tipo !== "egreso") return
   if (usar) {
+    const fechaMovimiento = String(form.value.fecha || "").split("T")[0]
+    const fechaSalida = String(form.value.fecha_salida_cheques || "").split("T")[0]
+    const hoy = formatFechaISO(new Date())
+    if (fechaMovimiento && (!fechaSalida || fechaSalida === hoy)) {
+      form.value.fecha_salida_cheques = fechaMovimiento
+    }
+
     cargarChequesDisponibles()
     form.value.cheques = (form.value.cheques || []).filter((item) => {
       const id = Number(item?.libro_cheque_id || 0)
@@ -2702,6 +2735,13 @@ watch(() => form.value.usar_cheques_libro, (usar) => {
 watch(() => form.value.usar_echeqs_libro, (usar) => {
   if (form.value.tipo !== "egreso") return
   if (usar) {
+    const fechaMovimiento = String(form.value.fecha || "").split("T")[0]
+    const fechaSalida = String(form.value.fecha_salida_cheques || "").split("T")[0]
+    const hoy = formatFechaISO(new Date())
+    if (fechaMovimiento && (!fechaSalida || fechaSalida === hoy)) {
+      form.value.fecha_salida_cheques = fechaMovimiento
+    }
+
     cargarChequesDisponibles()
     form.value.cheques = (form.value.cheques || []).filter((item) => {
       const id = Number(item?.libro_cheque_id || 0)

@@ -341,7 +341,16 @@ async function crearChequesLibroDesdeIngreso({ client, movimientoId, cajaCodigo,
   }
 }
 
-async function registrarSalidaCheques({ client, movimientoId, cajaCodigo, fechaSalida, endosadoA, chequesSalida = [], expectedChequeTotal = null }) {
+async function registrarSalidaCheques({
+  client,
+  movimientoId,
+  cajaCodigo,
+  fechaSalida,
+  fechaMovimiento = null,
+  endosadoA,
+  chequesSalida = [],
+  expectedChequeTotal = null,
+}) {
   if (!Array.isArray(chequesSalida) || !chequesSalida.length) return []
 
   const ids = chequesSalida
@@ -355,8 +364,15 @@ async function registrarSalidaCheques({ client, movimientoId, cajaCodigo, fechaS
     throw new Error("Hay cheques repetidos en la selección de salida")
   }
 
-  const fechaSalidaNorm = normalizeChequeDate(fechaSalida)
+  const fechaMovimientoNorm = normalizeChequeDate(fechaMovimiento)
+  let fechaSalidaNorm = normalizeChequeDate(fechaSalida, fechaMovimientoNorm)
   if (!fechaSalidaNorm) throw new Error("La fecha de salida de cheque es obligatoria")
+
+  // Nunca permitir una salida de cheque anterior a la fecha del movimiento de egreso.
+  // Si llega una fecha anterior por desfasaje/normalización del front, se corrige al vuelo.
+  if (fechaMovimientoNorm && fechaSalidaNorm < fechaMovimientoNorm) {
+    fechaSalidaNorm = fechaMovimientoNorm
+  }
 
   const endosadoTexto = sanitizeChequeText(endosadoA)
   if (!endosadoTexto) throw new Error("Debe indicar a quien se endosa el cheque")
@@ -365,7 +381,7 @@ async function registrarSalidaCheques({ client, movimientoId, cajaCodigo, fechaS
   const placeholdersUpdate = idsUnicos.map((_, i) => `$${i + 4}`).join(",")
   const consulta = await client.query(
     `
-      SELECT id, caja_codigo, estado, importe
+      SELECT id, caja_codigo, estado, importe, movimiento_salida_id
       FROM libro_cheques_caja
       WHERE id IN (${placeholders})
       FOR UPDATE
@@ -377,7 +393,17 @@ async function registrarSalidaCheques({ client, movimientoId, cajaCodigo, fechaS
     throw new Error("Uno o mas cheques seleccionados no existen en el libro")
   }
 
-  const invalidos = consulta.rows.filter((row) => row.estado !== "disponible" || row.caja_codigo !== cajaCodigo)
+  const movimientoSalidaIdActual = Number(movimientoId || 0)
+  const invalidos = consulta.rows.filter((row) => {
+    if (row.caja_codigo !== cajaCodigo) return true
+
+    if (row.estado === "disponible") return false
+
+    // Permitir re-editar un egreso manteniendo cheques que ya estaban
+    // asociados a este mismo movimiento.
+    const movimientoSalidaIdCheque = Number(row.movimiento_salida_id || 0)
+    return !(row.estado === "salido" && movimientoSalidaIdCheque === movimientoSalidaIdActual)
+  })
   if (invalidos.length) {
     throw new Error("Hay cheques seleccionados que no estan disponibles para salida")
   }
@@ -3850,6 +3876,7 @@ router.post("/", async (req, res) => {
             movimientoId,
             cajaCodigo: cajaCodigoNormalizada,
             fechaSalida: fecha_salida_cheques || fecha,
+            fechaMovimiento: fecha,
             endosadoA: endosado_a_cheques || destinatarioNormalizado,
             chequesSalida: chequesSalidaLista,
             expectedChequeTotal: totalChequesDetalle,
@@ -4365,6 +4392,7 @@ router.put("/:id", async (req, res) => {
               movimientoId: id,
               cajaCodigo: cajaFinalMovimiento,
               fechaSalida: fecha_salida_cheques || fechaFinalMovimiento,
+              fechaMovimiento: fechaFinalMovimiento,
               endosadoA: endosado_a_cheques || destinatarioNormalizado || movimientoActual.destinatario,
               chequesSalida: chequesSalidaLista,
               expectedChequeTotal: totalChequesDetalle,
