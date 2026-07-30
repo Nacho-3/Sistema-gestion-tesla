@@ -843,12 +843,12 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
       doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(7.2)
 
       const cols = [
-        { key: "fecha", label: "FECHA", x: 45, width: 74 },
-        { key: "tipo", label: "TIPO", x: 119, width: 84 },
-        { key: "referencia", label: "REFERENCIA", x: 203, width: 206 },
-        { key: "debe", label: "DEBE", x: 409, width: 50 },
-        { key: "haber", label: "HABER", x: 459, width: 50 },
-        { key: "saldo", label: "SALDO", x: 509, width: 41 },
+        { key: "fecha", label: "FECHA", x: 45, width: 62 },
+        { key: "tipo", label: "TIPO", x: 107, width: 70 },
+        { key: "referencia", label: "REFERENCIA", x: 177, width: 206 },
+        { key: "debe", label: "DEBE", x: 383, width: 58 },
+        { key: "haber", label: "HABER", x: 441, width: 58 },
+        { key: "saldo", label: "SALDO", x: 499, width: 51 },
       ]
 
       for (const col of cols) {
