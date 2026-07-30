@@ -132,6 +132,22 @@ const formatMoney = (value) => new Intl.NumberFormat("es-AR", {
   maximumFractionDigits: 2,
 }).format(Number(value) || 0)
 
+const normalizeMoneda = (value = "ARS") => {
+  const moneda = String(value || "").toUpperCase().trim()
+  return moneda === "USD" ? "USD" : "ARS"
+}
+
+const formatMoneyByMoneda = (value, moneda = "ARS") => {
+  const amount = Number(value) || 0
+  const monedaNormalizada = normalizeMoneda(moneda)
+  return new Intl.NumberFormat("es-AR", {
+    style: "currency",
+    currency: monedaNormalizada,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(amount)
+}
+
 const roundMoney = (value) => Math.round(((Number(value) || 0) + Number.EPSILON) * 100) / 100
 
 const formatDateAr = (value) => {
@@ -273,6 +289,7 @@ const estadoCuentaPresupuestos = computed(() => {
     const totalIva = Number(p.total_iva ?? p.iva_monto ?? 0) || 0
     const totalSinIva = Number(p.total_sin_iva ?? (totalOriginal - totalIva)) || 0
     const deudaComputable = Boolean(p.deuda_computable ?? esEstadoAceptado(p.estado))
+    const moneda = normalizeMoneda(p.moneda)
 
     const descuentoNotas = Number(notasCreditoPorPresupuesto.value.get(Number(p.id)) || 0)
     const totalExigible = deudaComputable ? Math.max(0, totalOriginal - descuentoNotas) : 0
@@ -294,6 +311,7 @@ const estadoCuentaPresupuestos = computed(() => {
       total_descuento_nc: descuentoNotas,
       total_sin_iva: totalSinIva,
       total_iva: totalIva,
+      moneda,
       total: totalExigible,
       pagado,
       saldo_pendiente: saldoPendiente,
@@ -356,9 +374,11 @@ const movimientosCuentaCorriente = computed (() => {
 
   for (const p of estadoCuentaPresupuestos.value) {
     const total = roundMoney(p.total_original ?? p.total)
+    const moneda = normalizeMoneda(p.moneda)
 
     rows.push({
       tipo: "presupuesto",
+      moneda,
       fechaRaw: p.fecha,
       fechaCreacionRaw: p.created_at || p.fecha,
       ordenDia: Number(p.id) || 0,
@@ -462,10 +482,27 @@ const movimientosCuentaCorriente = computed (() => {
   let saldo = 0
 
   return rows.map((row) => {
-    saldo = roundMoney(saldo + row.impacto)
+    const impactoFila = roundMoney(row.impacto)
+    saldo = roundMoney(saldo + impactoFila)
+    const saldoFila = saldo
+    const monedaFila = normalizeMoneda(row.moneda)
     return {
       ...row,
-      saldo,
+      saldo: saldoFila,
+      tipoLabel: row.tipo === "presupuesto" && monedaFila === "USD" ? "Presupuesto USD" : (
+        row.tipo === "saldo_inicial"
+          ? "Saldo inicial"
+          : row.tipo === "presupuesto"
+            ? "Presupuesto"
+            : row.tipo === "egreso"
+              ? "Egreso"
+              : row.tipo === "nota_credito"
+                ? "Nota de crédito"
+                : "Pago"
+      ),
+      debeLabel: row.debe > 0 ? formatMoneyByMoneda(row.debe, row.tipo === "presupuesto" ? monedaFila : "ARS") : "-",
+      haberLabel: row.haber > 0 ? formatMoneyByMoneda(row.haber, row.tipo === "presupuesto" ? monedaFila : "ARS") : "-",
+      saldoLabel: formatMoney(saldoFila),
     }
   })
 })
@@ -1352,6 +1389,7 @@ onBeforeUnmount(() => {
                   <th>Presupuesto</th>
                   <th>Fecha</th>
                   <th>Obra</th>
+                  <th>Moneda</th>
                   <th>Sin IVA</th>
                   <th>IVA</th>
                   <th>Total</th>
@@ -1365,13 +1403,14 @@ onBeforeUnmount(() => {
                   <td>#{{ p.numero }}</td>
                   <td>{{ new Date(p.fecha).toLocaleDateString('es-AR') }}</td>
                   <td>{{ p.obra || 'Sin obra' }}</td>
-                  <td>{{ formatMoney(p.total_sin_iva) }}</td>
-                  <td>{{ formatMoney(p.total_iva) }}</td>
-                  <td>{{ formatMoney(p.total) }}</td>
-                  <td>{{ formatMoney(p.pagado) }}</td>
+                  <td>{{ p.moneda || 'ARS' }}</td>
+                  <td>{{ formatMoneyByMoneda(p.total_sin_iva, p.moneda) }}</td>
+                  <td>{{ formatMoneyByMoneda(p.total_iva, p.moneda) }}</td>
+                  <td>{{ formatMoneyByMoneda(p.total, p.moneda) }}</td>
+                  <td>{{ formatMoneyByMoneda(p.pagado, p.moneda) }}</td>
                   <td>
-                    <div>{{ formatMoney(p.saldo_pendiente) }}</div>
-                    <small v-if="Number(p.saldo_a_favor || 0) > 0">A favor: {{ formatMoney(p.saldo_a_favor) }}</small>
+                    <div>{{ formatMoneyByMoneda(p.saldo_pendiente, p.moneda) }}</div>
+                    <small v-if="Number(p.saldo_a_favor || 0) > 0">A favor: {{ formatMoneyByMoneda(p.saldo_a_favor, p.moneda) }}</small>
                   </td>
                   <td><span :class="claseEstadoCobro(p.estado_cobro)">{{ labelEstadoCobro(p.estado_cobro) }}</span></td>
                 </tr>
@@ -1419,22 +1458,14 @@ onBeforeUnmount(() => {
                       "
                     >
                       {{
-                        mov.tipo === 'saldo_inicial'
-                          ? 'Saldo inicial'
-                          : mov.tipo === 'presupuesto'
-                            ? 'Presupuesto'
-                            : mov.tipo === 'egreso'
-                              ? 'Egreso'
-                              : mov.tipo === 'nota_credito'
-                                ? 'Nota de crédito'
-                                : 'Pago'
+                        mov.tipoLabel
                       }}
                     </span>
                   </td>
                   <td>{{ mov.referencia }}</td>
-                  <td>{{ mov.debe > 0 ? formatMoney(mov.debe) : '-' }}</td>
-                  <td>{{ mov.haber > 0 ? formatMoney(mov.haber) : '-' }}</td>
-                  <td><strong>{{ formatMoney(mov.saldo) }}</strong></td>
+                  <td>{{ mov.debeLabel }}</td>
+                  <td>{{ mov.haberLabel }}</td>
+                  <td><strong>{{ mov.saldoLabel }}</strong></td>
                 </tr>
               </tbody>
             </table>

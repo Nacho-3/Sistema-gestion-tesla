@@ -32,6 +32,14 @@ const normalizeEstado = (estado = "") => {
 const roundMoney = (value) => Math.round(((Number(value) || 0) + Number.EPSILON) * 100) / 100
 const formatMoneyAr = (value) =>
   roundMoney(value).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const normalizeMonedaPresupuesto = (value = "ARS") => {
+  const moneda = String(value || "").trim().toUpperCase()
+  return moneda === "USD" ? "USD" : "ARS"
+}
+const formatMoneyByMoneda = (value, moneda = "ARS") => {
+  const formatted = formatMoneyAr(value)
+  return normalizeMonedaPresupuesto(moneda) === "USD" ? `USD ${formatted}` : `$ ${formatted}`
+}
 const formatSignedMoneyAr = (value) => {
   const amount = roundMoney(value)
   const formatted = formatMoneyAr(Math.abs(amount))
@@ -267,11 +275,15 @@ router.get("/:id/ficha-pdf", async (req, res) => {
     if (obrasError) throw obrasError
 
     const presupuestosTieneIvaMonto = await hasTableColumn("presupuestos", "iva_monto")
+    const presupuestosTieneMoneda = await hasTableColumn("presupuestos", "moneda")
     const movimientosTienePresupuestoId = await hasTableColumn("movimientos_caja", "presupuesto_id")
 
     const selectPresupuestos = ["id", "numero", "fecha", "estado", "total", "obra_id"]
     if (presupuestosTieneIvaMonto) {
       selectPresupuestos.push("iva_monto")
+    }
+    if (presupuestosTieneMoneda) {
+      selectPresupuestos.push("moneda")
     }
 
     const { data: presupuestos, error: presupuestosError } = await db
@@ -321,6 +333,7 @@ router.get("/:id/ficha-pdf", async (req, res) => {
       const total = roundMoney(p.total)
       const iva = roundMoney(p.iva_monto)
       const sinIva = roundMoney(total - iva)
+      const moneda = normalizeMonedaPresupuesto(p.moneda)
       const pagado = roundMoney(pagosImputadosPorPresupuesto.get(Number(p.id)) || 0)
       const saldoPendiente = roundMoney(Math.max(0, total - pagado))
       const saldoAFavor = roundMoney(Math.max(0, pagado - total))
@@ -330,6 +343,7 @@ router.get("/:id/ficha-pdf", async (req, res) => {
         numero: p.numero,
         fecha: p.fecha,
         obra: obraNombrePorId.get(Number(p.obra_id)) || "Sin obra",
+        moneda,
         sin_iva: sinIva,
         iva,
         total,
@@ -484,23 +498,25 @@ router.get("/:id/ficha-pdf", async (req, res) => {
       columns: [
         { key: "numero", label: "NRO", x: 55, width: 30 },
         { key: "fecha", label: "FECHA", x: 87, width: 52 },
-        { key: "obra", label: "OBRA", x: 141, width: 88 },
-        { key: "sin_iva", label: "S/IVA", x: 233, width: 54, align: "right" },
-        { key: "iva", label: "IVA", x: 289, width: 42, align: "right" },
-        { key: "total", label: "TOTAL", x: 335, width: 54, align: "right" },
-        { key: "pagado", label: "PAGADO", x: 391, width: 54, align: "right" },
-        { key: "saldo", label: "SALDO", x: 447, width: 54, align: "right" },
+        { key: "obra", label: "OBRA", x: 141, width: 74 },
+        { key: "moneda", label: "MON", x: 217, width: 24 },
+        { key: "sin_iva", label: "S/IVA", x: 243, width: 52, align: "right" },
+        { key: "iva", label: "IVA", x: 297, width: 40, align: "right" },
+        { key: "total", label: "TOTAL", x: 339, width: 54, align: "right" },
+        { key: "pagado", label: "PAGADO", x: 395, width: 54, align: "right" },
+        { key: "saldo", label: "SALDO", x: 451, width: 54, align: "right" },
         { key: "estado", label: "ESTADO", x: 503, width: 43 },
       ],
       rows: estadoCuenta.map((p) => ({
         numero: `#${p.numero || "-"}`,
         fecha: p.fecha ? new Date(p.fecha).toLocaleDateString("es-AR") : "-",
         obra: p.obra,
-        sin_iva: formatMoneyAr(p.sin_iva),
-        iva: formatMoneyAr(p.iva),
-        total: formatMoneyAr(p.total),
-        pagado: formatMoneyAr(p.pagado),
-        saldo: formatMoneyAr(p.saldo_pendiente),
+        moneda: p.moneda,
+        sin_iva: formatMoneyByMoneda(p.sin_iva, p.moneda),
+        iva: formatMoneyByMoneda(p.iva, p.moneda),
+        total: formatMoneyByMoneda(p.total, p.moneda),
+        pagado: formatMoneyByMoneda(p.pagado, p.moneda),
+        saldo: formatMoneyByMoneda(p.saldo_pendiente, p.moneda),
         estado: p.estado_cobro,
       })),
       emptyText: "No hay presupuestos aceptados para estado de cuenta.",
@@ -576,9 +592,13 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
     const movimientosTienePresupuestoId = await hasTableColumn("movimientos_caja", "presupuesto_id")
 
     const presupuestosTieneIvaMonto = await hasTableColumn("presupuestos", "iva_monto")
+    const presupuestosTieneMoneda = await hasTableColumn("presupuestos", "moneda")
     const selectPresupuestos = ["id", "numero", "fecha", "created_at", "estado", "total", "obra_id"]
     if (presupuestosTieneIvaMonto) {
       selectPresupuestos.push("iva_monto")
+    }
+    if (presupuestosTieneMoneda) {
+      selectPresupuestos.push("moneda")
     }
 
     const { data: presupuestos, error: presupuestosError } = await db
@@ -715,6 +735,7 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
     for (const p of presupuestosAceptadosList) {
       const total = roundMoney(p.total)
       const obra = obraNombrePorId.get(Number(p.obra_id)) || "Sin obra"
+      const moneda = normalizeMonedaPresupuesto(p.moneda)
       ledgerRows.push({
         kind: "presupuesto",
         sortDate: p.fecha || "0000-00-00",
@@ -722,9 +743,9 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
         sortOrder: Number(p.id) || 0,
         sortId: Number(p.id) || 0,
         fecha: p.fecha ? new Date(p.fecha).toLocaleDateString("es-AR") : "-",
-        tipo: "Presupuesto",
+        tipo: moneda === "USD" ? "Presupuesto USD" : "Presupuesto",
         referencia: `Presupuesto #${String(p.numero || "-")} - ${obra}`,
-        debe: formatMoneyAr(total),
+        debe: formatMoneyByMoneda(total, moneda),
         haber: "-",
         signedAmount: total,
       })
