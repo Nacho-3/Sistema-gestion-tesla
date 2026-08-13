@@ -193,13 +193,19 @@ const loadDatos = async () => {
 
 const getEmpleadoById = (empleadoId) => empleados.value.find((e) => String(e.id) === String(empleadoId))
 const getEtiquetaTipoHora = (hora) => {
+  const etiquetas = []
+
   if (hora?.es_hora_extra) {
-    return String(hora?.tipo_hora_extra || "") === "100" || String(hora?.tipo || "") === "extra_100"
-      ? "Extra 100%"
-      : "Extra 50%"
+    const es100 = String(hora?.tipo_hora_extra || "") === "100" || String(hora?.tipo || "") === "extra_100"
+    etiquetas.push(es100 ? "Extra 100%" : "Extra 50%")
   }
-  if (hora?.es_prestada) return "Prestada"
-  return "Normal"
+
+  if (hora?.es_prestada) {
+    etiquetas.push("Prestada")
+  }
+
+  if (!etiquetas.length) return "Normal"
+  return etiquetas.join(" + ")
 }
 
 const isGrupoAdministrativo = (grupoId) => {
@@ -2113,13 +2119,15 @@ onUnmounted(() => {
                         <td class="hora-total-cell">{{ formatearHoras(getCantidadHoras(hora)) }}</td>
                         <td>
                           <span
-                            v-if="hora.es_hora_extra"
-                            :class="['badge', String(hora.tipo_hora_extra || '') === '100' || String(hora.tipo || '') === 'extra_100' ? 'badge-extra-100' : 'badge-extra']"
+                            v-if="hora.es_hora_extra || hora.es_prestada"
+                            :class="[
+                              'badge',
+                              String(hora.tipo_hora_extra || '') === '100' || String(hora.tipo || '') === 'extra_100'
+                                ? 'badge-extra-100'
+                                : (hora.es_prestada ? 'badge-prestada' : 'badge-extra')
+                            ]"
                           >
                             {{ getEtiquetaTipoHora(hora) }}
-                          </span>
-                          <span v-else-if="hora.es_prestada" class="badge badge-prestada">
-                            Prestada
                           </span>
                           <span v-else class="badge badge-normal">Normal</span>
                         </td>

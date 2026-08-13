@@ -1035,9 +1035,9 @@ router.post("/", async (req, res) => {
           es_hora_extra: true,
           tipo_hora_extra: "50",
           observaciones,
-          es_prestada: false,
-          grupo_origen_id: null,
-          grupo_destino_id: null,
+          es_prestada,
+          grupo_origen_id,
+          grupo_destino_id,
         })
       )
     }
@@ -1056,9 +1056,9 @@ router.post("/", async (req, res) => {
           es_hora_extra: true,
           tipo_hora_extra: "100",
           observaciones,
-          es_prestada: false,
-          grupo_origen_id: null,
-          grupo_destino_id: null,
+          es_prestada,
+          grupo_origen_id,
+          grupo_destino_id,
         })
       )
     }
@@ -1208,9 +1208,9 @@ router.put("/:id", async (req, res) => {
           es_hora_extra: true,
           tipo_hora_extra: "50",
           observaciones: observaciones !== undefined ? String(observaciones || "").trim() : undefined,
-          es_prestada: false,
-          grupo_origen_id: null,
-          grupo_destino_id: null,
+          es_prestada,
+          grupo_origen_id,
+          grupo_destino_id,
         })
       )
     }
@@ -1229,9 +1229,9 @@ router.put("/:id", async (req, res) => {
           es_hora_extra: true,
           tipo_hora_extra: "100",
           observaciones: observaciones !== undefined ? String(observaciones || "").trim() : undefined,
-          es_prestada: false,
-          grupo_origen_id: null,
-          grupo_destino_id: null,
+          es_prestada,
+          grupo_origen_id,
+          grupo_destino_id,
         })
       )
     }
