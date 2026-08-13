@@ -650,6 +650,24 @@ router.get("/resumen/pdf", async (req, res) => {
       return acc;
     }, { iva: 0, subtotal: 0, total: 0, pagoTesla: 0 });
 
+    const getColumnLabel = (tipoKey, columnName) => {
+      const labels = {
+        tesla: {
+          subtotal: "SUBTOTAL",
+          total: "TOTAL",
+        },
+        facu: {
+          subtotal: "SUBTOTAL (FACU)",
+          total: "TOTAL - TESLITA",
+        },
+        juani: {
+          subtotal: "SUBT. (JUANI)",
+          total: "TOTAL - JUANI",
+        },
+      };
+      return labels[tipoKey]?.[columnName] || labels.tesla[columnName];
+    };
+
     const totalesGenerales = calcTotales(gastos);
 
     const drawResumenCard = () => {
@@ -675,14 +693,14 @@ router.get("/resumen/pdf", async (req, res) => {
       doc.y = y + 82;
     };
 
-    const drawTableHeader = () => {
+    const drawTableHeader = (tipoKey) => {
       const y = doc.y;
       doc.rect(45, y, pageWidth - 90, 24).fill(PDF_COLORS.navy);
       doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(8.2);
       doc.text("DESCRIPCION", 53, y + 8, { width: 165 });
       doc.text("IVA / IMP.", 225, y + 8, { width: 75, align: "right" });
-      doc.text("SUBTOTAL", 305, y + 8, { width: 75, align: "right" });
-      doc.text("TOTAL", 385, y + 8, { width: 75, align: "right" });
+      doc.text(getColumnLabel(tipoKey, "subtotal"), 305, y + 8, { width: 75, align: "right" });
+      doc.text(getColumnLabel(tipoKey, "total"), 385, y + 8, { width: 75, align: "right" });
       doc.text("PAGO TESLA", 465, y + 8, { width: 75, align: "right" });
       doc.fillColor(PDF_COLORS.ink);
       doc.y = y + 24;
@@ -691,7 +709,7 @@ router.get("/resumen/pdf", async (req, res) => {
     const drawTipoTable = (tipoInfo, items) => {
       ensureSpace(95);
       drawPremiumSectionTitle(doc, tipoInfo.titulo);
-      drawTableHeader();
+      drawTableHeader(tipoInfo.key);
 
       let y = doc.y;
 
@@ -708,7 +726,7 @@ router.get("/resumen/pdf", async (req, res) => {
         if (y > getBottomLimit(rowHeight + 24)) {
           doc.addPage();
           doc.y = 60;
-          drawTableHeader();
+          drawTableHeader(tipoInfo.key);
           y = doc.y;
         }
 
