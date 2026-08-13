@@ -264,7 +264,7 @@ const validarCamposChequeIngreso = (item = {}) => {
 }
 
 async function crearChequesLibroDesdeIngreso({ client, movimientoId, cajaCodigo, fechaMovimiento, detallesPago = [] }) {
-  const chequesIngreso = detallesPago.filter((item) => String(item?.medio_pago || "").toLowerCase() === "cheque")
+  const chequesIngreso = detallesPago.filter((item) => ["cheque", "echeq"].includes(String(item?.medio_pago || "").toLowerCase()))
   if (!chequesIngreso.length) return
 
   const existentes = await client.query(
@@ -658,7 +658,7 @@ async function obtenerChequesDisponiblesAlCierreSemana({ cajaCodigo, fechaFin })
       SELECT l.*
       FROM libro_cheques_caja l
       WHERE l.caja_codigo = $1
-        AND l.medio_pago = 'cheque'
+        AND l.medio_pago IN ('cheque', 'echeq')
         AND LOWER(COALESCE(l.estado, '')) <> 'anulado'
         AND l.fecha_entrada <= $2
         AND (l.fecha_salida IS NULL OR l.fecha_salida > $2)
@@ -715,7 +715,7 @@ async function obtenerChequesDisponiblesSemana({ cajaCodigo, cajaSemanalId, fech
       WHERE m.caja_semanal_id = $1
         AND m.caja_codigo = $2
         AND LOWER(COALESCE(l.estado, '')) = 'disponible'
-        AND l.medio_pago = 'cheque'
+        AND l.medio_pago IN ('cheque', 'echeq')
       ORDER BY l.fecha_cheque DESC NULLS LAST, l.id ASC
     `,
     [semanaId, cajaCodigo]
@@ -1874,7 +1874,7 @@ router.get("/libro-cheques/disponibles", async (req, res) => {
       SELECT *
       FROM libro_cheques_caja
       WHERE caja_codigo = $1
-        AND medio_pago = 'cheque'
+        AND medio_pago IN ('cheque', 'echeq')
         AND estado = 'disponible'
       ORDER BY fecha_cheque DESC, id ASC
       `,
@@ -4016,7 +4016,7 @@ router.put("/:id", async (req, res) => {
         const idsControl = Array.isArray(detalles_medio_pago)
           ? Array.from(new Set(
             detalles_medio_pago
-              .filter((item) => String(item?.medio_pago || "").toLowerCase() === "cheque")
+              .filter((item) => ["cheque", "echeq"].includes(String(item?.medio_pago || "").toLowerCase()))
               .map((item) => Number(item?.libro_cheque_id || 0))
               .filter((valor) => Number.isInteger(valor) && valor > 0)
           ))
