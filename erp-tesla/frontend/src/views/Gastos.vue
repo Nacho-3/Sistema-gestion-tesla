@@ -256,6 +256,24 @@ const abrirEditarFijo = async (tipo, row) => {
   })
 }
 
+const getColumnLabel = (tipoKey, columnName) => {
+  const labels = {
+    tesla: {
+      subtotal: "Subtotal",
+      total: "Total",
+    },
+    facu: {
+      subtotal: "Subtotal (Facu)",
+      total: "Total - Teslita",
+    },
+    juani: {
+      subtotal: "Subt. (Juani)",
+      total: "Total - Juani",
+    },
+  }
+  return labels[tipoKey]?.[columnName] || labels.tesla[columnName]
+}
+
 const totalizar = (rows = []) =>
   rows.reduce(
     (acc, row) => {
@@ -459,8 +477,8 @@ onMounted(async () => {
                 <tr>
                   <th>Item</th>
                   <th>IVA / Imp.</th>
-                  <th>Subtotal</th>
-                  <th>Total</th>
+                  <th>{{ getColumnLabel(tipo.key, 'subtotal') }}</th>
+                  <th>{{ getColumnLabel(tipo.key, 'total') }}</th>
                   <th>Pago tesla</th>
                   <th>Acciones</th>
                 </tr>
@@ -498,8 +516,8 @@ onMounted(async () => {
                 <tr>
                   <th>Descripción</th>
                   <th>IVA / Imp.</th>
-                  <th>Subtotal</th>
-                  <th>Total</th>
+                  <th>{{ getColumnLabel(tipo.key, 'subtotal') }}</th>
+                  <th>{{ getColumnLabel(tipo.key, 'total') }}</th>
                   <th>Pago tesla</th>
                   <th></th>
                 </tr>
