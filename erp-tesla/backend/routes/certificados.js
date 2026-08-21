@@ -305,6 +305,7 @@ const recalcularCertificadosPresupuesto = async (client, presupuestoId) => {
 
 router.get("/", async (req, res) => {
 	try {
+		res.setHeader("Cache-Control", "no-store")
 		const result = await pool.query(`
 			SELECT
 				c.*,

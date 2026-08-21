@@ -1087,6 +1087,20 @@ const guardarNotaCredito = async () => {
   }
 }
 
+const imprimirNotaCredito = async (nota) => {
+  if (!clienteSeleccionado.value?.id || !nota?.id) return
+
+  try {
+    const response = await api.getNotaCreditoClientePdf(clienteSeleccionado.value.id, nota.id)
+    const blob = new Blob([response.data], { type: "application/pdf" })
+    const url = URL.createObjectURL(blob)
+    window.open(url, "_blank", "noopener,noreferrer")
+    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  } catch (error) {
+    alert(extractApiErrorMessage(error, "No se pudo generar el PDF de la nota de crédito"))
+  }
+}
+
 const anularNotaCredito = async (notaId) => {
   if (!clienteSeleccionado.value?.id) return
 
@@ -1600,6 +1614,7 @@ onBeforeUnmount(() => {
                   <table class="tabla">
                     <thead>
                       <tr>
+                        <th>Nro.</th>
                         <th>Fecha</th>
                         <th>Concepto</th>
                         <th>Monto</th>
@@ -1609,6 +1624,7 @@ onBeforeUnmount(() => {
                     </thead>
                     <tbody>
                       <tr v-for="n in notasCreditoActivas" :key="n.id">
+                        <td>{{ n.numero || n.id }}</td>
                         <td>{{ formatDateAr(n.fecha) }}</td>
                         <td>{{ n.concepto || "-" }}</td>
                         <td>{{ formatMoney(n.monto_total) }}</td>
@@ -1629,6 +1645,9 @@ onBeforeUnmount(() => {
                               title="Anular nota de crédito"
                             >
                               🗑️ Anular
+                            </button>
+                            <button class="btn-edit-movimiento" @click="imprimirNotaCredito(n)" title="Imprimir nota de crédito">
+                              🖨️ PDF
                             </button>
                           </div>
                         </td>
@@ -1655,6 +1674,7 @@ onBeforeUnmount(() => {
                   <table class="tabla">
                     <thead>
                       <tr>
+                        <th>Nro.</th>
                         <th>Fecha</th>
                         <th>Concepto</th>
                         <th>Monto</th>
@@ -1664,6 +1684,7 @@ onBeforeUnmount(() => {
                     </thead>
                     <tbody>
                       <tr v-for="n in notasCreditoAnuladas" :key="n.id">
+                        <td>{{ n.numero || n.id }}</td>
                         <td>{{ formatDateAr(n.fecha) }}</td>
                         <td>{{ n.concepto || "-" }}</td>
                         <td>{{ formatMoney(n.monto_total) }}</td>
@@ -1676,6 +1697,9 @@ onBeforeUnmount(() => {
                           <div class="acciones-nota-credito">
                             <button class="btn-edit-movimiento" @click="editarNotaCredito(n)" title="Editar nota de crédito">
                               ✏️ Editar
+                            </button>
+                            <button class="btn-edit-movimiento" @click="imprimirNotaCredito(n)" title="Imprimir nota de crédito">
+                              🖨️ PDF
                             </button>
                           </div>
                         </td>

@@ -1278,6 +1278,12 @@ router.post("/:id/notas-credito", async (req, res) => {
 
     await client.query("BEGIN")
 
+    await client.query("LOCK TABLE notas_credito_cliente IN EXCLUSIVE MODE")
+    const numeroQ = await client.query(
+      `SELECT COALESCE(MAX(numero), 0) + 1 AS siguiente FROM notas_credito_cliente`
+    )
+    const numero = Number(numeroQ.rows?.[0]?.siguiente || 1)
+
     const presupuestosQ = await client.query(
       `
         SELECT id
@@ -1295,11 +1301,11 @@ router.post("/:id/notas-credito", async (req, res) => {
 
     const insertNotaQ = await client.query(
       `
-        INSERT INTO notas_credito_cliente (cliente_id, fecha, concepto, observaciones, monto_total, estado)
-        VALUES ($1, $2, $3, $4, $5, 'activa')
+        INSERT INTO notas_credito_cliente (numero, cliente_id, fecha, concepto, observaciones, monto_total, estado)
+        VALUES ($1, $2, $3, $4, $5, $6, 'activa')
         RETURNING *
       `,
-      [clienteId, fecha, concepto, observaciones, monto_total]
+      [numero, clienteId, fecha, concepto, observaciones, monto_total]
     )
 
     const nota = insertNotaQ.rows[0]
@@ -1431,6 +1437,166 @@ router.put ("/:id/notas-credito/:notaId", async (req, res) => {
     return handleInternalError(res, err, "actualizar_nota_credito_cliente")
   } finally {
     client.release()
+  }
+})
+
+router.get("/:id/notas-credito/:notaId/pdf", async (req, res) => {
+  try {
+    const clienteId = Number(req.params.id)
+    const notaId = Number(req.params.notaId)
+    if (!Number.isInteger(clienteId) || clienteId <= 0 || !Number.isInteger(notaId) || notaId <= 0) {
+      return res.status(400).json({ error: "ID de cliente o nota invalido" })
+    }
+
+    const notaQ = await pool.query(
+      `
+        SELECT nc.*, c.razon_social, c.empresa, c.cuit, c.iva, c.direccion, c.telefono
+        FROM notas_credito_cliente nc
+        INNER JOIN clientes c ON c.id = nc.cliente_id
+        WHERE nc.id = $1 AND nc.cliente_id = $2
+        LIMIT 1
+      `,
+      [notaId, clienteId]
+    )
+    if (!notaQ.rows?.length) {
+      return res.status(404).json({ error: "Nota de crédito no encontrada para el cliente" })
+    }
+
+    const nota = notaQ.rows[0]
+    const asignacionesQ = await pool.query(
+      `
+        SELECT ncp.monto_asignado, p.numero AS presupuesto_numero, p.proyecto, o.nombre AS obra
+        FROM notas_credito_cliente_presupuestos ncp
+        INNER JOIN presupuestos p ON p.id = ncp.presupuesto_id
+        LEFT JOIN obras o ON o.id = p.obra_id
+        WHERE ncp.nota_credito_id = $1
+        ORDER BY p.numero ASC
+      `,
+      [notaId]
+    )
+    const asignaciones = asignacionesQ.rows || []
+    const getSafe = (value) => {
+      const text = String(value ?? "").trim()
+      return text || "-"
+    }
+    const fecha = nota.fecha ? new Date(`${String(nota.fecha).slice(0, 10)}T00:00:00`).toLocaleDateString("es-AR") : "-"
+    const clienteEmpresa = getSafe(nota.empresa || nota.razon_social)
+    const fileName = `Nota-de-Credito-${nota.numero || nota.id}.pdf`
+
+    res.setHeader("Content-Type", "application/pdf")
+    res.setHeader("Content-Disposition", `inline; filename="${sanitizeFileText(fileName)}"`)
+
+    const doc = new PDFDocument({ size: "A4", margin: 45, bufferPages: true })
+    doc.pipe(res)
+    const left = 45
+    const right = doc.page.width - 45
+    const width = right - left
+    const lineColor = "#1f1f1f"
+    const muted = "#5b5b5b"
+    const pageBottom = doc.page.height - 82
+    let y = 22
+
+    doc.strokeColor(lineColor).lineWidth(1).moveTo(left, y + 50).lineTo(right, y + 50).stroke()
+    doc.strokeColor("#7a7a7a").lineWidth(0.6).moveTo(left, y + 54).lineTo(right, y + 54).stroke()
+    doc.font("Helvetica-Bold").fontSize(28).fillColor("#111")
+    doc.text("NOTA DE CRÉDITO", left, y + 14, { width, align: "center" })
+
+    y += 64
+    const blockGap = 12
+    const blockW = (width - blockGap) / 2
+    const blockH = 116
+    const logoBandW = 82
+    doc.rect(left, y, blockW, blockH).lineWidth(0.8).strokeColor(lineColor).stroke()
+    if (existsSync(LOGO_PATH)) {
+      doc.image(LOGO_PATH, left + blockW - logoBandW - 4, y + 23, { fit: [78, 56], align: "center", valign: "center" })
+    }
+    const empresaTextW = blockW - logoBandW - 14
+    doc.font("Helvetica-Bold").fontSize(9).fillColor("#111").text("EMPRESA", left + 8, y + 6)
+    doc.font("Helvetica").fontSize(8.1)
+    doc.text("Tesla Montajes Electricos", left + 8, y + 21, { width: empresaTextW, lineBreak: false })
+    doc.text("CUIT: 30-71712557-2", left + 8, y + 34, { width: empresaTextW, lineBreak: false })
+    doc.text("IVA: Responsable Inscripto", left + 8, y + 47, { width: empresaTextW, lineBreak: false })
+    doc.text("Echeverria 197 - San Francisco (Cba.)", left + 8, y + 60, { width: empresaTextW, lineBreak: false })
+    doc.text("03564-15642579/15573800/15586865", left + 8, y + 73, { width: empresaTextW, lineBreak: false })
+    doc.text("teslamontajeselectricos@hotmail.com", left + 8, y + 86, { width: empresaTextW, lineBreak: false })
+    doc.text("www.teslamontajeselectricos.com.ar", left + 8, y + 99, { width: empresaTextW, lineBreak: false })
+
+    const rightBoxX = left + blockW + blockGap
+    doc.rect(rightBoxX, y, blockW, blockH).lineWidth(0.8).strokeColor(lineColor).stroke()
+    doc.font("Helvetica-Bold").fontSize(9).fillColor("#111").text("CLIENTE", rightBoxX + 8, y + 6)
+    doc.font("Helvetica").fontSize(8.4)
+    doc.text(`Empresa: ${clienteEmpresa}`, rightBoxX + 8, y + 21, { width: blockW - 16, lineBreak: false })
+    doc.text(`CUIT: ${getSafe(nota.cuit)}`, rightBoxX + 8, y + 34, { width: blockW - 16, lineBreak: false })
+    doc.text(`IVA: ${getSafe(nota.iva)}`, rightBoxX + 8, y + 47, { width: blockW - 16, lineBreak: false })
+    doc.text(`Direccion: ${getSafe(nota.direccion)}`, rightBoxX + 8, y + 60, { width: blockW - 16, lineBreak: false })
+    doc.text(`Telefono: ${getSafe(nota.telefono)}`, rightBoxX + 8, y + 73, { width: blockW - 16, lineBreak: false })
+
+    y += blockH + 12
+    doc.rect(left, y, width, 58).lineWidth(0.8).strokeColor(lineColor).stroke()
+    doc.strokeColor("#d0d0d0").lineWidth(0.5).moveTo(left, y + 29).lineTo(right, y + 29).stroke()
+    doc.font("Helvetica").fontSize(8.6).fillColor(muted)
+    doc.text("Nota de crédito Nro.", left + 8, y + 8)
+    doc.text("Fecha", right - 164, y + 8, { width: 94 })
+    doc.text("Estado", left + 8, y + 37)
+    doc.font("Helvetica-Bold").fontSize(9).fillColor("#111")
+    doc.text(String(nota.numero || nota.id), left + 105, y + 8)
+    doc.text(fecha, right - 70, y + 8, { width: 62, align: "right" })
+    doc.text(String(nota.estado || "activa").toUpperCase(), left + 58, y + 37)
+
+    y += 78
+    doc.font("Helvetica-Bold").fontSize(10).fillColor("#111").text("DETALLE DE LA NOTA", left, y)
+    doc.strokeColor(lineColor).lineWidth(0.8).moveTo(left, y + 13).lineTo(right, y + 13).stroke()
+    y += 24
+    doc.font("Helvetica-Bold").fontSize(9).text("Concepto", left, y)
+    doc.font("Helvetica").fontSize(9).text(getSafe(nota.concepto), left + 70, y, { width: width - 70 })
+    y += 22
+    if (String(nota.observaciones || "").trim()) {
+      doc.font("Helvetica-Bold").text("Observaciones", left, y)
+      doc.font("Helvetica").text(getSafe(nota.observaciones), left + 90, y, { width: width - 90 })
+      y += 26
+    }
+
+    doc.font("Helvetica-Bold").fontSize(10).text("IMPUTACIÓN A PRESUPUESTOS", left, y)
+    doc.strokeColor(lineColor).lineWidth(0.8).moveTo(left, y + 13).lineTo(right, y + 13).stroke()
+    y += 24
+    const colWidths = [110, width - 110 - 150, 150]
+    const headers = ["Presupuesto", "Obra / Proyecto", "Monto asignado"]
+    doc.rect(left, y, width, 22).fillAndStroke("#f3f3f3", lineColor)
+    let x = left
+    headers.forEach((header, index) => {
+      doc.font("Helvetica-Bold").fontSize(8.5).fillColor("#111").text(header, x + 6, y + 7, { width: colWidths[index] - 12, align: index === 2 ? "right" : "left" })
+      x += colWidths[index]
+    })
+    y += 22
+    asignaciones.forEach((asignacion, index) => {
+      if (y + 24 > pageBottom) { doc.addPage(); y = 40 }
+      if (index % 2 === 0) doc.rect(left, y, width, 24).fill("#fbfbfb")
+      doc.rect(left, y, width, 24).lineWidth(0.5).strokeColor("#6b6b6b").stroke()
+      const obra = getSafe(asignacion.proyecto || asignacion.obra)
+      doc.font("Helvetica").fontSize(8.6).fillColor("#111")
+      doc.text(`#${getSafe(asignacion.presupuesto_numero)}`, left + 6, y + 7, { width: colWidths[0] - 12 })
+      doc.text(obra, left + colWidths[0] + 6, y + 7, { width: colWidths[1] - 12, ellipsis: true })
+      doc.text(`$ ${formatMoneyAr(asignacion.monto_asignado)}`, left + colWidths[0] + colWidths[1] + 6, y + 7, { width: colWidths[2] - 12, align: "right" })
+      y += 24
+    })
+
+    y += 14
+    doc.rect(right - 210, y, 210, 34).fillAndStroke("#efede8", lineColor)
+    doc.font("Helvetica-Bold").fontSize(10).fillColor("#111")
+    doc.text("TOTAL NOTA DE CRÉDITO", right - 202, y + 11, { width: 115 })
+    doc.text(`$ ${formatMoneyAr(nota.monto_total)}`, right - 80, y + 11, { width: 72, align: "right" })
+
+    const range = doc.bufferedPageRange()
+    for (let index = 0; index < range.count; index += 1) {
+      doc.switchToPage(index)
+      doc.strokeColor(lineColor).lineWidth(0.8).moveTo(left, doc.page.height - 62).lineTo(right, doc.page.height - 62).stroke()
+      doc.font("Helvetica").fontSize(7.8).fillColor(muted)
+      doc.text("Tesla Montajes Electricos - Nota de crédito", left, doc.page.height - 60)
+      doc.text(`Pagina ${index + 1}`, left, doc.page.height - 60, { width, align: "right" })
+    }
+    doc.end()
+  } catch (err) {
+    return handleInternalError(res, err, "pdf_nota_credito_cliente")
   }
 })
 
