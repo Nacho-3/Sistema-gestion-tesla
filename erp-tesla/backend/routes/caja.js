@@ -289,6 +289,7 @@ async function crearChequesLibroDesdeIngreso({ client, movimientoId, cajaCodigo,
       fecha_entrada: camposCheque.fecha_entrada || fechaDefault,
       librador_endosante: camposCheque.librador_endosante,
       banco: camposCheque.banco,
+      identificador: sanitizeChequeText(item.identificador) || null,
       numero_cheque: camposCheque.numero_cheque,
       importe: roundMoney(Number(item.monto || 0)),
       fecha_cheque: camposCheque.fecha_cheque,
@@ -323,6 +324,7 @@ async function crearChequesLibroDesdeIngreso({ client, movimientoId, cajaCodigo,
       fila.fecha_entrada,
       fila.librador_endosante,
       fila.banco,
+      fila.identificador,
       fila.numero_cheque,
       fila.importe,
       fila.fecha_cheque,
@@ -333,8 +335,8 @@ async function crearChequesLibroDesdeIngreso({ client, movimientoId, cajaCodigo,
       `
       INSERT INTO libro_cheques_caja (
         caja_codigo, medio_pago, movimiento_entrada_id, fecha_entrada,
-        librador_endosante, banco, numero_cheque, importe, fecha_cheque, observaciones
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        librador_endosante, banco, identificador, numero_cheque, importe, fecha_cheque, observaciones
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
       `,
       values
     )
@@ -900,12 +902,13 @@ async function recalcularCajaSemanal(cajaSemanalId) {
   const saldoInicialPorMedio = await obtenerSaldoAcumuladoPorMedio(semana.caja_codigo, semana.fecha_inicio)
   const saldoPorMedio = {
     efectivo: Number(saldoInicialPorMedio.efectivo || 0),
+    banco: Number(saldoInicialPorMedio.banco || 0),
     cheques: Number(saldoInicialPorMedio.cheques || 0),
   }
   movimientosNormalizados.forEach((movimiento) => {
     actualizarSaldoPorMedio(saldoPorMedio, movimiento)
   })
-  const saldoFinal = roundMoney(Number(saldoPorMedio.efectivo || 0) + Number(saldoPorMedio.cheques || 0))
+  const saldoFinal = roundMoney(Number(saldoPorMedio.efectivo || 0) + Number(saldoPorMedio.banco || 0) + Number(saldoPorMedio.cheques || 0))
 
   const { data: actualizada, error: errorActualizacion } = await db
     .from("cajas_semanales")
@@ -1221,7 +1224,7 @@ function normalizarDetalles(detalles) {
     .filter((item) => item.monto > 0)
 }
 
-// Solo efectivo y cheques comunes afectan el saldo inicial/final
+// Efectivo, banco y cheques comunes afectan el saldo inicial/final
 function actualizarSaldoPorMedio(acumulador, movimiento) {
   const signo = String(movimiento?.tipo || "").toLowerCase() === "egreso" ? -1 : 1
   let montoAplicado = 0
@@ -1234,6 +1237,10 @@ function actualizarSaldoPorMedio(acumulador, movimiento) {
 
     if (medio === "efectivo") {
       acumulador.efectivo += signo * monto
+      montoAplicado += monto
+    }
+    if (medio === "banco") {
+      acumulador.banco += signo * monto
       montoAplicado += monto
     }
     // Solo cheques comunes (NO echeq, NO transferencia, NO retencion)
@@ -1293,11 +1300,11 @@ async function obtenerMovimientosCajaConDetalles(cajaCodigo) {
 
 async function obtenerSaldoAcumuladoPorMedio(cajaCodigo, fechaCorteExclusiva) {
   if (!cajaCodigo) {
-    return { efectivo: 0, cheques: 0, total: 0 }
+    return { efectivo: 0, banco: 0, cheques: 0, total: 0 }
   }
 
   const movimientos = await obtenerMovimientosCajaConDetalles(cajaCodigo)
-  const acumulador = { efectivo: 0, cheques: 0 }
+  const acumulador = { efectivo: 0, banco: 0, cheques: 0 }
 
   movimientos.forEach((movimiento) => {
     const fechaMovimiento = normalizarFechaISO(movimiento.fecha)
@@ -1308,8 +1315,9 @@ async function obtenerSaldoAcumuladoPorMedio(cajaCodigo, fechaCorteExclusiva) {
 
   return {
     efectivo: roundMoney(acumulador.efectivo),
+    banco: roundMoney(acumulador.banco),
     cheques: roundMoney(acumulador.cheques),
-    total: roundMoney(acumulador.efectivo + acumulador.cheques),
+    total: roundMoney(acumulador.efectivo + acumulador.banco + acumulador.cheques),
   }
 }
 
@@ -1317,7 +1325,7 @@ async function enriquecerSemanasConMedios(cajaCodigo, semanas = []) {
   if (!cajaCodigo || !Array.isArray(semanas) || semanas.length === 0) return semanas || []
 
   const movimientos = await obtenerMovimientosCajaConDetalles(cajaCodigo)
-  const acumulador = { efectivo: 0, cheques: 0 }
+  const acumulador = { efectivo: 0, banco: 0, cheques: 0 }
 
   const enriquecidas = [...semanas]
     .map((semana) => ({ ...semana }))
@@ -1340,8 +1348,9 @@ async function enriquecerSemanasConMedios(cajaCodigo, semanas = []) {
 
       const semanaEnriquecida = {
         ...semana,
-        saldo_inicial: roundMoney(acumulador.efectivo + acumulador.cheques),
+        saldo_inicial: roundMoney(acumulador.efectivo + acumulador.banco + acumulador.cheques),
         saldo_inicial_efectivo: roundMoney(acumulador.efectivo),
+        saldo_inicial_banco: roundMoney(acumulador.banco),
         saldo_inicial_cheques: roundMoney(acumulador.cheques),
       }
 
@@ -1349,8 +1358,9 @@ async function enriquecerSemanasConMedios(cajaCodigo, semanas = []) {
         actualizarSaldoPorMedio(acumulador, movimiento)
       })
 
-      semanaEnriquecida.saldo_final = roundMoney(acumulador.efectivo + acumulador.cheques)
+      semanaEnriquecida.saldo_final = roundMoney(acumulador.efectivo + acumulador.banco + acumulador.cheques)
       semanaEnriquecida.saldo_final_efectivo = roundMoney(acumulador.efectivo)
+      semanaEnriquecida.saldo_final_banco = roundMoney(acumulador.banco)
       semanaEnriquecida.saldo_final_cheques = roundMoney(acumulador.cheques)
 
       return semanaEnriquecida
@@ -1792,6 +1802,7 @@ router.get("/libro-cheques", async (req, res) => {
       const idx = params.length
       where.push(`(
         LOWER(COALESCE(l.numero_cheque, '')) LIKE $${idx}
+        OR LOWER(COALESCE(l.identificador, '')) LIKE $${idx}
         OR LOWER(COALESCE(l.banco, '')) LIKE $${idx}
         OR LOWER(COALESCE(l.librador_endosante, '')) LIKE $${idx}
         OR LOWER(COALESCE(l.endosado_a, '')) LIKE $${idx}
@@ -1915,6 +1926,7 @@ router.get("/libro-cheques/pdf", async (req, res) => {
       const idx = params.length
       where.push(`(
         LOWER(COALESCE(l.numero_cheque, '')) LIKE $${idx}
+        OR LOWER(COALESCE(l.identificador, '')) LIKE $${idx}
         OR LOWER(COALESCE(l.banco, '')) LIKE $${idx}
         OR LOWER(COALESCE(l.librador_endosante, '')) LIKE $${idx}
         OR LOWER(COALESCE(l.endosado_a, '')) LIKE $${idx}
@@ -2111,12 +2123,13 @@ router.get("/libro-cheques/pdf", async (req, res) => {
       const tableWidth = pageWidth - 90
       const colDefs = [
         { key: "idx", label: "#", w: 22, align: "left" },
-        { key: "numero", label: "Numero", w: 70, align: "left" },
-        { key: "banco", label: "Banco", w: 90, align: "left" },
-        { key: "librador", label: "Librador/Endosante", w: 118, align: "left" },
-        { key: "fcheque", label: "F. cheque", w: 60, align: "left" },
-        { key: "fentrada", label: "F. entrada", w: 60, align: "left" },
-        { key: "importe", label: "Importe", w: 85, align: "right" },
+        { key: "numero", label: "Numero", w: 60, align: "left" },
+        { key: "identificador", label: "Identificador", w: 70, align: "left" },
+        { key: "banco", label: "Banco", w: 70, align: "left" },
+        { key: "librador", label: "Librador/Endosante", w: 105, align: "left" },
+        { key: "fcheque", label: "F. cheque", w: 50, align: "left" },
+        { key: "fentrada", label: "F. entrada", w: 50, align: "left" },
+        { key: "importe", label: "Importe", w: 78, align: "right" },
       ]
 
       const headerH = 22
@@ -2181,6 +2194,7 @@ router.get("/libro-cheques/pdf", async (req, res) => {
         const data = {
           idx: String(idx + 1),
           numero: truncateText(row.numero_cheque, 12),
+          identificador: truncateText(row.identificador, 14),
           banco: truncateText(row.banco, 16),
           librador: truncateText(row.librador_endosante, 19),
           fcheque: formatoFecha(row.fecha_cheque),
@@ -2449,12 +2463,13 @@ router.post("/semanas/:id/control-inicial", async (req, res) => {
     if (!semanaId) return res.status(400).json({ error: "ID de semana inválido" })
 
     const efectivoInicial = roundMoney(Number(req.body?.efectivo_inicial || 0))
+    const bancoInicial = roundMoney(Number(req.body?.banco_inicial || 0))
     const ids = Array.isArray(req.body?.cheques_controlados_ids)
       ? req.body.cheques_controlados_ids.map((valor) => Number(valor)).filter((valor) => Number.isInteger(valor) && valor > 0)
       : []
 
-    if (efectivoInicial < 0) {
-      return res.status(400).json({ error: "El efectivo inicial no puede ser negativo" })
+    if (efectivoInicial < 0 || bancoInicial < 0) {
+      return res.status(400).json({ error: "El efectivo y el banco iniciales no pueden ser negativos" })
     }
 
     await client.query("BEGIN")
@@ -2502,7 +2517,7 @@ router.post("/semanas/:id/control-inicial", async (req, res) => {
 
     const chequesSeleccionados = ids.map((id) => mapCandidatos.get(id))
     const totalCheques = roundMoney(chequesSeleccionados.reduce((acc, item) => acc + Number(item?.importe || 0), 0))
-    const montoTotal = roundMoney(efectivoInicial + totalCheques)
+    const montoTotal = roundMoney(efectivoInicial + bancoInicial + totalCheques)
 
     const fechaControl = normalizarFechaISO(req.body?.fecha_control || semana.fecha_inicio) || semana.fecha_inicio
     const detalle = String(req.body?.detalle || "Control semanal inicial de caja").trim() || "Control semanal inicial de caja"
@@ -2527,6 +2542,16 @@ router.post("/semanas/:id/control-inicial", async (req, res) => {
         VALUES ($1,'efectivo',$2,NULL,NULL,NULL)
         `,
         [movimiento.id, efectivoInicial]
+      )
+    }
+
+    if (bancoInicial > 0) {
+      await client.query(
+        `
+        INSERT INTO detalles_medio_pago (movimiento_id, medio_pago, monto, identificador, banco, fecha_cobro)
+        VALUES ($1,'banco',$2,NULL,NULL,NULL)
+        `,
+        [movimiento.id, bancoInicial]
       )
     }
 
@@ -2797,7 +2822,7 @@ router.post("/semanas/:id/reabrir", async (req, res) => {
 
 router.get("/resumen/pdf", async (req, res) => {
   try {
-    const { fecha_inicio, fecha_fin, tipo, caja_codigo, resumen_modo, busqueda, medio_pago, categoria_id } = req.query
+    const { fecha_inicio, fecha_fin, tipo, caja_codigo, resumen_modo, busqueda, medio_pago, categoria_id, caja_semanal_id } = req.query
     const cajaCodigoNormalizada = caja_codigo ? String(caja_codigo).toLowerCase() : undefined
     const modoResumen = String(resumen_modo || "general").toLowerCase()
     const FILTRO_SIN_CATEGORIA = "__sin_categoria__"
@@ -2806,11 +2831,44 @@ router.get("/resumen/pdf", async (req, res) => {
       return res.status(400).json({ error: "Caja inválida" })
     }
 
+    let cajaSemanalIdPdf = normalizarCajaSemanalId(caja_semanal_id)
+    const esModoSemanal = modoResumen === "semanal"
+    if (esModoSemanal && cajaSemanalIdPdf) {
+      const semanaIdQ = await pool.query(
+        `SELECT id, caja_codigo FROM cajas_semanales WHERE id = $1 LIMIT 1`,
+        [cajaSemanalIdPdf]
+      )
+      const semanaSolicitada = semanaIdQ.rows?.[0]
+      if (!semanaSolicitada || (cajaCodigoNormalizada && String(semanaSolicitada.caja_codigo).toLowerCase() !== cajaCodigoNormalizada)) {
+        return res.status(400).json({ error: "La semana seleccionada no pertenece a la caja indicada" })
+      }
+    } else if (esModoSemanal && cajaCodigoNormalizada && fecha_inicio) {
+      const fechaInicioNormalizada = normalizarFechaISO(fecha_inicio)
+      const fechaFinNormalizada = normalizarFechaISO(fecha_fin)
+      const semanaPdfQ = await pool.query(
+        `
+          SELECT id
+          FROM cajas_semanales
+          WHERE caja_codigo = $1
+            AND fecha_inicio = $2
+            AND (
+              fecha_fin = $3
+              OR (estado = 'abierta' AND fecha_fin IS NULL)
+            )
+          ORDER BY CASE WHEN estado = 'abierta' THEN 0 ELSE 1 END, id DESC
+          LIMIT 1
+        `,
+        [cajaCodigoNormalizada, fechaInicioNormalizada, fechaFinNormalizada]
+      )
+      cajaSemanalIdPdf = Number(semanaPdfQ.rows?.[0]?.id || 0) || undefined
+    }
+
     let { movimientos, totales } = await obtenerMovimientosYTotales({
       fecha_inicio,
       fecha_fin,
       tipo,
       caja_codigo: cajaCodigoNormalizada,
+      caja_semanal_id: cajaSemanalIdPdf,
     })
     // Filtro por palabra clave si se envía 'busqueda'
     if (busqueda && String(busqueda).trim() !== "") {
@@ -2901,6 +2959,7 @@ router.get("/resumen/pdf", async (req, res) => {
       const saldoPrevio = await obtenerSaldoAcumuladoPorMedio(cajaCodigoNormalizada, fecha_inicio)
       const saldoFinalDesglosado = {
         efectivo: Number(saldoPrevio.efectivo || 0),
+        banco: Number(saldoPrevio.banco || 0),
         cheques: Number(saldoPrevio.cheques || 0),
       }
 
@@ -2909,20 +2968,24 @@ router.get("/resumen/pdf", async (req, res) => {
       })
 
       const saldoInicialEfectivo = roundMoney(saldoPrevio.efectivo)
+      const saldoInicialBanco = roundMoney(saldoPrevio.banco)
       const saldoInicialCheques = roundMoney(saldoPrevio.cheques)
       const saldoFinalEfectivo = roundMoney(saldoFinalDesglosado.efectivo)
+      const saldoFinalBanco = roundMoney(saldoFinalDesglosado.banco)
       const saldoFinalCheques = roundMoney(saldoFinalDesglosado.cheques)
 
       cajaSemanalResumen = {
         fecha_inicio,
         fecha_fin,
-        saldo_inicial: roundMoney(saldoInicialEfectivo + saldoInicialCheques),
+        saldo_inicial: roundMoney(saldoInicialEfectivo + saldoInicialBanco + saldoInicialCheques),
         saldo_inicial_efectivo: saldoInicialEfectivo,
+        saldo_inicial_banco: saldoInicialBanco,
         saldo_inicial_cheques: saldoInicialCheques,
         total_ingresos: roundMoney(totalIngresos),
         total_egresos: roundMoney(totalEgresos),
-        saldo_final: roundMoney(saldoFinalEfectivo + saldoFinalCheques),
+        saldo_final: roundMoney(saldoFinalEfectivo + saldoFinalBanco + saldoFinalCheques),
         saldo_final_efectivo: saldoFinalEfectivo,
+        saldo_final_banco: saldoFinalBanco,
         saldo_final_cheques: saldoFinalCheques,
         saldo_banco: modoResumen === "general" ? ultimaSemanaConSaldosRegistrados?.saldo_banco ?? null : semanaCaja?.saldo_banco,
         saldo_pendiente_echeq: modoResumen === "general"
@@ -3995,7 +4058,11 @@ router.put("/:id", async (req, res) => {
         }
 
         const movsQ = await client.query(
-          `SELECT COUNT(*)::int AS total FROM movimientos_caja WHERE caja_semanal_id = $1 AND id <> $2`,
+          `SELECT COUNT(*)::int AS total
+             FROM movimientos_caja
+            WHERE caja_semanal_id = $1
+              AND id <> $2
+              AND COALESCE(es_control_semanal, FALSE) = FALSE`,
           [semanaId, Number(id)]
         )
         if (Number(movsQ.rows?.[0]?.total || 0) > 0) {
@@ -4031,36 +4098,51 @@ router.put("/:id", async (req, res) => {
           return res.status(400).json({ error: "Hay cheques seleccionados que no pertenecen al cierre de la semana anterior" })
         }
 
-        let efectivoInicial = 0
+        const mediosIniciales = {
+          efectivo: 0,
+          transferencia: 0,
+          banco: 0,
+          retencion: 0,
+        }
         if (desglose !== undefined) {
-          efectivoInicial = roundMoney(Number(desglose?.efectivo || 0))
+          for (const medio of Object.keys(mediosIniciales)) {
+            mediosIniciales[medio] = roundMoney(Number(desglose?.[medio] || 0))
+          }
         } else if (Array.isArray(detalles_medio_pago)) {
-          efectivoInicial = roundMoney(
-            detalles_medio_pago
-              .filter((item) => String(item?.medio_pago || "").toLowerCase() === "efectivo")
-              .reduce((acc, item) => acc + Number(item?.monto || 0), 0)
-          )
+          for (const item of detalles_medio_pago) {
+            const medio = String(item?.medio_pago || "").toLowerCase()
+            if (Object.prototype.hasOwnProperty.call(mediosIniciales, medio)) {
+              mediosIniciales[medio] += Number(item?.monto || 0)
+            }
+          }
         } else {
-          const efectivoQ = await client.query(
+          const saldosMediosQ = await client.query(
             `
-              SELECT COALESCE(SUM(monto), 0)::numeric AS total
+              SELECT medio_pago, COALESCE(SUM(monto), 0)::numeric AS total
               FROM detalles_medio_pago
               WHERE movimiento_id = $1
-                AND medio_pago = 'efectivo'
+                AND medio_pago IN ('efectivo', 'transferencia', 'banco', 'retencion')
+              GROUP BY medio_pago
             `,
             [Number(id)]
           )
-          efectivoInicial = roundMoney(Number(efectivoQ.rows?.[0]?.total || 0))
+          for (const fila of saldosMediosQ.rows || []) {
+            const medio = String(fila.medio_pago || "").toLowerCase()
+            if (Object.prototype.hasOwnProperty.call(mediosIniciales, medio)) {
+              mediosIniciales[medio] = roundMoney(Number(fila.total || 0))
+            }
+          }
         }
 
-        if (efectivoInicial < 0) {
+        if (Object.values(mediosIniciales).some((monto) => monto < 0)) {
           await client.query("ROLLBACK")
-          return res.status(400).json({ error: "El efectivo inicial no puede ser negativo" })
+          return res.status(400).json({ error: "Los medios de pago iniciales no pueden ser negativos" })
         }
 
         const chequesSeleccionados = idsControl.map((chequeId) => mapCandidatos.get(chequeId)).filter(Boolean)
         const totalCheques = roundMoney(chequesSeleccionados.reduce((acc, item) => acc + Number(item?.importe || 0), 0))
-        const montoControl = roundMoney(efectivoInicial + totalCheques)
+        const totalMediosSimples = Object.values(mediosIniciales).reduce((acc, monto) => acc + monto, 0)
+        const montoControl = roundMoney(totalMediosSimples + totalCheques)
 
         const fechaControl = normalizarFechaISO(fecha || movimientoActual.fecha || semana.fecha_inicio) || semana.fecha_inicio
         const detalleControl = String(detalle ?? movimientoActual?.[detalleColumn] ?? "Control semanal inicial de caja").trim() || "Control semanal inicial de caja"
@@ -4091,13 +4173,14 @@ router.put("/:id", async (req, res) => {
 
         await client.query(`DELETE FROM detalles_medio_pago WHERE movimiento_id = $1`, [Number(id)])
 
-        if (efectivoInicial > 0) {
+        for (const [medio, monto] of Object.entries(mediosIniciales)) {
+          if (!(monto > 0)) continue
           await client.query(
             `
               INSERT INTO detalles_medio_pago (movimiento_id, medio_pago, monto, identificador, banco, fecha_cobro)
-              VALUES ($1, 'efectivo', $2, NULL, NULL, NULL)
+              VALUES ($1, $2, $3, NULL, NULL, NULL)
             `,
-            [Number(id), efectivoInicial]
+            [Number(id), medio, monto]
           )
         }
 
@@ -4107,10 +4190,11 @@ router.put("/:id", async (req, res) => {
               INSERT INTO detalles_medio_pago (
                 movimiento_id, medio_pago, monto, identificador, banco, fecha_cobro,
                 librador_endosante, numero_cheque, fecha_cheque, fecha_entrada, libro_cheque_id
-              ) VALUES ($1, 'cheque', $2, $3, $4, NULL, $5, $6, $7, $8, $9)
+              ) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10)
             `,
             [
               Number(id),
+              String(cheque.medio_pago || "cheque").toLowerCase(),
               roundMoney(Number(cheque.importe || 0)),
               String(cheque.numero_cheque || "").trim() || null,
               String(cheque.banco || "").trim() || null,
@@ -4616,9 +4700,9 @@ router.post("/libro-cheques/transferir", async (req, res) => {
         `
           INSERT INTO libro_cheques_caja (
             caja_codigo, medio_pago, movimiento_entrada_id, fecha_entrada,
-            librador_endosante, banco, numero_cheque, importe, fecha_cheque,
+            librador_endosante, banco, identificador, numero_cheque, importe, fecha_cheque,
             observaciones, estado, movimiento_salida_id, fecha_salida, endosado_a
-          ) VALUES ($1,'cheque',$2,$3,$4,$5,$6,$7,$8,$9,'disponible',NULL,NULL,NULL)
+          ) VALUES ($1,'cheque',$2,$3,$4,$5,$6,$7,$8,$9,$10,'disponible',NULL,NULL,NULL)
         `,
         [
           cajaDestino,
@@ -4626,6 +4710,7 @@ router.post("/libro-cheques/transferir", async (req, res) => {
           normalizarFechaISO(item.fecha_entrada) || fechaMovimiento,
           String(item.librador_endosante || ""),
           String(item.banco || ""),
+          String(item.identificador || ""),
           String(item.numero_cheque || ""),
           roundMoney(Number(item.importe || 0)),
           normalizarFechaISO(item.fecha_cheque) || fechaMovimiento,
@@ -4720,6 +4805,21 @@ router.delete("/:id", async (req, res) => {
 
     if (error) return res.status(400).json({ error: error.message })
     if (data.length === 0) return res.status(404).json({ error: "Movimiento no encontrado" })
+
+    if (Boolean(movimientoActual?.es_control_semanal)) {
+      await db
+        .from("cajas_semanales")
+        .update({
+          control_inicial_realizado: false,
+          control_inicial_movimiento_id: null,
+        })
+        .eq("id", movimientoActual.caja_semanal_id)
+
+      await db
+        .from("cajas_semanales_cheques_control")
+        .delete()
+        .eq("caja_semanal_id", movimientoActual.caja_semanal_id)
+    }
 
     await recalcularCajaSemanal(movimientoActual.caja_semanal_id)
 

@@ -143,6 +143,10 @@ export default {
     return api.put(`/clientes/${clienteId}/notas-credito/${notaCreditoId}`, payload)
   },
 
+  getNotaCreditoClientePdf(clienteId, notaCreditoId) {
+    return api.get(`/clientes/${clienteId}/notas-credito/${notaCreditoId}/pdf`, { responseType: "blob" })
+  },
+
   deleteNotaCreditoCliente(clienteId, notaCreditoId) {
     return api.delete(`/clientes/${clienteId}/notas-credito/${notaCreditoId}`)
   },
@@ -347,7 +351,7 @@ export default {
     return api.get(`/caja?${params.toString()}`)
   },
 
-  getResumenCajaPdf(fecha_inicio, fecha_fin, tipo, caja_codigo, resumen_modo = "general", busqueda, medio_pago, categoria_id) {
+  getResumenCajaPdf(fecha_inicio, fecha_fin, tipo, caja_codigo, resumen_modo = "general", busqueda, medio_pago, categoria_id, caja_semanal_id) {
       const params = new URLSearchParams()
       if (fecha_inicio) params.append("fecha_inicio", fecha_inicio)
       if (fecha_fin) params.append("fecha_fin", fecha_fin)
@@ -358,6 +362,9 @@ export default {
       if (medio_pago) params.append("medio_pago", medio_pago)
       if (categoria_id !== undefined && categoria_id !== null && String(categoria_id).trim() !== "") {
         params.append("categoria_id", String(categoria_id))
+      }
+      if (caja_semanal_id !== undefined && caja_semanal_id !== null && String(caja_semanal_id).trim() !== "") {
+        params.append("caja_semanal_id", String(caja_semanal_id))
       }
       return api.get(`/caja/resumen/pdf?${params.toString()}` , { responseType: "blob" })
     },
@@ -560,7 +567,10 @@ export default {
   },
 
   getCertificados() {
-    return api.get("/certificados")
+    return api.get("/certificados", {
+      params: { _ts: Date.now() },
+      headers: { "Cache-Control": "no-cache" },
+    })
   },
 
   getCertificadosResumenPorPresupuesto() {

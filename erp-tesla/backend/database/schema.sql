@@ -85,6 +85,7 @@ ALTER TABLE clientes ADD COLUMN IF NOT EXISTS nota_saldo_inicial_arrastre TEXT D
 
 CREATE TABLE IF NOT EXISTS notas_credito_cliente(
   id SERIAL PRIMARY KEY,
+  numero INTEGER,
   cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
   fecha DATE NOT NULL DEFAULT CURRENT_DATE,
   concepto TEXT NOT NULL DEFAULT '',
@@ -94,6 +95,21 @@ CREATE TABLE IF NOT EXISTS notas_credito_cliente(
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE notas_credito_cliente ADD COLUMN IF NOT EXISTS numero INTEGER;
+
+WITH numeradas AS (
+  SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS numero_calculado
+  FROM notas_credito_cliente
+  WHERE numero IS NULL
+)
+UPDATE notas_credito_cliente n
+SET numero = numeradas.numero_calculado
+FROM numeradas
+WHERE n.id = numeradas.id;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_notas_credito_cliente_numero
+  ON notas_credito_cliente(numero);
 
 CREATE TABLE IF NOT EXISTS notas_credito_cliente_presupuestos (
   nota_credito_id INTEGER NOT NULL REFERENCES notas_credito_cliente(id) ON DELETE CASCADE,
@@ -670,6 +686,7 @@ CREATE TABLE IF NOT EXISTS libro_cheques_caja (
   fecha_entrada DATE NOT NULL,
   librador_endosante TEXT NOT NULL,
   banco TEXT NOT NULL,
+  identificador TEXT,
   numero_cheque TEXT NOT NULL,
   importe NUMERIC(12,2) NOT NULL CHECK (importe > 0),
   fecha_cheque DATE NOT NULL,
@@ -680,6 +697,14 @@ CREATE TABLE IF NOT EXISTS libro_cheques_caja (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE libro_cheques_caja ADD COLUMN IF NOT EXISTS identificador TEXT;
+
+UPDATE libro_cheques_caja l
+SET identificador = NULLIF(BTRIM(d.identificador), '')
+FROM detalles_medio_pago d
+WHERE d.id = l.detalle_medio_pago_entrada_id
+  AND NULLIF(BTRIM(l.identificador), '') IS NULL;
 
 DO $$
 BEGIN

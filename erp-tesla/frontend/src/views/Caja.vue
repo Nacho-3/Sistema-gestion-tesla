@@ -77,6 +77,7 @@ const guardandoControlSemanal = ref(false)
 const chequesControlSemanalCandidatos = ref([])
 const chequesControlSemanalSeleccionados = ref([])
 const controlSemanalEfectivo = ref(0)
+const controlSemanalBanco = ref(0)
 const controlSemanalDetalle = ref("Control semanal inicial de caja")
 const controlSemanalObservaciones = ref("")
 const transferenciaChequesForm = ref({
@@ -330,11 +331,13 @@ const normalizarSemanaCaja = (semana, defaults = {}) => {
     fecha_fin: normalizarFechaSemana(fechaFinRaw),
     saldo_inicial: Number(semana.saldo_inicial ?? defaults.saldo_inicial ?? 0),
     saldo_inicial_efectivo: Number(semana.saldo_inicial_efectivo ?? defaults.saldo_inicial_efectivo ?? 0),
+    saldo_inicial_banco: Number(semana.saldo_inicial_banco ?? defaults.saldo_inicial_banco ?? 0),
     saldo_inicial_cheques: Number(semana.saldo_inicial_cheques ?? defaults.saldo_inicial_cheques ?? 0),
     total_ingresos: Number(semana.total_ingresos ?? defaults.total_ingresos ?? 0),
     total_egresos: Number(semana.total_egresos ?? defaults.total_egresos ?? 0),
     saldo_final: Number(semana.saldo_final ?? defaults.saldo_final ?? 0),
     saldo_final_efectivo: Number(semana.saldo_final_efectivo ?? defaults.saldo_final_efectivo ?? 0),
+    saldo_final_banco: Number(semana.saldo_final_banco ?? defaults.saldo_final_banco ?? 0),
     saldo_final_cheques: Number(semana.saldo_final_cheques ?? defaults.saldo_final_cheques ?? 0),
     saldo_banco: semana.saldo_banco === null || semana.saldo_banco === undefined ? null : Number(semana.saldo_banco),
     saldo_pendiente_echeq: semana.saldo_pendiente_echeq === null || semana.saldo_pendiente_echeq === undefined ? null : Number(semana.saldo_pendiente_echeq),
@@ -797,12 +800,14 @@ const rangoActivoDescripcion = computed(() => {
 
 const saldoInicialEfectivoSemana = computed(() => Number(semanaActiva.value?.saldo_inicial_efectivo || 0))
 const saldoInicialChequesSemana = computed(() => Number(semanaActiva.value?.saldo_inicial_cheques || 0))
-const saldoInicialSemana = computed(() => saldoInicialEfectivoSemana.value + saldoInicialChequesSemana.value)
+const saldoInicialBancoSemana = computed(() => Number(semanaActiva.value?.saldo_inicial_banco || 0))
+const saldoInicialSemana = computed(() => saldoInicialEfectivoSemana.value + saldoInicialBancoSemana.value + saldoInicialChequesSemana.value)
 const ingresosSemana = computed(() => Number(semanaActiva.value?.total_ingresos || 0))
 const egresosSemana = computed(() => Number(semanaActiva.value?.total_egresos || 0))
 const saldoFinalEfectivoSemana = computed(() => Number(semanaActiva.value?.saldo_final_efectivo || 0))
+const saldoFinalBancoSemana = computed(() => Number(semanaActiva.value?.saldo_final_banco || 0))
 const saldoFinalChequesSemana = computed(() => Number(semanaActiva.value?.saldo_final_cheques || 0))
-const saldoFinalSemana = computed(() => saldoFinalEfectivoSemana.value + saldoFinalChequesSemana.value)
+const saldoFinalSemana = computed(() => saldoFinalEfectivoSemana.value + saldoFinalBancoSemana.value + saldoFinalChequesSemana.value)
 const semanaEstaCerrada = computed(() => normalizarEstadoSemana(semanaActiva.value?.estado) === "cerrada")
 const movimientosSemanaActiva = computed(() => {
   if (!semanaActiva.value) return []
@@ -820,7 +825,9 @@ const totalChequesControlSemanal = computed(() => {
     .reduce((acc, item) => acc + Number(item.importe || 0), 0)
 })
 const totalControlSemanal = computed(() => {
-  return Number(controlSemanalEfectivo.value || 0) + Number(totalChequesControlSemanal.value || 0)
+  return Number(controlSemanalEfectivo.value || 0)
+    + Number(controlSemanalBanco.value || 0)
+    + Number(totalChequesControlSemanal.value || 0)
 })
 const todosChequesControlSeleccionados = computed(() => {
   const candidatos = chequesControlSemanalCandidatos.value || []
@@ -1347,7 +1354,10 @@ const descargarResumenPdf = async () => {
 }
 
 const descargarSemanaPdf = async () => {
-  if (!semanaActiva.value?.fecha_inicio || !semanaActiva.value?.fecha_fin) {
+  const fechaInicioSemana = semanaActiva.value?.fecha_inicio
+  const fechaFinSemana = semanaActiva.value?.fecha_fin || new Date().toISOString().slice(0, 10)
+
+  if (!fechaInicioSemana) {
     error.value = "Seleccioná una semana antes de descargar el PDF"
     return
   }
@@ -1362,18 +1372,22 @@ const descargarSemanaPdf = async () => {
   try {
     generandoPdf.value = true
     const res = await api.getResumenCajaPdf(
-      semanaActiva.value.fecha_inicio,
-      semanaActiva.value.fecha_fin,
+      fechaInicioSemana,
+      fechaFinSemana,
       filtroTipo.value,
       filtroCaja.value,
-      "semanal"
+      "semanal",
+      undefined,
+      undefined,
+      undefined,
+      extraerSemanaIdNumerica(semanaActiva.value?.id)
     )
 
     const blob = new Blob([res.data], { type: "application/pdf" })
     const url = window.URL.createObjectURL(blob)
     const link = document.createElement("a")
     link.href = url
-    link.download = `Resumen semanal ${textoCajaFiltro()} ${semanaActiva.value.fecha_inicio} al ${semanaActiva.value.fecha_fin}.pdf`
+    link.download = `Resumen semanal ${textoCajaFiltro()} ${fechaInicioSemana} al ${fechaFinSemana}.pdf`
     link.click()
     window.URL.revokeObjectURL(url)
   } catch (err) {
@@ -1836,7 +1850,7 @@ const normalizarDesglose = (detalles = []) => {
   detalles.forEach((item) => {
     const medio = String(item?.medio_pago || "").toLowerCase()
     if (Object.prototype.hasOwnProperty.call(base, medio)) {
-      base[medio] = parseFloat(item.monto) || 0
+      base[medio] += parseFloat(item.monto) || 0
     }
   })
 
@@ -1877,6 +1891,7 @@ const abrirModalControlSemanal = async () => {
     chequesControlSemanalCandidatos.value = Array.isArray(res.data) ? res.data : []
     chequesControlSemanalSeleccionados.value = (chequesControlSemanalCandidatos.value || []).map((item) => Number(item.id))
     controlSemanalEfectivo.value = 0
+    controlSemanalBanco.value = 0
     controlSemanalDetalle.value = "Control semanal inicial de caja"
     controlSemanalObservaciones.value = ""
     mostrarModalControlSemanal.value = true
@@ -1901,8 +1916,9 @@ const guardarControlSemanal = async () => {
   }
 
   const efectivo = Number(controlSemanalEfectivo.value || 0)
-  if (efectivo < 0) {
-    error.value = "El efectivo inicial no puede ser negativo"
+  const banco = Number(controlSemanalBanco.value || 0)
+  if (efectivo < 0 || banco < 0) {
+    error.value = "El efectivo y el banco iniciales no pueden ser negativos"
     return
   }
 
@@ -1914,6 +1930,7 @@ const guardarControlSemanal = async () => {
     guardandoControlSemanal.value = true
     await api.registrarControlSemanal(semanaId, {
       efectivo_inicial: efectivo,
+      banco_inicial: banco,
       cheques_controlados_ids: ids,
       detalle: String(controlSemanalDetalle.value || "").trim() || "Control semanal inicial de caja",
       observaciones: String(controlSemanalObservaciones.value || "").trim() || null,
@@ -3709,6 +3726,11 @@ onUnmounted(() => {
         <label class="form-group">
           <span>Efectivo inicial</span>
           <input v-model.number="controlSemanalEfectivo" type="number" step="0.01" min="0" />
+        </label>
+
+        <label class="form-group">
+          <span>Banco inicial</span>
+          <input v-model.number="controlSemanalBanco" type="number" step="0.01" min="0" />
         </label>
 
         <label class="form-group">

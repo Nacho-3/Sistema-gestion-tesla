@@ -429,6 +429,14 @@ router.get("/:id/pdf", async (req, res) => {
     }
 
     const detalles = Array.isArray(recibo.medio_pago_snapshot) ? recibo.medio_pago_snapshot : []
+    let cliente = null
+    if (recibo.cliente_id) {
+      const clienteQ = await db.query(
+        `SELECT razon_social, empresa, cuit, iva, direccion, telefono FROM clientes WHERE id = $1 LIMIT 1`,
+        [recibo.cliente_id]
+      )
+      cliente = clienteQ.rows?.[0] || null
+    }
     const doc = new PDFDocument({ size: "A4", margin: 45 })
     const chunks = []
     const pageWidth = doc.page.width
@@ -444,15 +452,48 @@ router.get("/:id/pdf", async (req, res) => {
 
     setupPremiumFooter(doc, { leftText: "Tesla Montajes Electricos - Recibo" })
 
-    const headerBottom = drawPremiumHeader(doc, {
-      title: "TESLA MONTAJES ELECTRICOS",
-      subtitle: "",
-      accentText: "Recibo",
-      logoPath: LOGO_PATH,
-    })
+    const left = 45
+    const right = pageWidth - 45
+    const width = right - left
+    const lineColor = "#1f1f1f"
+    const safe = (value) => sanitizeText(value) || "-"
+    let headerY = 22
+
+    doc.strokeColor(lineColor).lineWidth(1).moveTo(left, headerY + 50).lineTo(right, headerY + 50).stroke()
+    doc.strokeColor("#7a7a7a").lineWidth(0.6).moveTo(left, headerY + 54).lineTo(right, headerY + 54).stroke()
+    doc.font("Helvetica-Bold").fontSize(28).fillColor("#111")
+    doc.text("RECIBO", left, headerY + 14, { width, align: "center" })
+
+    headerY += 64
+    const blockGap = 12
+    const blockW = (width - blockGap) / 2
+    const blockH = 116
+    const logoBandW = 82
+    doc.rect(left, headerY, blockW, blockH).lineWidth(0.8).strokeColor(lineColor).stroke()
+    doc.image(LOGO_PATH, left + blockW - logoBandW - 4, headerY + 23, { fit: [78, 56], align: "center", valign: "center" })
+    const empresaTextW = blockW - logoBandW - 14
+    doc.font("Helvetica-Bold").fontSize(9).fillColor("#111").text("EMPRESA", left + 8, headerY + 6)
+    doc.font("Helvetica").fontSize(8.1)
+    doc.text("Tesla Montajes Electricos", left + 8, headerY + 21, { width: empresaTextW, lineBreak: false })
+    doc.text("CUIT: 30-71712557-2", left + 8, headerY + 34, { width: empresaTextW, lineBreak: false })
+    doc.text("IVA: Responsable Inscripto", left + 8, headerY + 47, { width: empresaTextW, lineBreak: false })
+    doc.text("Echeverria 197 - San Francisco (Cba.)", left + 8, headerY + 60, { width: empresaTextW, lineBreak: false })
+    doc.text("03564-15642579/15573800/15586865", left + 8, headerY + 73, { width: empresaTextW, lineBreak: false })
+    doc.text("teslamontajeselectricos@hotmail.com", left + 8, headerY + 86, { width: empresaTextW, lineBreak: false })
+    doc.text("www.teslamontajeselectricos.com.ar", left + 8, headerY + 99, { width: empresaTextW, lineBreak: false })
+
+    const rightBoxX = left + blockW + blockGap
+    doc.rect(rightBoxX, headerY, blockW, blockH).lineWidth(0.8).strokeColor(lineColor).stroke()
+    doc.font("Helvetica-Bold").fontSize(9).fillColor("#111").text("CLIENTE", rightBoxX + 8, headerY + 6)
+    doc.font("Helvetica").fontSize(8.4)
+    doc.text(`Empresa: ${safe(cliente?.empresa || cliente?.razon_social || recibo.pagador_nombre)}`, rightBoxX + 8, headerY + 21, { width: blockW - 16, lineBreak: false })
+    doc.text(`CUIT: ${safe(cliente?.cuit)}`, rightBoxX + 8, headerY + 34, { width: blockW - 16, lineBreak: false })
+    doc.text(`IVA: ${safe(cliente?.iva)}`, rightBoxX + 8, headerY + 47, { width: blockW - 16, lineBreak: false })
+    doc.text(`Direccion: ${safe(cliente?.direccion)}`, rightBoxX + 8, headerY + 60, { width: blockW - 16, lineBreak: false })
+    doc.text(`Telefono: ${safe(cliente?.telefono)}`, rightBoxX + 8, headerY + 73, { width: blockW - 16, lineBreak: false })
 
     doc.fillColor(PDF_COLORS.ink)
-    doc.y = headerBottom + 10
+    doc.y = headerY + blockH + 12
 
     // Información principal del recibo - RECUADRO GRANDE
     const infoY = doc.y
