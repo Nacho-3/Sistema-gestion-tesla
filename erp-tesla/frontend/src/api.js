@@ -530,6 +530,10 @@ export default {
     return api.get(query ? `/presupuestos?${query}` : "/presupuestos")
   },
 
+  getCertificados() {
+    return api.get("/certificados")
+  },
+
   getPresupuesto(id) {
     return api.get(`/presupuestos/${id}`)
   },

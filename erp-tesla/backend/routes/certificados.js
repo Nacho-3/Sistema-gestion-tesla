@@ -241,7 +241,8 @@ const recalcularCertificadosPresupuesto = async (client, presupuestoId) => {
 	const presupuesto = presupuestoResult.rows[0]
 	const certificadosResult = await client.query(
 		`
-			SELECT id, secuencia, tipo_registro, porcentaje_avance, monto_base, indice_cac, indice_base_cac, indice_actual_cac, aplica_iva, iva_porcentaje, pagos
+			SELECT id, secuencia, tipo_registro, porcentaje_avance, monto_base, indice_cac, indice_base_cac, indice_actual_cac, aplica_iva, iva_porcentaje, pagos,
+				COALESCE((SELECT SUM(mcc.monto_asignado) FROM movimientos_caja_certificados mcc WHERE mcc.certificado_id = certificados.id), 0) AS pagos_caja
 			FROM certificados
 			WHERE presupuesto_id = $1
 			ORDER BY secuencia ASC, id ASC
@@ -251,7 +252,11 @@ const recalcularCertificadosPresupuesto = async (client, presupuestoId) => {
 
 	let acumuladoPrevio = 0
 	for (const row of certificadosResult.rows) {
-		const calculado = calcularCertificado({ presupuesto, input: row, acumuladoPrevio })
+		const calculado = calcularCertificado({
+			presupuesto,
+			input: { ...row, pagos: Number(row.pagos_caja || 0) > 0 ? row.pagos_caja : row.pagos },
+			acumuladoPrevio,
+		})
 		await client.query(
 			`
 				UPDATE certificados
@@ -309,6 +314,7 @@ router.get("/", async (req, res) => {
 		const result = await pool.query(`
 			SELECT
 				c.*,
+				COALESCE((SELECT SUM(mcc.monto_asignado) FROM movimientos_caja_certificados mcc WHERE mcc.certificado_id = c.id), 0) AS pagos_caja,
 				p.numero AS presupuesto_numero,
 				p.estado AS presupuesto_estado,
 				cl.razon_social AS cliente,
@@ -320,7 +326,12 @@ router.get("/", async (req, res) => {
 			ORDER BY p.numero DESC, c.secuencia DESC
 		`)
 
-		res.json(result.rows.map(mapCertificado))
+		res.json(result.rows.map((row) => {
+			const pagos = Number(row.pagos_caja || 0) > 0 ? Number(row.pagos_caja) : Number(row.pagos || 0)
+			const certificado = mapCertificado({ ...row, pagos })
+			certificado.saldo_pendiente = Math.max(0, certificado.total_cert_con_iva - pagos)
+			return certificado
+		}))
 	} catch (err) {
 		res.status(500).json({ error: err.message })
 	}
@@ -352,6 +363,34 @@ router.get("/resumen-por-presupuesto", async (req, res) => {
 			total_certificado_con_iva: toNumber(row.total_certificado_con_iva),
 			total_pagado_certificados: toNumber(row.total_pagado_certificados),
 			tiene_pendientes: Boolean(row.tiene_pendientes),
+		})))
+	} catch (err) {
+		res.status(500).json({ error: err.message })
+	}
+})
+
+router.get("/por-presupuesto/:presupuestoId", async (req, res) => {
+	try {
+		const presupuestoId = Number(req.params.presupuestoId)
+		if (!Number.isInteger(presupuestoId) || presupuestoId <= 0) {
+			return res.status(400).json({ error: "ID de presupuesto invalido" })
+		}
+
+		const result = await pool.query(
+			`
+				SELECT c.*,
+					COALESCE((SELECT SUM(mcc.monto_asignado) FROM movimientos_caja_certificados mcc WHERE mcc.certificado_id = c.id), 0) AS pagos_asignados,
+					GREATEST(c.total_cert_con_iva - COALESCE((SELECT SUM(mcc.monto_asignado) FROM movimientos_caja_certificados mcc WHERE mcc.certificado_id = c.id), 0), 0) AS saldo_calculado
+				FROM certificados c
+				WHERE c.presupuesto_id = $1
+				ORDER BY c.secuencia ASC, c.id ASC
+			`,
+			[presupuestoId]
+		)
+		res.json(result.rows.map((row) => ({
+			...mapCertificado(row),
+			pagos_asignados: toNumber(row.pagos_asignados),
+			saldo_calculado: toNumber(row.saldo_calculado),
 		})))
 	} catch (err) {
 		res.status(500).json({ error: err.message })

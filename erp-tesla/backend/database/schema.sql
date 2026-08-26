@@ -744,6 +744,7 @@ CREATE TABLE IF NOT EXISTS presupuestos (
   validez_dias INTEGER NOT NULL DEFAULT 15,
   estado VARCHAR(20) NOT NULL DEFAULT 'pendiente',
   forma_pago VARCHAR(120) DEFAULT 'Contado',
+  usa_certificados BOOLEAN NOT NULL DEFAULT FALSE,
   observaciones TEXT DEFAULT '',
   subtotal_materiales NUMERIC(12,2) NOT NULL DEFAULT 0,
   subtotal_mano_obra NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -784,6 +785,8 @@ ALTER TABLE IF EXISTS presupuestos
   ADD COLUMN IF NOT EXISTS info_interna_quien_hizo_pdf BOOLEAN NOT NULL DEFAULT FALSE,
   ADD COLUMN IF NOT EXISTS info_interna_quien_aprobo TEXT DEFAULT '',
   ADD COLUMN IF NOT EXISTS info_interna_quien_aprobo_pdf BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE IF EXISTS presupuestos
+  ADD COLUMN IF NOT EXISTS usa_certificados BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS presupuesto_items (
   id SERIAL PRIMARY KEY,
@@ -842,6 +845,20 @@ CREATE TABLE IF NOT EXISTS certificados (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS movimientos_caja_certificados (
+  id SERIAL PRIMARY KEY,
+  movimiento_id INTEGER NOT NULL REFERENCES movimientos_caja(id) ON DELETE CASCADE,
+  certificado_id INTEGER NOT NULL REFERENCES certificados(id) ON DELETE CASCADE,
+  monto_asignado NUMERIC(12,2) NOT NULL CHECK (monto_asignado > 0),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (movimiento_id, certificado_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_movimientos_caja_certificados_movimiento
+  ON movimientos_caja_certificados(movimiento_id);
+CREATE INDEX IF NOT EXISTS idx_movimientos_caja_certificados_certificado
+  ON movimientos_caja_certificados(certificado_id);
 
 ALTER TABLE certificados ADD COLUMN IF NOT EXISTS secuencia INTEGER;
 ALTER TABLE certificados ADD COLUMN IF NOT EXISTS estado VARCHAR(20) NOT NULL DEFAULT 'pendiente';

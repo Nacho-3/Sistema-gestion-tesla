@@ -52,6 +52,7 @@ const clienteSeleccionado = ref(null)
 const obrasCliente = ref([])
 const presupuestosCliente = ref([])
 const presupuestosAceptados = ref([])
+const certificadosCliente = ref([])
 const loadingPresupuestosCliente = ref(false)
 const presupuestosInicializados = ref(false)
 const downloadingPdf = ref(false)
@@ -284,7 +285,8 @@ const notasCreditoPorPresupuesto = computed(() => {
 })
 
 const estadoCuentaPresupuestos = computed(() => {
-  return (presupuestosAceptados.value || []).map((p) => {
+  const presupuestosDirectos = (presupuestosAceptados.value || []).filter((p) => !Boolean(p.usa_certificados))
+  const presupuestosCuenta = presupuestosDirectos.map((p) => {
     const totalOriginal = Number(p.total) || 0
     const totalIva = Number(p.total_iva ?? p.iva_monto ?? 0) || 0
     const totalSinIva = Number(p.total_sin_iva ?? (totalOriginal - totalIva)) || 0
@@ -320,6 +322,32 @@ const estadoCuentaPresupuestos = computed(() => {
       deuda_computable: deudaComputable,
     }
   })
+
+  const certificadosCuenta = (certificadosCliente.value || [])
+    .filter((certificado) => Number(certificado.saldo_pendiente || 0) >= 0)
+    .map((certificado) => {
+      const total = Number(certificado.total_cert_con_iva) || 0
+      const pagado = Number(certificado.pagos) || 0
+      return {
+        id: `certificado-${certificado.id}`,
+        certificado_id: certificado.id,
+        numero: certificado.presupuesto_numero,
+        certificado_numero: certificado.secuencia,
+        fecha: certificado.fecha,
+        obra: certificado.obra || "Sin obra",
+        moneda: "ARS",
+        total_original: total,
+        total_sin_iva: Number(certificado.total_cert_sin_iva) || total,
+        total_iva: Number(certificado.iva) || 0,
+        total,
+        pagado,
+        saldo_pendiente: Math.max(0, total - pagado),
+        saldo_a_favor: 0,
+        estado_cobro: pagado <= 0 ? "pendiente" : (pagado < total ? "parcial" : "pagado"),
+      }
+    })
+
+  return [...presupuestosCuenta, ...certificadosCuenta]
 })
 
 const totalDebeCliente = computed(() =>
@@ -550,17 +578,24 @@ const cargarPresupuestosCliente = async (clienteId) => {
   loadingPresupuestosCliente.value = true
   try {
     let resPresupuestos
+    let resCertificados
     try {
       // Fast path: backend-side filter when available.
       resPresupuestos = await api.getPresupuestos(clienteId)
+      resCertificados = await api.getCertificados()
     } catch (errFiltrado) {
       console.warn("Fallo carga filtrada de presupuestos; aplicando fallback general:", errFiltrado)
       resPresupuestos = await api.getPresupuestos()
+      resCertificados = await api.getCertificados()
     }
 
     const presupuestos = (resPresupuestos.data || []).filter(p => Number(p.cliente_id) === Number(clienteId))
     const isAceptado = (p) => ["aprobado", "aceptado"].includes(String(p.estado || "").toLowerCase().trim())
     presupuestosAceptados.value = presupuestos.filter(isAceptado)
+    certificadosCliente.value = (resCertificados.data || []).filter((certificado) => {
+      const presupuesto = presupuestos.find((item) => Number(item.id) === Number(certificado.presupuesto_id))
+      return Boolean(presupuesto?.usa_certificados)
+    })
     presupuestosCliente.value = presupuestos.filter(p => !isAceptado(p))
     presupuestosInicializados.value = true
   } catch (err) {
@@ -647,6 +682,7 @@ const volverALista = () => {
   obrasCliente.value = []
   presupuestosCliente.value = []
   presupuestosAceptados.value = []
+  certificadosCliente.value = []
   presupuestosInicializados.value = false
   notasCreditoCliente.value = []
   recibosCliente.value = []
@@ -1414,7 +1450,10 @@ onBeforeUnmount(() => {
               </thead>
               <tbody>
                 <tr v-for="p in estadoCuentaPresupuestos" :key="p.id">
-                  <td>#{{ p.numero }}</td>
+                  <td>
+                    <template v-if="p.certificado_id">#{{ p.numero }} / Cert. {{ p.certificado_numero }}</template>
+                    <template v-else>#{{ p.numero }}</template>
+                  </td>
                   <td>{{ new Date(p.fecha).toLocaleDateString('es-AR') }}</td>
                   <td>{{ p.obra || 'Sin obra' }}</td>
                   <td>{{ p.moneda || 'ARS' }}</td>
@@ -1489,7 +1528,7 @@ onBeforeUnmount(() => {
         <!-- Certificados asociados -->
         <div class="ficha-seccion">
           <h3>📋 Certificados asociados</h3>
-          <p class="sin-datos">Funcionalidad disponible cuando se implemente el módulo de Certificados</p>
+          <p class="sin-datos">Los certificados se muestran dentro del estado de cuenta del presupuesto correspondiente.</p>
         </div>
 
         <!-- Facturas registradas -->

@@ -278,7 +278,7 @@ router.get("/:id/ficha-pdf", async (req, res) => {
     const presupuestosTieneMoneda = await hasTableColumn("presupuestos", "moneda")
     const movimientosTienePresupuestoId = await hasTableColumn("movimientos_caja", "presupuesto_id")
 
-    const selectPresupuestos = ["id", "numero", "fecha", "estado", "total", "obra_id"]
+    const selectPresupuestos = ["id", "numero", "fecha", "estado", "total", "obra_id", "usa_certificados"]
     if (presupuestosTieneIvaMonto) {
       selectPresupuestos.push("iva_monto")
     }
@@ -317,6 +317,19 @@ router.get("/:id/ficha-pdf", async (req, res) => {
     const isAceptado = (p) => ["aprobado", "aceptado"].includes(String(p.estado || "").toLowerCase())
     const saldoInicialArrastre = roundMoney(cliente?.saldo_inicial_arrastre)
     const presupuestosAceptadosList = presupuestosList.filter(isAceptado)
+    const certificadosQ = await pool.query(
+      `
+        SELECT c.id, c.presupuesto_id, c.numero, c.secuencia, c.fecha, c.total_cert_con_iva,
+          COALESCE((SELECT SUM(mcc.monto_asignado) FROM movimientos_caja_certificados mcc WHERE mcc.certificado_id = c.id), 0) AS pagos_asignados,
+          p.numero AS presupuesto_numero, p.obra_id
+        FROM certificados c
+        INNER JOIN presupuestos p ON p.id = c.presupuesto_id
+        WHERE p.cliente_id = $1
+        ORDER BY c.fecha ASC, c.secuencia ASC, c.id ASC
+      `,
+      [id]
+    )
+    const certificadosList = certificadosQ.rows || []
     const pagosImputadosPorPresupuesto = new Map()
     const pagosNoImputadosList = []
     movimientosList.forEach((mov) => {
@@ -329,7 +342,9 @@ router.get("/:id/ficha-pdf", async (req, res) => {
       }
     })
 
-    const estadoCuenta = presupuestosAceptadosList.map((p) => {
+    const estadoCuentaPresupuestos = presupuestosAceptadosList
+      .filter((p) => !Boolean(p.usa_certificados))
+      .map((p) => {
       const total = roundMoney(p.total)
       const iva = roundMoney(p.iva_monto)
       const sinIva = roundMoney(total - iva)
@@ -352,7 +367,30 @@ router.get("/:id/ficha-pdf", async (req, res) => {
         saldo_a_favor: saldoAFavor,
         estado_cobro: estadoCobro,
       }
+      })
+
+    const estadoCuentaCertificados = certificadosList.map((certificado) => {
+      const total = roundMoney(certificado.total_cert_con_iva)
+      const pagado = roundMoney(certificado.pagos_asignados)
+      const saldoPendiente = roundMoney(Math.max(0, total - pagado))
+      return {
+        presupuesto_id: Number(certificado.presupuesto_id),
+        certificado_id: Number(certificado.id),
+        numero: certificado.presupuesto_numero,
+        certificado_numero: certificado.secuencia,
+        fecha: certificado.fecha,
+        obra: obraNombrePorId.get(Number(certificado.obra_id)) || "Sin obra",
+        moneda: "ARS",
+        sin_iva: total,
+        iva: 0,
+        total,
+        pagado,
+        saldo_pendiente: saldoPendiente,
+        saldo_a_favor: 0,
+        estado_cobro: pagado <= 0 ? "Pendiente" : (saldoPendiente > 0 ? "Parcial" : "Pagado"),
+      }
     })
+    const estadoCuenta = [...estadoCuentaPresupuestos, ...estadoCuentaCertificados]
 
     const totalCargosPresupuestos = roundMoney(estadoCuenta.reduce((acc, item) => acc + item.total, 0))
     const totalPagosCaja = roundMoney(movimientosList.reduce((acc, mov) => acc + roundMoney(mov.monto_total), 0))

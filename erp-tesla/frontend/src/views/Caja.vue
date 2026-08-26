@@ -17,6 +17,7 @@ const CAJAS_DISPONIBLES = [
 const movimientos = ref([])
 const clientes = ref([])
 const presupuestos = ref([])
+const certificados = ref([])
 const vistaActual = ref("lista") // "lista" o "detalle"
 const movimientoSeleccionado = ref(null)
 const loading = ref(false)
@@ -175,6 +176,7 @@ const form = ref({
   presupuesto_id: "",
   presupuesto_ids: [],
   presupuestos_asignaciones: [],
+  certificados_asignaciones: [],
   detalle: "",
   observaciones: "",
   monto_total: 0,
@@ -676,6 +678,12 @@ const esFormularioValido = computed(() => {
   })
   if (!chequesValidos) return false
 
+  const certificadosSeleccionados = form.value.certificados_asignaciones || []
+  if (certificadosSeleccionados.length > 0) {
+    const totalCertificados = certificadosSeleccionados.reduce((sum, item) => sum + Number(item?.monto_asignado || 0), 0)
+    if (Math.abs(totalCertificados - Number(form.value.monto_total || 0)) >= 0.01) return false
+  }
+
   if (form.value.tipo === "egreso" && usaLibroCualquiera.value) {
     if (!Array.isArray(form.value.cheques_salida) || form.value.cheques_salida.length === 0) return false
     if (!String(form.value.endosado_a_cheques || "").trim()) return false
@@ -866,9 +874,33 @@ const presupuestosDisponibles = computed(() => {
   return presupuestos.value.filter((p) => {
     const mismoCliente = String(p.cliente_id) === String(form.value.cliente_id)
     const saldoPendiente = Number(p?.saldo_pendiente_cobro || 0)
-    return mismoCliente && saldoPendiente > 0.009
+    return mismoCliente && !Boolean(p.usa_certificados) && saldoPendiente > 0.009
   })
 })
+
+const certificadosDisponibles = computed(() => {
+  if (!form.value.cliente_id) return []
+  return (certificados.value || []).filter((certificado) => {
+    const presupuesto = presupuestos.value.find((item) => Number(item.id) === Number(certificado.presupuesto_id))
+    return Number(presupuesto?.cliente_id) === Number(form.value.cliente_id)
+      && Boolean(presupuesto?.usa_certificados)
+      && Number(certificado.saldo_pendiente || 0) > 0.009
+  })
+})
+
+const toggleCertificadoPago = (certificado, seleccionado) => {
+  const asignaciones = [...(form.value.certificados_asignaciones || [])]
+  const id = Number(certificado.id)
+  const index = asignaciones.findIndex((item) => Number(item.certificado_id) === id)
+  if (seleccionado && index < 0) {
+    form.value.presupuesto_ids = []
+    form.value.presupuestos_asignaciones = []
+    asignaciones.push({ certificado_id: id, monto_asignado: 0 })
+  } else if (!seleccionado && index >= 0) {
+    asignaciones.splice(index, 1)
+  }
+  form.value.certificados_asignaciones = asignaciones
+}
 
 const totalAsignadoPresupuestosDraft = computed(() => {
   return (asignacionesDraft.value || []).reduce((acc, item) => acc + Number(item?.monto_asignado || 0), 0)
@@ -960,13 +992,15 @@ const cargarDatos = async () => {
 
 const cargarReferencias = async () => {
   try {
-    const [resClientes, resPresupuestos] = await Promise.all([
+    const [resClientes, resPresupuestos, resCertificados] = await Promise.all([
       api.getClientes(),
-      api.getPresupuestos()
+      api.getPresupuestos(),
+      api.getCertificados()
     ])
 
     clientes.value = resClientes.data || []
     presupuestos.value = resPresupuestos.data || []
+    certificados.value = resCertificados.data || []
   } catch (err) {
     console.error("Error cargando clientes/presupuestos:", err)
   }
@@ -2162,6 +2196,10 @@ const payloadMovimiento = () => ({
   detalle: form.value.detalle,
   observaciones: String(form.value.observaciones || "").trim() || null,
   monto_total: parseFloat(form.value.monto_total),
+  certificados_asignaciones: (form.value.certificados_asignaciones || []).map((item) => ({
+    certificado_id: Number(item.certificado_id),
+    monto_asignado: Number(item.monto_asignado) || 0,
+  })),
   desglose: {
     efectivo: parseFloat(form.value.desglose.efectivo) || 0,
     transferencia: parseFloat(form.value.desglose.transferencia) || 0,
@@ -3958,6 +3996,22 @@ onUnmounted(() => {
                 <small v-if="(form.presupuestos_asignaciones || []).length">
                   Asignado: {{ formatoMoneda((form.presupuestos_asignaciones || []).reduce((acc, item) => acc + Number(item?.monto_asignado || 0), 0)) }} / {{ formatoMoneda(form.monto_total || 0) }}
                 </small>
+              </div>
+              <div v-if="certificadosDisponibles.length" class="presupuestos-checklist">
+                <span class="form-help">Certificados pendientes</span>
+                <label v-for="certificado in certificadosDisponibles" :key="`cert-${certificado.id}`" class="presupuesto-check-item">
+                  <input
+                    type="checkbox"
+                    :checked="(form.certificados_asignaciones || []).some((item) => Number(item.certificado_id) === Number(certificado.id))"
+                    @change="toggleCertificadoPago(certificado, $event.target.checked)"
+                  />
+                  <span>Presupuesto #{{ certificado.numero }} · Certificado {{ certificado.secuencia }} · {{ formatoMoneda(certificado.total_cert_con_iva || 0) }} total</span>
+                </label>
+                <div v-for="asignacion in form.certificados_asignaciones" :key="`cert-amount-${asignacion.certificado_id}`" class="presupuesto-asignacion-row">
+                  <span>Certificado {{ certificadosDisponibles.find((item) => Number(item.id) === Number(asignacion.certificado_id))?.secuencia }}</span>
+                  <input v-model.number="asignacion.monto_asignado" type="number" min="0" step="0.01" placeholder="Monto asignado" />
+                </div>
+                <small class="form-help">La suma asignada debe coincidir con el monto total del ingreso.</small>
               </div>
             </div>
           </div>

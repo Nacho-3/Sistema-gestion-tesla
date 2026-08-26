@@ -1489,6 +1489,62 @@ function normalizarPresupuestosAsignaciones(asignacionesRaw = []) {
     .filter((item) => Number.isInteger(item.presupuesto_id) && item.presupuesto_id > 0 && item.monto_asignado > 0)
 }
 
+function normalizarCertificadosAsignaciones(asignacionesRaw = []) {
+  if (!Array.isArray(asignacionesRaw)) return []
+  return asignacionesRaw
+    .map((item) => ({
+      certificado_id: Number(item?.certificado_id || item?.id || 0),
+      monto_asignado: roundMoney(Number(item?.monto_asignado ?? item?.monto ?? 0)),
+    }))
+    .filter((item) => Number.isInteger(item.certificado_id) && item.certificado_id > 0 && item.monto_asignado > 0)
+}
+
+async function validarAsignacionesCertificados({ client, asignaciones = [], clienteId, montoTotal, excluirMovimientoId = null }) {
+  const normalizadas = normalizarCertificadosAsignaciones(asignaciones)
+  if (!normalizadas.length) return []
+  if (new Set(normalizadas.map((item) => item.certificado_id)).size !== normalizadas.length) {
+    throw new Error("Hay certificados repetidos en la imputación")
+  }
+
+  const ids = normalizadas.map((item) => item.certificado_id)
+  const excluirId = Number(excluirMovimientoId || 0)
+  const result = await client.query(
+    `
+      SELECT c.id, c.presupuesto_id, c.total_cert_con_iva,
+        COALESCE((SELECT SUM(mcc.monto_asignado) FROM movimientos_caja_certificados mcc WHERE mcc.certificado_id = c.id AND ($2 = 0 OR mcc.movimiento_id <> $2)), 0) AS pagos_asignados,
+        p.cliente_id, p.usa_certificados
+      FROM certificados c
+      INNER JOIN presupuestos p ON p.id = c.presupuesto_id
+      WHERE c.id = ANY($1::int[])
+    `,
+    [ids, excluirId]
+  )
+  if (result.rows.length !== ids.length) throw new Error("Uno o más certificados son inválidos")
+
+  for (const item of normalizadas) {
+    const certificado = result.rows.find((row) => Number(row.id) === item.certificado_id)
+    if (clienteId && Number(certificado.cliente_id) !== Number(clienteId)) throw new Error("El certificado no pertenece al cliente indicado")
+    if (!certificado.usa_certificados) throw new Error("El presupuesto del certificado no está marcado para trabajar con certificados")
+    const saldo = Number(certificado.total_cert_con_iva || 0) - Number(certificado.pagos_asignados || 0)
+    if (item.monto_asignado - saldo > 0.01) throw new Error(`La asignación supera el saldo del certificado ${item.certificado_id}`)
+  }
+
+  const suma = roundMoney(normalizadas.reduce((acc, item) => acc + item.monto_asignado, 0))
+  if (Math.abs(suma - roundMoney(montoTotal)) > 0.01) throw new Error("La suma asignada a certificados debe coincidir con el monto total")
+  return normalizadas
+}
+
+async function sincronizarMovimientosCajaCertificados({ client, movimientoId, asignaciones = [] }) {
+  await client.query("DELETE FROM movimientos_caja_certificados WHERE movimiento_id = $1", [movimientoId])
+  const normalizadas = normalizarCertificadosAsignaciones(asignaciones)
+  for (const item of normalizadas) {
+    await client.query(
+      `INSERT INTO movimientos_caja_certificados (movimiento_id, certificado_id, monto_asignado) VALUES ($1, $2, $3)`,
+      [movimientoId, item.certificado_id, item.monto_asignado]
+    )
+  }
+}
+
 function construirAsignacionesPresupuestos({ presupuestosIds = [], asignacionesRaw = [], montoTotal = 0 }) {
   const ids = Array.from(new Set((presupuestosIds || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)))
   if (!ids.length) return []
@@ -1532,7 +1588,7 @@ async function validarPresupuestosCliente(presupuestosIds = [], clienteId = null
 
   const result = await pool.query(
     `
-      SELECT id, cliente_id
+      SELECT id, cliente_id, usa_certificados
       FROM presupuestos
       WHERE id = ANY($1::int[])
     `,
@@ -1549,6 +1605,10 @@ async function validarPresupuestosCliente(presupuestosIds = [], clienteId = null
     if (invalido) {
       throw new Error("Uno o más presupuestos seleccionados no pertenecen al cliente indicado")
     }
+  }
+
+  if (presupuestos.some((presupuesto) => Boolean(presupuesto.usa_certificados))) {
+    throw new Error("Este presupuesto se cobra mediante certificados; seleccione uno o más certificados")
   }
 
   return presupuestos
@@ -3722,6 +3782,7 @@ router.post("/", async (req, res) => {
       presupuesto_ids,
       caja_semanal_id,
       presupuestos_asignaciones,
+      certificados_asignaciones,
       destinatario,
       cheques_salida,
       fecha_salida_cheques,
@@ -3842,6 +3903,21 @@ router.post("/", async (req, res) => {
     }
     await validarPresupuestosCliente(presupuestoIdsFinal, cliente_id)
 
+    const clientCertificados = await pool.connect()
+    let certificadosAsignacionesFinal = []
+    try {
+      certificadosAsignacionesFinal = tipoNormalizado === "ingreso"
+        ? await validarAsignacionesCertificados({
+          client: clientCertificados,
+          asignaciones: certificados_asignaciones,
+          clienteId: cliente_id,
+          montoTotal: montoTotalNormalizado,
+        })
+        : []
+    } finally {
+      clientCertificados.release()
+    }
+
     // Crear movimiento (solo los campos básicos, sin desglose)
     const { data: movimiento, error: errorMovimiento } = await db
       .from("movimientos_caja")
@@ -3923,6 +3999,12 @@ router.post("/", async (req, res) => {
           presupuestosAsignaciones: tipoNormalizado === "ingreso" ? presupuestosAsignacionesFinal : [],
         })
 
+        await sincronizarMovimientosCajaCertificados({
+          client,
+          movimientoId,
+          asignaciones: tipoNormalizado === "ingreso" ? certificadosAsignacionesFinal : [],
+        })
+
         if (tipoNormalizado === "ingreso") {
           await crearChequesLibroDesdeIngreso({
             client,
@@ -3972,6 +4054,10 @@ router.post("/", async (req, res) => {
     }
 
     getIo()?.emit('caja:changed')
+    if (tipoNormalizado === "ingreso" && certificadosAsignacionesFinal.length > 0) {
+      getIo()?.emit('certificados:changed')
+      getIo()?.emit('clientes:changed')
+    }
     res.status(201).json(movimientoCompletoNormalizado)
   } catch (err) {
     console.error("Error en POST /caja:", err)
@@ -4000,6 +4086,7 @@ router.put("/:id", async (req, res) => {
       presupuesto_ids,
       caja_semanal_id,
       presupuestos_asignaciones,
+      certificados_asignaciones,
       destinatario,
       cheques_salida,
       fecha_salida_cheques,
@@ -4323,6 +4410,22 @@ router.put("/:id", async (req, res) => {
       )
       : []
 
+    const clientCertificados = await pool.connect()
+    let certificadosAsignacionesFinal = []
+    try {
+      certificadosAsignacionesFinal = tipoFinal === "ingreso"
+        ? await validarAsignacionesCertificados({
+          client: clientCertificados,
+          asignaciones: certificados_asignaciones,
+          clienteId: clienteFinal,
+          montoTotal: montoTotalFinal,
+          excluirMovimientoId: id,
+        })
+        : []
+    } finally {
+      clientCertificados.release()
+    }
+
     if (presupuestoIdsFinal.length === 1) {
       await validarPresupuestoCliente(presupuestoIdsFinal[0], clienteFinal)
     }
@@ -4495,6 +4598,11 @@ router.put("/:id", async (req, res) => {
         movimientoId: id,
         presupuestosIds: tipoFinal === "ingreso" ? presupuestoIdsFinal : [],
         presupuestosAsignaciones: tipoFinal === "ingreso" ? presupuestosAsignacionesFinal : [],
+      })
+      await sincronizarMovimientosCajaCertificados({
+        client,
+        movimientoId: id,
+        asignaciones: tipoFinal === "ingreso" ? certificadosAsignacionesFinal : [],
       })
     } finally {
       clientPresupuestos.release()
