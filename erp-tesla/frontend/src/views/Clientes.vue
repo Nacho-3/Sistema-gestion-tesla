@@ -52,12 +52,22 @@ const clienteSeleccionado = ref(null)
 const obrasCliente = ref([])
 const presupuestosCliente = ref([])
 const presupuestosAceptados = ref([])
+const certificadosCliente = ref([])
 const loadingPresupuestosCliente = ref(false)
 const presupuestosInicializados = ref(false)
 const downloadingPdf = ref(false)
 const downloadingHistoricoPdf = ref(false)
 const filtroBusqueda = ref("")
 const filtroIva = ref("")
+
+const certificadosClienteOrdenados = computed(() =>
+  [...(certificadosCliente.value || [])].sort((a, b) => {
+    const numA = Number(a.presupuesto_numero) || 0
+    const numB = Number(b.presupuesto_numero) || 0
+    if (numA !== numB) return numB - numA
+    return (Number(a.secuencia) || 0) - (Number(b.secuencia) || 0)
+  })
+)
 
 // Formulario
 const form = ref({
@@ -170,9 +180,8 @@ const esEstadoAceptado = (estado) => ["aceptado", "aprobado"].includes(String(es
 const calcularEstadoCobro = (deudaComputable, total, pagado) => {
   if (!deudaComputable) return "sin_deuda"
   if (pagado <= 0) return "pendiente"
-  if (pagado < total) return "parcial"
-  if (pagado === total) return "pagado"
-  return "a_favor"
+  if (total - pagado <= 0.009) return "pagado"
+  return "parcial"
 }
 
 const labelEstadoCobro = (estado) => {
@@ -186,13 +195,32 @@ const labelEstadoCobro = (estado) => {
 
 const claseEstadoCobro = (estado) => `estado-cobro estado-cobro-${String(estado || "sin_deuda").toLowerCase()}`
 
+const estadoCobroCertificado = (certificado) => {
+  const total = Number(certificado?.total_cert_con_iva || 0)
+  const pagado = Number(certificado?.pagos || 0)
+  const saldo = Number(certificado?.saldo_pendiente)
+  const pendiente = Number.isFinite(saldo) ? saldo : Math.max(0, total - pagado)
+  if (pendiente <= 0.009 || (total > 0 && total - pagado <= 0.009)) return "pagado"
+  if (pagado > 0.009) return "parcial"
+  return "pendiente"
+}
+
 const movimientoTieneImputacion = (mov) => {
   if (mov?.tipo !== "ingreso") return false
 
   if (
+    Array.isArray(mov.certificados_asignaciones) &&
+    mov.certificados_asignaciones.some(
+      (a) => Number(a.certificado_id) > 0 && (Number(a.monto_asignado) || 0) > 0
+    )
+  ) {
+    return true
+  }
+
+  if (
     Array.isArray(mov.presupuestos_asignaciones) &&
     mov.presupuestos_asignaciones.some(
-      (a) => Number(a.presupuestoId) > 0 && (Number(a.monto_asignado) || 0) > 0
+      (a) => Number(a.presupuestoId || a.presupuesto_id) > 0 && (Number(a.monto_asignado) || 0) > 0
     )
   ) {
     return true
@@ -284,7 +312,11 @@ const notasCreditoPorPresupuesto = computed(() => {
 })
 
 const estadoCuentaPresupuestos = computed(() => {
-  return (presupuestosAceptados.value || []).map((p) => {
+  const presupuestosDirectos = (presupuestosAceptados.value || []).filter((p) => !Boolean(p.usa_certificados))
+  const presupuestosPorIdLocal = new Map(
+    [...(presupuestosAceptados.value || []), ...(presupuestosCliente.value || [])].map((p) => [Number(p.id), p])
+  )
+  const presupuestosCuenta = presupuestosDirectos.map((p) => {
     const totalOriginal = Number(p.total) || 0
     const totalIva = Number(p.total_iva ?? p.iva_monto ?? 0) || 0
     const totalSinIva = Number(p.total_sin_iva ?? (totalOriginal - totalIva)) || 0
@@ -320,6 +352,41 @@ const estadoCuentaPresupuestos = computed(() => {
       deuda_computable: deudaComputable,
     }
   })
+
+  const certificadosCuenta = (certificadosCliente.value || [])
+    .filter((certificado) => {
+      const presupuesto = presupuestosPorIdLocal.get(Number(certificado.presupuesto_id))
+      return Boolean(presupuesto?.usa_certificados)
+    })
+    .map((certificado) => {
+      const total = Number(certificado.total_cert_con_iva) || 0
+      const pagado = Number(certificado.pagos) || 0
+      return {
+        id: `certificado-${certificado.id}`,
+        certificado_id: certificado.id,
+        numero: certificado.presupuesto_numero,
+        certificado_numero: certificado.secuencia,
+        fecha: certificado.fecha,
+        created_at: certificado.created_at || certificado.fecha,
+        obra: certificado.obra || "Sin obra",
+        moneda: "ARS",
+        total_original: total,
+        total_sin_iva: Number(certificado.total_cert_sin_iva) || total,
+        total_iva: Number(certificado.iva) || 0,
+        total,
+        pagado,
+        saldo_pendiente: Math.max(0, total - pagado),
+        saldo_a_favor: 0,
+        estado_cobro: (() => {
+          const saldo = Math.max(0, total - pagado)
+          if (saldo <= 0.009) return "pagado"
+          if (pagado > 0.009) return "parcial"
+          return "pendiente"
+        })(),
+      }
+    })
+
+  return [...presupuestosCuenta, ...certificadosCuenta]
 })
 
 const totalDebeCliente = computed(() =>
@@ -375,15 +442,18 @@ const movimientosCuentaCorriente = computed (() => {
   for (const p of estadoCuentaPresupuestos.value) {
     const total = roundMoney(p.total_original ?? p.total)
     const moneda = normalizeMoneda(p.moneda)
+    const esCertificado = Boolean(p.certificado_id)
 
     rows.push({
-      tipo: "presupuesto",
+      tipo: esCertificado ? "certificado" : "presupuesto",
       moneda,
       fechaRaw: p.fecha,
       fechaCreacionRaw: p.created_at || p.fecha,
-      ordenDia: Number(p.id) || 0,
+      ordenDia: esCertificado ? (Number(p.certificado_id) || 0) : (Number(p.id) || 0),
       fecha: formatDateAr(p.fecha),
-      referencia: `Presupuesto #${p.numero || "-"} - ${p.obra || "Sin obra"}`,
+      referencia: esCertificado
+        ? `Certificado ${p.certificado_numero || "-"} - Presupuesto #${p.numero || "-"} - ${p.obra || "Sin obra"}`
+        : `Presupuesto #${p.numero || "-"} - ${p.obra || "Sin obra"}`,
       debe: total,
       haber: 0,
       impacto: total,
@@ -392,11 +462,18 @@ const movimientosCuentaCorriente = computed (() => {
 
   for (const nota of notasCreditoActivas.value) {
     const asignaciones = Array.isArray(nota.presupuestos_asignaciones) ? nota.presupuestos_asignaciones : []
-    const nums = asignaciones
+    // Las NC de presupuestos por certificados no impactan CC: la deuda nace en el certificado.
+    const asignacionesDeuda = asignaciones.filter((a) => {
+      const presupuesto = presupuestosPorId.value.get(Number(a.presupuesto_id))
+      return presupuesto && !Boolean(presupuesto.usa_certificados)
+    })
+    if (asignacionesDeuda.length === 0) continue
+
+    const nums = asignacionesDeuda
       .map((a) => presupuestosPorId.value.get(Number(a.presupuesto_id))?.numero || a.presupuesto_id)
       .filter(Boolean)
     const refPres = nums.length > 0 ? ` (Presupuestos: ${nums.join(", ")})` : ""
-    const monto = roundMoney(nota.monto_total)
+    const monto = roundMoney(asignacionesDeuda.reduce((acc, a) => acc + (Number(a.monto_asignado) || 0), 0))
 
     rows.push({
       tipo: "nota_credito",
@@ -413,6 +490,7 @@ const movimientosCuentaCorriente = computed (() => {
 
   for (const mov of movimientosCajaCliente.value || []) {
     let presupuestosNumeros = []
+    let certificadosRefs = []
 
     if (Array.isArray(mov.presupuestos_ids) && mov.presupuestos_ids.length > 0) {
       presupuestosNumeros = mov.presupuestos_ids
@@ -421,6 +499,20 @@ const movimientosCuentaCorriente = computed (() => {
     } else if (Number(mov.presupuesto_id) > 0) {
       const num = presupuestosPorId.value.get(Number(mov.presupuesto_id))?.numero || mov.presupuesto_id
       presupuestosNumeros = [num]
+    }
+
+    if (Array.isArray(mov.certificados_asignaciones) && mov.certificados_asignaciones.length > 0) {
+      certificadosRefs = mov.certificados_asignaciones.map((item) => {
+        const presupuestoNumero = item.presupuesto_numero
+          || presupuestosPorId.value.get(
+            Number(certificadosCliente.value.find((c) => Number(c.id) === Number(item.certificado_id))?.presupuesto_id)
+          )?.numero
+          || "-"
+        const secuencia = item.certificado_secuencia
+          || certificadosCliente.value.find((c) => Number(c.id) === Number(item.certificado_id))?.secuencia
+          || item.certificado_id
+        return `Presupuesto #${presupuestoNumero} / Cert. ${secuencia}`
+      })
     }
 
     const monto = roundMoney(mov.monto_total)
@@ -444,9 +536,12 @@ const movimientosCuentaCorriente = computed (() => {
     }
 
     const detalle = String(mov.detalle || "Cobro en caja")
-    const referencia = presupuestosNumeros.length > 0
-      ? `${detalle} - Presupuestos #${presupuestosNumeros.join(", #")}`
-      : `${detalle} - Pago sin imputar`
+    let referencia = `${detalle} - Pago sin imputar`
+    if (certificadosRefs.length > 0) {
+      referencia = `${detalle} - Certificados: ${certificadosRefs.join(", ")}`
+    } else if (presupuestosNumeros.length > 0) {
+      referencia = `${detalle} - Presupuestos #${presupuestosNumeros.join(", #")}`
+    }
 
     rows.push({
       tipo: "pago",
@@ -494,14 +589,16 @@ const movimientosCuentaCorriente = computed (() => {
           ? "Saldo inicial"
           : row.tipo === "presupuesto"
             ? "Presupuesto"
-            : row.tipo === "egreso"
-              ? "Egreso"
-              : row.tipo === "nota_credito"
-                ? "Nota de crédito"
-                : "Pago"
+            : row.tipo === "certificado"
+              ? "Certificado"
+              : row.tipo === "egreso"
+                ? "Egreso"
+                : row.tipo === "nota_credito"
+                  ? "Nota de crédito"
+                  : "Pago"
       ),
-      debeLabel: row.debe > 0 ? formatMoneyByMoneda(row.debe, row.tipo === "presupuesto" ? monedaFila : "ARS") : "-",
-      haberLabel: row.haber > 0 ? formatMoneyByMoneda(row.haber, row.tipo === "presupuesto" ? monedaFila : "ARS") : "-",
+      debeLabel: row.debe > 0 ? formatMoneyByMoneda(row.debe, (row.tipo === "presupuesto" || row.tipo === "certificado") ? monedaFila : "ARS") : "-",
+      haberLabel: row.haber > 0 ? formatMoneyByMoneda(row.haber, (row.tipo === "presupuesto" || row.tipo === "certificado") ? monedaFila : "ARS") : "-",
       saldoLabel: formatMoney(saldoFila),
     }
   })
@@ -530,10 +627,19 @@ const loadClientes = async () => {
   }
 }
 
+const handleCertificadosChanged = () => {
+  if (vistaActual.value === "ficha" && clienteSeleccionado.value?.id) {
+    cargarPresupuestosCliente(clienteSeleccionado.value.id).catch((err) => {
+      console.error("Error al actualizar certificados del cliente:", err)
+    })
+  }
+}
+
 onMounted(() => {
   loadClientes()
   socket.on('clientes:changed', loadClientes)
   socket.on('presupuestos:changed', handlePresupuestosChanged)
+  socket.on('certificados:changed', handleCertificadosChanged)
   socket.on('caja:changed', handleCajaChanged)
   socket.on('notas_credito:changed', handleNotasCreditoChanged)
 })
@@ -550,17 +656,24 @@ const cargarPresupuestosCliente = async (clienteId) => {
   loadingPresupuestosCliente.value = true
   try {
     let resPresupuestos
+    let resCertificados
     try {
       // Fast path: backend-side filter when available.
       resPresupuestos = await api.getPresupuestos(clienteId)
+      resCertificados = await api.getCertificados()
     } catch (errFiltrado) {
       console.warn("Fallo carga filtrada de presupuestos; aplicando fallback general:", errFiltrado)
       resPresupuestos = await api.getPresupuestos()
+      resCertificados = await api.getCertificados()
     }
 
     const presupuestos = (resPresupuestos.data || []).filter(p => Number(p.cliente_id) === Number(clienteId))
     const isAceptado = (p) => ["aprobado", "aceptado"].includes(String(p.estado || "").toLowerCase().trim())
     presupuestosAceptados.value = presupuestos.filter(isAceptado)
+    // Todos los certificados del cliente (para el listado de la ficha).
+    certificadosCliente.value = (resCertificados.data || []).filter((certificado) =>
+      presupuestos.some((item) => Number(item.id) === Number(certificado.presupuesto_id))
+    )
     presupuestosCliente.value = presupuestos.filter(p => !isAceptado(p))
     presupuestosInicializados.value = true
   } catch (err) {
@@ -647,6 +760,7 @@ const volverALista = () => {
   obrasCliente.value = []
   presupuestosCliente.value = []
   presupuestosAceptados.value = []
+  certificadosCliente.value = []
   presupuestosInicializados.value = false
   notasCreditoCliente.value = []
   recibosCliente.value = []
@@ -1138,6 +1252,7 @@ const obtenerClaseDiferencia = (presupuestoId, montoAsignado) => {
 onBeforeUnmount(() => {
   socket.off('clientes:changed', loadClientes)
   socket.off('presupuestos:changed', handlePresupuestosChanged)
+  socket.off('certificados:changed', handleCertificadosChanged)
   socket.off('caja:changed', handleCajaChanged)
   socket.off('notas_credito:changed', handleNotasCreditoChanged)
 })
@@ -1368,14 +1483,14 @@ onBeforeUnmount(() => {
 
         <!-- Presupuestos aceptados -->
         <div class="ficha-seccion">
-          <h3>✅ Estado de cuenta por presupuesto aceptado</h3>
+          <h3>✅ Estado de cuenta (presupuestos y certificados)</h3>
           <div class="estado-cuenta-resumen">
             <article class="estado-cuenta-card">
               <span>Saldo inicial (arrastre)</span>
               <strong>{{ formatMoney(saldoInicialArrastreCliente) }}</strong>
             </article>
             <article class="estado-cuenta-card">
-              <span>Cargos por presupuestos</span>
+              <span>Cargos (presupuestos / certificados)</span>
               <strong>{{ formatMoney(totalCargosPresupuestosCliente) }}</strong>
             </article>
             <article class="estado-cuenta-card">
@@ -1414,7 +1529,10 @@ onBeforeUnmount(() => {
               </thead>
               <tbody>
                 <tr v-for="p in estadoCuentaPresupuestos" :key="p.id">
-                  <td>#{{ p.numero }}</td>
+                  <td>
+                    <template v-if="p.certificado_id">#{{ p.numero }} / Cert. {{ p.certificado_numero }}</template>
+                    <template v-else>#{{ p.numero }}</template>
+                  </td>
                   <td>{{ new Date(p.fecha).toLocaleDateString('es-AR') }}</td>
                   <td>{{ p.obra || 'Sin obra' }}</td>
                   <td>{{ p.moneda || 'ARS' }}</td>
@@ -1431,7 +1549,7 @@ onBeforeUnmount(() => {
               </tbody>
             </table>
           </div>
-          <p v-else class="sin-datos">No hay presupuestos aceptados para este cliente</p>
+          <p v-else class="sin-datos">No hay cargos en cuenta corriente (presupuestos directos o certificados)</p>
         </div>
 
         <div class="ficha-seccion">
@@ -1464,7 +1582,7 @@ onBeforeUnmount(() => {
                           ? 'estado-cobro-pagado'
                           : mov.tipo === 'egreso'
                             ? 'estado-cobro-egreso'
-                            : mov.tipo === 'presupuesto'
+                            : mov.tipo === 'presupuesto' || mov.tipo === 'certificado'
                               ? 'estado-cobro-pendiente'
                               : mov.tipo === 'nota_credito'
                                 ? 'estado-cobro-parcial'
@@ -1489,7 +1607,47 @@ onBeforeUnmount(() => {
         <!-- Certificados asociados -->
         <div class="ficha-seccion">
           <h3>📋 Certificados asociados</h3>
-          <p class="sin-datos">Funcionalidad disponible cuando se implemente el módulo de Certificados</p>
+
+          <div v-if="loadingPresupuestosCliente && !presupuestosInicializados">
+            <span class="spinner">Cargando certificados...</span>
+          </div>
+
+          <div v-else-if="certificadosClienteOrdenados.length === 0">
+            <p class="sin-datos">No hay certificados asociados a este cliente.</p>
+          </div>
+
+          <div v-else class="tabla-shell">
+            <table class="tabla">
+              <thead>
+                <tr>
+                  <th>Presupuesto</th>
+                  <th>Certificado</th>
+                  <th>Fecha</th>
+                  <th>Obra</th>
+                  <th>Total</th>
+                  <th>Pagado</th>
+                  <th>Saldo</th>
+                  <th>Estado</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="c in certificadosClienteOrdenados" :key="c.id">
+                  <td>#{{ c.presupuesto_numero || "-" }}</td>
+                  <td>{{ c.secuencia || c.numero || "-" }}</td>
+                  <td>{{ formatDateAr(c.fecha) }}</td>
+                  <td>{{ c.obra || "Sin obra" }}</td>
+                  <td>{{ formatMoney(c.total_cert_con_iva) }}</td>
+                  <td>{{ formatMoney(c.pagos) }}</td>
+                  <td>{{ formatMoney(c.saldo_pendiente) }}</td>
+                  <td>
+                    <span :class="claseEstadoCobro(estadoCobroCertificado(c))">
+                      {{ labelEstadoCobro(estadoCobroCertificado(c)) }}
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <!-- Facturas registradas -->
@@ -1552,7 +1710,7 @@ onBeforeUnmount(() => {
                   <th>Detalle</th>
                   <th>Observaciones</th>
                   <th>Monto total</th>
-                  <th>Presupuestos asignados</th>
+                  <th>Presupuestos / Certificados</th>
                   <th>Acciones</th>
                 </tr>
               </thead>
@@ -1563,7 +1721,22 @@ onBeforeUnmount(() => {
                   <td>{{ mov.observaciones || '-' }}</td>
                   <td>{{ mov.tipo === 'egreso' ? `-${formatMoney(mov.monto_total)}` : formatMoney(mov.monto_total) }}</td>
                   <td>
-                    <span v-if="mov.tipo === 'ingreso' && Array.isArray(mov.presupuestos_ids) && mov.presupuestos_ids.length > 0">
+                    <span v-if="mov.tipo === 'ingreso' && Array.isArray(mov.certificados_asignaciones) && mov.certificados_asignaciones.length > 0">
+                      {{
+                        mov.certificados_asignaciones.map((item) => {
+                          const secuencia = item.certificado_secuencia
+                            || certificadosCliente.find((c) => Number(c.id) === Number(item.certificado_id))?.secuencia
+                            || item.certificado_id
+                          const presupuestoNumero = item.presupuesto_numero
+                            || presupuestosPorId.get(
+                              Number(certificadosCliente.find((c) => Number(c.id) === Number(item.certificado_id))?.presupuesto_id)
+                            )?.numero
+                            || "-"
+                          return `#${presupuestoNumero}/C${secuencia}`
+                        }).join(", ")
+                      }}
+                    </span>
+                    <span v-else-if="mov.tipo === 'ingreso' && Array.isArray(mov.presupuestos_ids) && mov.presupuestos_ids.length > 0">
                       {{ mov.presupuestos_ids.map(id => `#${presupuestosPorId.get(Number(id))?.numero || id}`).join(', ') }}
                     </span>
                     <span v-else>-</span>

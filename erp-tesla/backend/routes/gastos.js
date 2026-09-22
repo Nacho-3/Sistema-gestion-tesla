@@ -125,15 +125,65 @@ const ensureCatalogoFijosTable = async (client) => {
       tipo VARCHAR(20) NOT NULL CHECK (tipo IN ('tesla', 'facu', 'juani')),
       descripcion TEXT NOT NULL,
       activo BOOLEAN NOT NULL DEFAULT TRUE,
+      orden INTEGER NOT NULL DEFAULT 0,
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
     )
   `);
 
   await client.query(`
+    ALTER TABLE gastos_fijos_catalogo
+    ADD COLUMN IF NOT EXISTS orden INTEGER NOT NULL DEFAULT 0
+  `);
+
+  await client.query(`
+    ALTER TABLE gastos
+    ADD COLUMN IF NOT EXISTS orden INTEGER NOT NULL DEFAULT 0
+  `);
+
+  await client.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS uq_gastos_fijos_catalogo_tipo_descripcion
     ON gastos_fijos_catalogo (tipo, LOWER(BTRIM(descripcion)))
     WHERE activo = TRUE
+  `);
+
+  // Backfill inicial: si el tipo/periodo quedó todo en orden 0, numerar por id.
+  await client.query(`
+    UPDATE gastos_fijos_catalogo c
+    SET orden = sub.rn
+    FROM (
+      SELECT
+        c2.id,
+        (ROW_NUMBER() OVER (PARTITION BY c2.tipo ORDER BY c2.id ASC) - 1) AS rn
+      FROM gastos_fijos_catalogo c2
+      WHERE c2.activo = TRUE
+        AND c2.tipo IN (
+          SELECT tipo
+          FROM gastos_fijos_catalogo
+          WHERE activo = TRUE
+          GROUP BY tipo
+          HAVING COUNT(*) > 0 AND MAX(orden) = 0
+        )
+    ) sub
+    WHERE c.id = sub.id
+  `);
+
+  await client.query(`
+    UPDATE gastos g
+    SET orden = sub.rn
+    FROM (
+      SELECT
+        g2.id,
+        (ROW_NUMBER() OVER (PARTITION BY g2.tipo, g2.mes, g2.anio ORDER BY g2.id ASC) - 1) AS rn
+      FROM gastos g2
+      WHERE (g2.tipo, g2.mes, g2.anio) IN (
+        SELECT tipo, mes, anio
+        FROM gastos
+        GROUP BY tipo, mes, anio
+        HAVING COUNT(*) > 0 AND MAX(orden) = 0
+      )
+    ) sub
+    WHERE g.id = sub.id
   `);
 };
 
@@ -177,14 +227,15 @@ const seedCatalogoFijosDefaults = async (client) => {
       );
     }
 
-    for (const descripcion of defaults) {
+    for (let index = 0; index < defaults.length; index += 1) {
+      const descripcion = defaults[index]
       await client.query(
         `
-          INSERT INTO gastos_fijos_catalogo (tipo, descripcion, activo)
-          VALUES ($1, $2, TRUE)
+          INSERT INTO gastos_fijos_catalogo (tipo, descripcion, activo, orden)
+          VALUES ($1, $2, TRUE, $3)
           ON CONFLICT DO NOTHING
         `,
-        [tipo, descripcion]
+        [tipo, descripcion, index]
       );
     }
   }
@@ -193,7 +244,7 @@ const seedCatalogoFijosDefaults = async (client) => {
 const fetchCatalogoFijos = async (client, tipo = null) => {
   const params = [];
   let sql = `
-    SELECT id, tipo, descripcion
+    SELECT id, tipo, descripcion, orden
     FROM gastos_fijos_catalogo
     WHERE activo = TRUE
   `;
@@ -203,7 +254,7 @@ const fetchCatalogoFijos = async (client, tipo = null) => {
     sql += ` AND tipo = $1`;
   }
 
-  sql += ` ORDER BY tipo ASC, id ASC`;
+  sql += ` ORDER BY tipo ASC, orden ASC, id ASC`;
 
   const result = await client.query(sql, params);
   return result.rows || [];
@@ -213,7 +264,11 @@ const buildCatalogoResponse = (rows = []) => {
   const response = { tesla: [], facu: [], juani: [] };
   for (const row of rows) {
     if (!response[row.tipo]) continue;
-    response[row.tipo].push({ id: row.id, descripcion: row.descripcion });
+    response[row.tipo].push({
+      id: row.id,
+      descripcion: row.descripcion,
+      orden: Number(row.orden || 0),
+    });
   }
   return response;
 };
@@ -233,12 +288,36 @@ const buildCategoria = (fixedSet, descripcion) =>
 const normalizeGastoRow = (row = {}, fixedSet = new Set()) => {
   return {
     ...row,
+    orden: Number(row.orden || 0),
     iva_impuesto: toNumber(row.iva_impuesto),
     subtotal: toNumber(row.subtotal),
     total: toNumber(row.total),
     pago_tesla: toNumber(row.pago_tesla),
     categoria: buildCategoria(fixedSet, row.descripcion),
   };
+};
+
+const ordenarGastosParaVista = (items = [], catalogoRows = [], tipo) => {
+  const catalogoTipo = (catalogoRows || [])
+    .filter((row) => row.tipo === tipo)
+    .slice()
+    .sort((a, b) => Number(a.orden || 0) - Number(b.orden || 0) || Number(a.id || 0) - Number(b.id || 0));
+
+  const fixedSet = fixedDescriptionsSetFromRows(catalogoRows, tipo);
+  const byDesc = new Map(
+    (items || []).map((item) => [normalizeDescripcionKey(item.descripcion), item])
+  );
+
+  const fijos = catalogoTipo
+    .map((item) => byDesc.get(normalizeDescripcionKey(item.descripcion)))
+    .filter(Boolean);
+
+  const temporales = (items || [])
+    .filter((item) => !fixedSet.has(normalizeDescripcionKey(item.descripcion)))
+    .slice()
+    .sort((a, b) => Number(a.orden || 0) - Number(b.orden || 0) || Number(a.id || 0) - Number(b.id || 0));
+
+  return [...fijos, ...temporales];
 };
 
 const resolveTiposSeleccionados = (tiposRaw) => {
@@ -274,13 +353,19 @@ router.post("/catalogo-fijos", async (req, res) => {
     await ensureCatalogoFijosTable(pool);
     await seedCatalogoFijosDefaults(pool);
 
+    const maxOrdenRes = await pool.query(
+      `SELECT COALESCE(MAX(orden), -1) AS max_orden FROM gastos_fijos_catalogo WHERE tipo = $1 AND activo = TRUE`,
+      [tipo]
+    );
+    const nextOrden = Number(maxOrdenRes.rows[0]?.max_orden ?? -1) + 1;
+
     const result = await pool.query(
       `
-        INSERT INTO gastos_fijos_catalogo (tipo, descripcion, activo)
-        VALUES ($1, $2, TRUE)
-        RETURNING id, tipo, descripcion
+        INSERT INTO gastos_fijos_catalogo (tipo, descripcion, activo, orden)
+        VALUES ($1, $2, TRUE, $3)
+        RETURNING id, tipo, descripcion, orden
       `,
-      [tipo, descripcion]
+      [tipo, descripcion, nextOrden]
     );
 
     res.json(result.rows[0]);
@@ -428,7 +513,7 @@ router.get("/", async (req, res) => {
     const fixedSet = fixedDescriptionsSetFromRows(catalogoRows, tipo);
 
     const result = await pool.query(
-      `SELECT * FROM gastos WHERE tipo = $1 AND mes = $2 AND anio = $3 ORDER BY id ASC`,
+      `SELECT * FROM gastos WHERE tipo = $1 AND mes = $2 AND anio = $3 ORDER BY orden ASC, id ASC`,
       [tipo, mes, anio]
     );
     res.json((result.rows || []).map((row) => normalizeGastoRow(row, fixedSet)));
@@ -458,13 +543,13 @@ router.post("/bulk", async (req, res) => {
     const catalogoRows = await fetchCatalogoFijos(client, tipo);
     const fixedSet = fixedDescriptionsSetFromRows(catalogoRows, tipo);
     const catalogoMap = new Map(
-      catalogoRows.map((item) => [normalizeDescripcionKey(item.descripcion), item.descripcion])
+      catalogoRows.map((item) => [normalizeDescripcionKey(item.descripcion), item])
     );
 
     await client.query("BEGIN");
 
     const existentesResult = await client.query(
-      `SELECT * FROM gastos WHERE tipo = $1 AND mes = $2 AND anio = $3 ORDER BY id ASC`,
+      `SELECT * FROM gastos WHERE tipo = $1 AND mes = $2 AND anio = $3 ORDER BY orden ASC, id ASC`,
       [tipo, mes, anio]
     );
     const existentes = existentesResult.rows || [];
@@ -483,14 +568,17 @@ router.post("/bulk", async (req, res) => {
       }
     }
 
-    for (const item of fijos) {
+    for (let index = 0; index < fijos.length; index += 1) {
+      const item = fijos[index];
       const descripcionInput = normalizeDescripcion(item?.descripcion);
       if (!descripcionInput) continue;
 
       const key = normalizeDescripcionKey(descripcionInput);
       if (!fixedSet.has(key)) continue;
 
-      const descripcionCanonica = catalogoMap.get(key) || descripcionInput;
+      const catalogoItem = catalogoMap.get(key);
+      const descripcionCanonica = catalogoItem?.descripcion || descripcionInput;
+      const catalogoId = Number(item?.catalogo_id || catalogoItem?.id || 0);
       const values = [
         toNumber(item?.iva_impuesto),
         toNumber(item?.subtotal),
@@ -498,29 +586,41 @@ router.post("/bulk", async (req, res) => {
         toNumber(item?.pago_tesla),
       ];
 
+      if (Number.isInteger(catalogoId) && catalogoId > 0) {
+        await client.query(
+          `
+            UPDATE gastos_fijos_catalogo
+            SET orden = $1, updated_at = NOW()
+            WHERE id = $2 AND tipo = $3 AND activo = TRUE
+          `,
+          [index, catalogoId, tipo]
+        );
+      }
+
       const existente = existentesFijosMap.get(key);
       if (existente) {
         await client.query(
           `
             UPDATE gastos
-            SET descripcion = $1, iva_impuesto = $2, subtotal = $3, total = $4, pago_tesla = $5
-            WHERE id = $6
+            SET descripcion = $1, iva_impuesto = $2, subtotal = $3, total = $4, pago_tesla = $5, orden = $6
+            WHERE id = $7
           `,
-          [descripcionCanonica, values[0], values[1], values[2], values[3], existente.id]
+          [descripcionCanonica, values[0], values[1], values[2], values[3], index, existente.id]
         );
       } else {
         await client.query(
           `
-            INSERT INTO gastos (tipo, mes, anio, descripcion, iva_impuesto, subtotal, total, pago_tesla)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO gastos (tipo, mes, anio, descripcion, iva_impuesto, subtotal, total, pago_tesla, orden)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
           `,
-          [tipo, mes, anio, descripcionCanonica, values[0], values[1], values[2], values[3]]
+          [tipo, mes, anio, descripcionCanonica, values[0], values[1], values[2], values[3], index]
         );
       }
     }
 
     const idsTemporalesConservar = new Set();
-    for (const item of temporales) {
+    for (let index = 0; index < temporales.length; index += 1) {
+      const item = temporales[index];
       const descripcion = normalizeDescripcion(item?.descripcion);
       if (!descripcion) continue;
       if (fixedSet.has(normalizeDescripcionKey(descripcion))) continue;
@@ -539,20 +639,20 @@ router.post("/bulk", async (req, res) => {
         await client.query(
           `
             UPDATE gastos
-            SET descripcion = $1, iva_impuesto = $2, subtotal = $3, total = $4, pago_tesla = $5
-            WHERE id = $6
+            SET descripcion = $1, iva_impuesto = $2, subtotal = $3, total = $4, pago_tesla = $5, orden = $6
+            WHERE id = $7
           `,
-          [descripcion, values[0], values[1], values[2], values[3], id]
+          [descripcion, values[0], values[1], values[2], values[3], index, id]
         );
         idsTemporalesConservar.add(id);
       } else {
         const insertTemporal = await client.query(
           `
-            INSERT INTO gastos (tipo, mes, anio, descripcion, iva_impuesto, subtotal, total, pago_tesla)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO gastos (tipo, mes, anio, descripcion, iva_impuesto, subtotal, total, pago_tesla, orden)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING id
           `,
-          [tipo, mes, anio, descripcion, values[0], values[1], values[2], values[3]]
+          [tipo, mes, anio, descripcion, values[0], values[1], values[2], values[3], index]
         );
         idsTemporalesConservar.add(Number(insertTemporal.rows[0]?.id || 0));
       }
@@ -567,7 +667,7 @@ router.post("/bulk", async (req, res) => {
     await client.query("COMMIT");
 
     const result = await pool.query(
-      `SELECT * FROM gastos WHERE tipo = $1 AND mes = $2 AND anio = $3 ORDER BY id ASC`,
+      `SELECT * FROM gastos WHERE tipo = $1 AND mes = $2 AND anio = $3 ORDER BY orden ASC, id ASC`,
       [tipo, mes, anio]
     );
     res.json((result.rows || []).map((row) => normalizeGastoRow(row, fixedSet)));
@@ -607,11 +707,16 @@ router.get("/resumen/pdf", async (req, res) => {
       }
 
       const result = await pool.query(
-        `SELECT * FROM gastos WHERE tipo = $1 AND mes = $2 AND anio = $3 ORDER BY id ASC`,
+        `SELECT * FROM gastos WHERE tipo = $1 AND mes = $2 AND anio = $3 ORDER BY orden ASC, id ASC`,
         [tipoInfo.key, mesInt, anioInt]
       );
-      gastosPorTipo[tipoInfo.key] = (result.rows || []).map((row) =>
+      const rowsNormalizados = (result.rows || []).map((row) =>
         normalizeGastoRow(row, fixedSetByTipo[tipoInfo.key] || new Set())
+      );
+      gastosPorTipo[tipoInfo.key] = ordenarGastosParaVista(
+        rowsNormalizados,
+        catalogoRows,
+        tipoInfo.key
       );
     }
 
@@ -791,10 +896,16 @@ router.post("/", async (req, res) => {
     const catalogoRows = await fetchCatalogoFijos(pool, tipo);
     const fixedSet = fixedDescriptionsSetFromRows(catalogoRows, tipo);
 
+    const maxOrdenRes = await pool.query(
+      `SELECT COALESCE(MAX(orden), -1) AS max_orden FROM gastos WHERE tipo = $1 AND mes = $2 AND anio = $3`,
+      [tipo, mes, anio]
+    );
+    const nextOrden = Number(maxOrdenRes.rows[0]?.max_orden ?? -1) + 1;
+
     const result = await pool.query(
       `
-        INSERT INTO gastos (tipo, mes, anio, descripcion, iva_impuesto, subtotal, total, pago_tesla)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO gastos (tipo, mes, anio, descripcion, iva_impuesto, subtotal, total, pago_tesla, orden)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING *
       `,
       [
@@ -806,6 +917,7 @@ router.post("/", async (req, res) => {
         toNumber(req.body?.subtotal),
         toNumber(req.body?.total),
         toNumber(req.body?.pago_tesla),
+        nextOrden,
       ]
     );
     res.json(normalizeGastoRow(result.rows[0], fixedSet));

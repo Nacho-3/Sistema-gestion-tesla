@@ -1318,6 +1318,7 @@ router.get("/", async (req, res) => {
 					p.obra_id,
 					p.fecha,
 					p.estado,
+					p.usa_certificados,
 					p.total,
 					COALESCE(p.total - p.iva_monto, p.total, 0) AS total_sin_iva,
 					COALESCE(p.iva_monto, 0) AS total_iva,
@@ -1378,7 +1379,8 @@ router.get("/", async (req, res) => {
 			const pagadoCaja = roundMoney(row.total_pagado_caja)
 			const totalNotasCredito = roundMoney(row.total_notas_credito)
 			const pagadoComputable = roundMoney(pagadoCaja + totalNotasCredito)
-			const deudaComputable = esEstadoConDeuda(row.estado)
+			// Si el cobro es por certificados, el presupuesto no genera deuda en cuenta corriente.
+			const deudaComputable = esEstadoConDeuda(row.estado) && !Boolean(row.usa_certificados)
 			const saldoRaw = roundMoney(totalConIva - pagadoComputable)
 			const saldoPendiente = deudaComputable ? roundMoney(Math.max(0, saldoRaw)) : 0
 			const saldoAFavor = deudaComputable ? roundMoney(Math.max(0, -saldoRaw)) : 0
@@ -1452,6 +1454,7 @@ router.post("/", async (req, res) => {
 			items_mano_obra,
 			mostrar_mano_obra_pdf,
 			mostrar_materiales_pdf,
+			usa_certificados,
 			info_interna_quien_hizo,
 			info_interna_quien_hizo_pdf,
 			info_interna_quien_aprobo,
@@ -1514,9 +1517,10 @@ router.post("/", async (req, res) => {
 					subtotal_materiales, subtotal_mano_obra, aplica_iva_materiales, aplica_iva_mano_obra, iva_porcentaje, iva_monto,
 					descuento_activo, descuento_tipo, descuento_modo, descuento_valor, descuento_monto, descuento_motivo, total,
 					mostrar_mano_obra_pdf, mostrar_materiales_pdf,
+					usa_certificados,
 					proyecto, info_interna_quien_hizo, info_interna_quien_hizo_pdf,
 					info_interna_quien_aprobo, info_interna_quien_aprobo_pdf, indice_cac_base_id
-				) VALUES ($1,$2,$3,$4,COALESCE($5::date, CURRENT_DATE),$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
+				) VALUES ($1,$2,$3,$4,COALESCE($5::date, CURRENT_DATE),$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
 				RETURNING *
 			`,
 			[
@@ -1543,6 +1547,7 @@ router.post("/", async (req, res) => {
 				total,
 				Boolean(mostrar_mano_obra_pdf ?? true),
 				Boolean(mostrar_materiales_pdf ?? true),
+				Boolean(usa_certificados),
 				proyectoPresupuesto,
 				infoInternaQuienHizo,
 				Boolean(info_interna_quien_hizo_pdf),
@@ -1654,6 +1659,7 @@ router.put("/:id", async (req, res) => {
 			items_mano_obra,
 			mostrar_mano_obra_pdf,
 			mostrar_materiales_pdf,
+			usa_certificados,
 			info_interna_quien_hizo,
 			info_interna_quien_hizo_pdf,
 			info_interna_quien_aprobo,
@@ -1743,13 +1749,14 @@ router.put("/:id", async (req, res) => {
 					total = $20,
 					mostrar_mano_obra_pdf = $21,
 					mostrar_materiales_pdf = $22,
-					info_interna_quien_hizo = $23,
-					info_interna_quien_hizo_pdf = $24,
-					info_interna_quien_aprobo = $25,
-					info_interna_quien_aprobo_pdf = $26,
-					proyecto = $27,
-					indice_cac_base_id = $28
-				WHERE id = $29
+					usa_certificados = $23,
+					info_interna_quien_hizo = $24,
+					info_interna_quien_hizo_pdf = $25,
+					info_interna_quien_aprobo = $26,
+					info_interna_quien_aprobo_pdf = $27,
+					proyecto = $28,
+					indice_cac_base_id = $29
+				WHERE id = $30
 			`,
 			[
 				validacionRelacion.clienteId,
@@ -1774,6 +1781,7 @@ router.put("/:id", async (req, res) => {
 				total,
 				Boolean(mostrar_mano_obra_pdf ?? true),
 				Boolean(mostrar_materiales_pdf ?? true),
+				Boolean(usa_certificados),
 				infoInternaQuienHizo,
 				Boolean(info_interna_quien_hizo_pdf),
 				infoInternaQuienAprobo,

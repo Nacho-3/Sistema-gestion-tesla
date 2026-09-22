@@ -49,6 +49,7 @@ const createEmptyForm = () => {
     fecha: new Date().toISOString().slice(0, 10),
     validez_dias: 15,
     forma_pago: "Contado",
+    usa_certificados: false,
     aplica_iva: true,
     aplica_iva_mano_obra: false,
     modo_materiales: "item",
@@ -640,6 +641,7 @@ const editPresupuesto = async (id) => {
       fecha: data.fecha ? String(data.fecha).slice(0, 10) : new Date().toISOString().slice(0, 10),
       validez_dias: Number(data.validez_dias) || 15,
       forma_pago: data.forma_pago || "Contado",
+      usa_certificados: Boolean(data.usa_certificados),
       aplica_iva: Boolean(data.aplica_iva_materiales ?? (Number(data.iva_monto || 0) > 0 && Number(data.subtotal_materiales || 0) > 0)),
       aplica_iva_mano_obra: Boolean(data.aplica_iva_mano_obra),
       modo_materiales: modoMateriales,
@@ -839,6 +841,7 @@ const savePresupuesto = async () => {
     fecha: form.value.fecha,
     validez_dias: Number(form.value.validez_dias) || 15,
     forma_pago: form.value.forma_pago,
+    usa_certificados: Boolean(form.value.usa_certificados),
     aplica_iva: Boolean(form.value.aplica_iva),
     aplica_iva_mano_obra: Boolean(form.value.aplica_iva_mano_obra),
     modo_materiales: String(form.value.modo_materiales || "item"),
@@ -1194,14 +1197,19 @@ onUnmounted(() => {
                   <strong>{{ formatMoney(p.total, p.moneda) }}</strong>
                   <small>Sin IVA: {{ formatMoney(p.total_sin_iva, p.moneda) }} · IVA: {{ formatMoney(p.total_iva, p.moneda) }}</small>
                   <small>Pagado por caja: {{ formatMoney(p.total_pagado_caja, p.moneda) }}</small>
-                  <small v-if="p.deuda_computable">
-                    Saldo pendiente: {{ formatMoney(p.saldo_pendiente_cobro, p.moneda) }}
-                    <span :class="cobroStatusClass(p.estado_cobro)">{{ cobroStatusLabel(p.estado_cobro) }}</span>
+                  <template v-if="p.deuda_computable">
+                    <small>
+                      Saldo pendiente: {{ formatMoney(p.saldo_pendiente_cobro, p.moneda) }}
+                      <span :class="cobroStatusClass(p.estado_cobro)">{{ cobroStatusLabel(p.estado_cobro) }}</span>
+                    </small>
+                    <small v-if="Number(p.saldo_a_favor_cobro || 0) > 0">
+                      Saldo a favor: {{ formatMoney(p.saldo_a_favor_cobro, p.moneda) }}
+                    </small>
+                  </template>
+                  <small v-else-if="p.usa_certificados">
+                    Cobro por certificados: no genera deuda en cuenta corriente; la deuda nace al emitir certificados.
                   </small>
-                  <small v-if="p.deuda_computable && Number(p.saldo_a_favor_cobro || 0) > 0">
-                    Saldo a favor: {{ formatMoney(p.saldo_a_favor_cobro, p.moneda) }}
-                  </small>
-                  <small v-if="!p.deuda_computable">
+                  <small v-else>
                     Estado comercial sin deuda activa (solo computa en aceptados).
                   </small>
                   <small v-if="Number(p.cantidad_certificados || 0) > 0">
@@ -1316,6 +1324,13 @@ onUnmounted(() => {
                 <div class="field-card">
                   <label>Forma de pago</label>
                   <input v-model="form.forma_pago" type="text" placeholder="Contado / Transferencia" />
+                </div>
+
+                <div class="field-card field-card-accent">
+                  <label>
+                    <input v-model="form.usa_certificados" type="checkbox" />
+                    Este presupuesto se cobrará mediante certificados
+                  </label>
                 </div>
 
                 <div class="field-card iva-box field-card-accent">
