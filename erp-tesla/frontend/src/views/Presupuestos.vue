@@ -1197,14 +1197,19 @@ onUnmounted(() => {
                   <strong>{{ formatMoney(p.total, p.moneda) }}</strong>
                   <small>Sin IVA: {{ formatMoney(p.total_sin_iva, p.moneda) }} · IVA: {{ formatMoney(p.total_iva, p.moneda) }}</small>
                   <small>Pagado por caja: {{ formatMoney(p.total_pagado_caja, p.moneda) }}</small>
-                  <small v-if="p.deuda_computable">
-                    Saldo pendiente: {{ formatMoney(p.saldo_pendiente_cobro, p.moneda) }}
-                    <span :class="cobroStatusClass(p.estado_cobro)">{{ cobroStatusLabel(p.estado_cobro) }}</span>
+                  <template v-if="p.deuda_computable">
+                    <small>
+                      Saldo pendiente: {{ formatMoney(p.saldo_pendiente_cobro, p.moneda) }}
+                      <span :class="cobroStatusClass(p.estado_cobro)">{{ cobroStatusLabel(p.estado_cobro) }}</span>
+                    </small>
+                    <small v-if="Number(p.saldo_a_favor_cobro || 0) > 0">
+                      Saldo a favor: {{ formatMoney(p.saldo_a_favor_cobro, p.moneda) }}
+                    </small>
+                  </template>
+                  <small v-else-if="p.usa_certificados">
+                    Cobro por certificados: no genera deuda en cuenta corriente; la deuda nace al emitir certificados.
                   </small>
-                  <small v-if="p.deuda_computable && Number(p.saldo_a_favor_cobro || 0) > 0">
-                    Saldo a favor: {{ formatMoney(p.saldo_a_favor_cobro, p.moneda) }}
-                  </small>
-                  <small v-if="!p.deuda_computable">
+                  <small v-else>
                     Estado comercial sin deuda activa (solo computa en aceptados).
                   </small>
                   <small v-if="Number(p.cantidad_certificados || 0) > 0">

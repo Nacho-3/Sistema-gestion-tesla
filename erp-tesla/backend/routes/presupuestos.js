@@ -1379,7 +1379,8 @@ router.get("/", async (req, res) => {
 			const pagadoCaja = roundMoney(row.total_pagado_caja)
 			const totalNotasCredito = roundMoney(row.total_notas_credito)
 			const pagadoComputable = roundMoney(pagadoCaja + totalNotasCredito)
-			const deudaComputable = esEstadoConDeuda(row.estado)
+			// Si el cobro es por certificados, el presupuesto no genera deuda en cuenta corriente.
+			const deudaComputable = esEstadoConDeuda(row.estado) && !Boolean(row.usa_certificados)
 			const saldoRaw = roundMoney(totalConIva - pagadoComputable)
 			const saldoPendiente = deudaComputable ? roundMoney(Math.max(0, saldoRaw)) : 0
 			const saldoAFavor = deudaComputable ? roundMoney(Math.max(0, -saldoRaw)) : 0

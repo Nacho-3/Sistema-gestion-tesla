@@ -1535,6 +1535,14 @@ async function validarAsignacionesCertificados({ client, asignaciones = [], clie
 }
 
 async function sincronizarMovimientosCajaCertificados({ client, movimientoId, asignaciones = [] }) {
+  const previosRes = await client.query(
+    `SELECT certificado_id FROM movimientos_caja_certificados WHERE movimiento_id = $1`,
+    [movimientoId]
+  )
+  const idsPrevios = (previosRes.rows || [])
+    .map((row) => Number(row.certificado_id))
+    .filter((id) => Number.isInteger(id) && id > 0)
+
   await client.query("DELETE FROM movimientos_caja_certificados WHERE movimiento_id = $1", [movimientoId])
   const normalizadas = normalizarCertificadosAsignaciones(asignaciones)
   for (const item of normalizadas) {
@@ -1543,6 +1551,77 @@ async function sincronizarMovimientosCajaCertificados({ client, movimientoId, as
       [movimientoId, item.certificado_id, item.monto_asignado]
     )
   }
+
+  const idsAfectados = Array.from(new Set([
+    ...idsPrevios,
+    ...normalizadas.map((item) => Number(item.certificado_id)),
+  ].filter((id) => Number.isInteger(id) && id > 0)))
+
+  if (idsAfectados.length > 0) {
+    await client.query(
+      `
+        UPDATE certificados c
+        SET
+          pagos = ROUND(COALESCE(p.pagos_asignados, 0)::numeric, 2),
+          saldo_pendiente = ROUND(GREATEST(c.total_cert_con_iva - COALESCE(p.pagos_asignados, 0), 0)::numeric, 2),
+          estado = CASE
+            WHEN GREATEST(c.total_cert_con_iva - COALESCE(p.pagos_asignados, 0), 0) <= 0.009 THEN 'pagado'
+            ELSE 'pendiente'
+          END,
+          updated_at = CURRENT_TIMESTAMP
+        FROM (
+          SELECT
+            c2.id,
+            COALESCE((
+              SELECT SUM(mcc.monto_asignado)
+              FROM movimientos_caja_certificados mcc
+              WHERE mcc.certificado_id = c2.id
+            ), 0) AS pagos_asignados
+          FROM certificados c2
+          WHERE c2.id = ANY($1::int[])
+        ) p
+        WHERE c.id = p.id
+      `,
+      [idsAfectados]
+    )
+  }
+}
+
+async function obtenerCertificadosAsignacionesPorMovimientos(movimientosIds = []) {
+  const ids = Array.from(new Set((movimientosIds || []).map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)))
+  if (!ids.length) return new Map()
+
+  const placeholders = ids.map((_, i) => `$${i + 1}`).join(",")
+  const result = await pool.query(
+    `
+      SELECT
+        mcc.movimiento_id,
+        mcc.certificado_id,
+        mcc.monto_asignado,
+        c.secuencia AS certificado_secuencia,
+        p.numero AS presupuesto_numero
+      FROM movimientos_caja_certificados mcc
+      INNER JOIN certificados c ON c.id = mcc.certificado_id
+      INNER JOIN presupuestos p ON p.id = c.presupuesto_id
+      WHERE mcc.movimiento_id IN (${placeholders})
+      ORDER BY mcc.movimiento_id, p.numero, c.secuencia
+    `,
+    ids
+  )
+
+  const mapa = new Map()
+  ids.forEach((id) => mapa.set(id, []))
+  for (const row of result.rows || []) {
+    const movId = Number(row.movimiento_id)
+    if (!mapa.has(movId)) mapa.set(movId, [])
+    mapa.get(movId).push({
+      certificado_id: Number(row.certificado_id),
+      monto_asignado: roundMoney(Number(row.monto_asignado || 0)),
+      certificado_secuencia: Number(row.certificado_secuencia) || null,
+      presupuesto_numero: row.presupuesto_numero,
+    })
+  }
+  return mapa
 }
 
 function construirAsignacionesPresupuestos({ presupuestosIds = [], asignacionesRaw = [], montoTotal = 0 }) {
@@ -1688,6 +1767,11 @@ async function obtenerPresupuestosAsignacionesPorMovimiento(movimientoId) {
   return mapa.get(Number(movimientoId)) || []
 }
 
+async function obtenerCertificadosAsignacionesPorMovimiento(movimientoId) {
+  const mapa = await obtenerCertificadosAsignacionesPorMovimientos([movimientoId])
+  return mapa.get(Number(movimientoId)) || []
+}
+
 async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id, cliente_id } = {}) {
   await getDetallesSchema()
   await ensureMovimientosCajaPresupuestosSchema()
@@ -1742,15 +1826,18 @@ async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_
   const movimientos = (data || []).map(normalizarMovimiento)
   const mapaPresupuestos = await obtenerPresupuestosIdsPorMovimientos(movimientos.map((mov) => mov.id))
   const mapaAsignaciones = await obtenerPresupuestosAsignacionesPorMovimientos(movimientos.map((mov) => mov.id))
+  const mapaCertificados = await obtenerCertificadosAsignacionesPorMovimientos(movimientos.map((mov) => mov.id))
 
   movimientos.forEach((mov) => {
     const asociados = mapaPresupuestos.get(Number(mov.id)) || []
     const asignaciones = mapaAsignaciones.get(Number(mov.id)) || []
+    const certificadosAsignaciones = mapaCertificados.get(Number(mov.id)) || []
     if (asociados.length > 0) {
       mov.presupuestos_ids = asociados
       mov.presupuesto_id = mov.presupuesto_id || asociados[0]
     }
     mov.presupuestos_asignaciones = asignaciones
+    mov.certificados_asignaciones = certificadosAsignaciones
   })
 
   movimientos.forEach((mov) => {
@@ -3741,6 +3828,7 @@ router.get("/:id", async (req, res) => {
     const movimiento = normalizarMovimiento(data)
     movimiento.presupuestos_ids = await obtenerPresupuestosIdsPorMovimiento(movimiento.id)
     movimiento.presupuestos_asignaciones = await obtenerPresupuestosAsignacionesPorMovimiento(movimiento.id)
+    movimiento.certificados_asignaciones = await obtenerCertificadosAsignacionesPorMovimiento(movimiento.id)
     if (movimiento.presupuestos_ids.length > 0 && !movimiento.presupuesto_id) {
       movimiento.presupuesto_id = movimiento.presupuestos_ids[0]
     }
@@ -4049,6 +4137,7 @@ router.post("/", async (req, res) => {
     const movimientoCompletoNormalizado = normalizarMovimiento(movimientoCompleto)
     movimientoCompletoNormalizado.presupuestos_ids = await obtenerPresupuestosIdsPorMovimiento(movimientoId)
     movimientoCompletoNormalizado.presupuestos_asignaciones = await obtenerPresupuestosAsignacionesPorMovimiento(movimientoId)
+    movimientoCompletoNormalizado.certificados_asignaciones = await obtenerCertificadosAsignacionesPorMovimiento(movimientoId)
     if (movimientoCompletoNormalizado.presupuestos_ids.length > 0 && !movimientoCompletoNormalizado.presupuesto_id) {
       movimientoCompletoNormalizado.presupuesto_id = movimientoCompletoNormalizado.presupuestos_ids[0]
     }
@@ -4629,6 +4718,7 @@ router.put("/:id", async (req, res) => {
     const movimientoFinalNormalizado = normalizarMovimiento(movimientoFinal)
     movimientoFinalNormalizado.presupuestos_ids = await obtenerPresupuestosIdsPorMovimiento(id)
     movimientoFinalNormalizado.presupuestos_asignaciones = await obtenerPresupuestosAsignacionesPorMovimiento(id)
+    movimientoFinalNormalizado.certificados_asignaciones = await obtenerCertificadosAsignacionesPorMovimiento(id)
     if (movimientoFinalNormalizado.presupuestos_ids.length > 0 && !movimientoFinalNormalizado.presupuesto_id) {
       movimientoFinalNormalizado.presupuesto_id = movimientoFinalNormalizado.presupuestos_ids[0]
     }

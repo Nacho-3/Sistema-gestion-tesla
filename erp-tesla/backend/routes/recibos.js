@@ -285,7 +285,7 @@ router.get("/", async (req, res) => {
     params.push(limit)
 
     const sql =
-      "SELECT * FROM recibos_caja" +
+      "SELECT * FROM recibos_caja " +
       whereClause +
       " ORDER BY numero DESC LIMIT $" + params.length
 

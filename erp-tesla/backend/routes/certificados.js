@@ -317,12 +317,13 @@ router.get("/", async (req, res) => {
 				COALESCE((SELECT SUM(mcc.monto_asignado) FROM movimientos_caja_certificados mcc WHERE mcc.certificado_id = c.id), 0) AS pagos_caja,
 				p.numero AS presupuesto_numero,
 				p.estado AS presupuesto_estado,
+				p.usa_certificados,
 				cl.razon_social AS cliente,
-				o.nombre AS obra
+				COALESCE(o.nombre, 'Sin obra') AS obra
 			FROM certificados c
 			INNER JOIN presupuestos p ON p.id = c.presupuesto_id
 			INNER JOIN clientes cl ON cl.id = p.cliente_id
-			INNER JOIN obras o ON o.id = p.obra_id
+			LEFT JOIN obras o ON o.id = p.obra_id
 			ORDER BY p.numero DESC, c.secuencia DESC
 		`)
 
@@ -330,6 +331,7 @@ router.get("/", async (req, res) => {
 			const pagos = Number(row.pagos_caja || 0) > 0 ? Number(row.pagos_caja) : Number(row.pagos || 0)
 			const certificado = mapCertificado({ ...row, pagos })
 			certificado.saldo_pendiente = Math.max(0, certificado.total_cert_con_iva - pagos)
+			certificado.estado = certificado.saldo_pendiente <= 0.009 ? "pagado" : "pendiente"
 			return certificado
 		}))
 	} catch (err) {

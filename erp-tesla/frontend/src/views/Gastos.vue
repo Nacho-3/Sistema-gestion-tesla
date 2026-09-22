@@ -56,11 +56,12 @@ const cargarCatalogo = async () => {
   const mapCatalogo = (items = []) =>
     (Array.isArray(items) ? items : []).map((item) => {
       if (typeof item === "string") {
-        return { id: null, descripcion: item }
+        return { id: null, descripcion: item, orden: 0 }
       }
       return {
         id: Number(item?.id || 0) || null,
         descripcion: String(item?.descripcion || "").trim(),
+        orden: Number(item?.orden || 0),
       }
     })
 
@@ -72,7 +73,9 @@ const cargarCatalogo = async () => {
 }
 
 const construirTipo = (tipo, rows = []) => {
-  const labelsFijos = catalogoFijos.value[tipo] || []
+  const labelsFijos = [...(catalogoFijos.value[tipo] || [])].sort(
+    (a, b) => Number(a.orden || 0) - Number(b.orden || 0) || Number(a.id || 0) - Number(b.id || 0)
+  )
   const mapRows = new Map((rows || []).map((row) => [normalizarDescripcion(row.descripcion), row]))
 
   const fijos = labelsFijos.map((item) => {
@@ -82,6 +85,7 @@ const construirTipo = (tipo, rows = []) => {
       catalogo_id: item?.id || null,
       id: row?.id || null,
       descripcion,
+      orden: Number(item?.orden ?? row?.orden ?? 0),
       iva_impuesto: Number(row?.iva_impuesto || 0),
       subtotal: Number(row?.subtotal || 0),
       total: Number(row?.total || 0),
@@ -95,11 +99,13 @@ const construirTipo = (tipo, rows = []) => {
     .map((row) => ({
       id: row.id,
       descripcion: row.descripcion || "",
+      orden: Number(row.orden || 0),
       iva_impuesto: Number(row.iva_impuesto || 0),
       subtotal: Number(row.subtotal || 0),
       total: Number(row.total || 0),
       pago_tesla: Number(row.pago_tesla || 0),
     }))
+    .sort((a, b) => Number(a.orden || 0) - Number(b.orden || 0) || Number(a.id || 0) - Number(b.id || 0))
 
   return { fijos, temporales }
 }
@@ -189,6 +195,103 @@ const quitarTemporal = (tipo, index) => {
   gastos.value[tipo].temporales.splice(index, 1)
   programarGuardadoTipo(tipo)
 }
+
+const dragEstado = ref({
+  activo: false,
+  tipo: "",
+  seccion: "",
+  fromIndex: -1,
+  overIndex: -1,
+})
+
+const aplicarOrdenLista = (tipo, seccion, lista) => {
+  const ordenada = (lista || []).map((row, orden) => ({ ...row, orden }))
+  gastos.value[tipo][seccion] = ordenada
+
+  if (seccion === "fijos") {
+    catalogoFijos.value[tipo] = ordenada.map((row, orden) => ({
+      id: row.catalogo_id || null,
+      descripcion: row.descripcion,
+      orden,
+    }))
+  }
+
+  programarGuardadoTipo(tipo)
+}
+
+const reordenarFila = (tipo, seccion, fromIndex, toIndex) => {
+  const lista = gastos.value?.[tipo]?.[seccion]
+  if (!Array.isArray(lista)) return
+  if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex)) return
+  if (fromIndex < 0 || toIndex < 0 || fromIndex >= lista.length || toIndex >= lista.length) return
+  if (fromIndex === toIndex) return
+
+  const copia = [...lista]
+  const [item] = copia.splice(fromIndex, 1)
+  copia.splice(toIndex, 0, item)
+  aplicarOrdenLista(tipo, seccion, copia)
+}
+
+const onDragStartFila = (event, tipo, seccion, index) => {
+  dragEstado.value = {
+    activo: true,
+    tipo,
+    seccion,
+    fromIndex: index,
+    overIndex: index,
+  }
+
+  if (event?.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move"
+    event.dataTransfer.setData("text/plain", String(index))
+  }
+
+  const fila = event?.currentTarget?.closest?.("tr")
+  if (fila) fila.classList.add("fila-dragging")
+}
+
+const onDragOverFila = (event, tipo, seccion, index) => {
+  if (!dragEstado.value.activo) return
+  if (dragEstado.value.tipo !== tipo || dragEstado.value.seccion !== seccion) return
+
+  event.preventDefault()
+  if (event?.dataTransfer) event.dataTransfer.dropEffect = "move"
+  dragEstado.value.overIndex = index
+}
+
+const onDropFila = (event, tipo, seccion, index) => {
+  event.preventDefault()
+  if (!dragEstado.value.activo) return
+  if (dragEstado.value.tipo !== tipo || dragEstado.value.seccion !== seccion) return
+
+  const fromIndex = dragEstado.value.fromIndex
+  reordenarFila(tipo, seccion, fromIndex, index)
+  onDragEndFila()
+}
+
+const onDragEndFila = (event = null) => {
+  const fila = event?.currentTarget?.closest?.("tr")
+  if (fila) fila.classList.remove("fila-dragging")
+
+  document.querySelectorAll(".gastos-tabla tr.fila-dragging").forEach((el) => {
+    el.classList.remove("fila-dragging")
+  })
+
+  dragEstado.value = {
+    activo: false,
+    tipo: "",
+    seccion: "",
+    fromIndex: -1,
+    overIndex: -1,
+  }
+}
+
+const filaEsDropTarget = (tipo, seccion, index) =>
+  dragEstado.value.activo
+  && dragEstado.value.tipo === tipo
+  && dragEstado.value.seccion === seccion
+  && dragEstado.value.overIndex === index
+  && dragEstado.value.fromIndex !== index
 
 const quitarFijo = async (tipo, index) => {
   const row = gastos.value[tipo].fijos[index]
@@ -319,9 +422,11 @@ const guardarTipo = async (tipo, silent = true) => {
       tipo,
       mes: Number(mes.value),
       anio: Number(anio.value),
-      fijos: (info.fijos || []).map((row) => ({
+      fijos: (info.fijos || []).map((row, orden) => ({
         id: row.id,
+        catalogo_id: row.catalogo_id || null,
         descripcion: String(row.descripcion || "").trim(),
+        orden,
         iva_impuesto: Number(row.iva_impuesto || 0),
         subtotal: Number(row.subtotal || 0),
         total: Number(row.total || 0),
@@ -329,9 +434,10 @@ const guardarTipo = async (tipo, silent = true) => {
       })),
       temporales: (info.temporales || [])
         .filter((row) => String(row.descripcion || "").trim())
-        .map((row) => ({
+        .map((row, orden) => ({
           id: row.id,
           descripcion: String(row.descripcion || "").trim(),
+          orden,
           iva_impuesto: Number(row.iva_impuesto || 0),
           subtotal: Number(row.subtotal || 0),
           total: Number(row.total || 0),
@@ -341,6 +447,12 @@ const guardarTipo = async (tipo, silent = true) => {
 
     const res = await api.syncGastosPeriodo(payload)
     const reconstruido = construirTipo(tipo, res.data || [])
+    // Mantener el orden local del catálogo alineado al guardado.
+    catalogoFijos.value[tipo] = (reconstruido.fijos || []).map((row, orden) => ({
+      id: row.catalogo_id || null,
+      descripcion: row.descripcion,
+      orden,
+    }))
     if (temporalesDraft.length) {
       reconstruido.temporales.push(...temporalesDraft)
     }
@@ -461,7 +573,7 @@ onMounted(async () => {
           <div class="card-header">
             <div>
               <h3>{{ tipo.titulo }}</h3>
-              <p class="card-hint">Fijos: solo monto. Temporales: podés agregar y quitar por mes.</p>
+              <p class="card-hint">Fijos: solo monto. Temporales: podés agregar y quitar por mes. Arrastrá ⋮⋮ para reordenar.</p>
             </div>
             <div class="card-actions">
               <button class="btn-agregar" @click="agregarFijo(tipo.key)">+ Fijo</button>
@@ -475,6 +587,7 @@ onMounted(async () => {
             <table class="gastos-tabla">
               <thead>
                 <tr>
+                  <th style="width: 3.2rem;">Orden</th>
                   <th>Item</th>
                   <th>IVA / Imp.</th>
                   <th>{{ getColumnLabel(tipo.key, 'subtotal') }}</th>
@@ -484,28 +597,47 @@ onMounted(async () => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(row, idx) in gastos[tipo.key].fijos" :key="`fijo-${tipo.key}-${row.catalogo_id || idx}`">
+                <tr
+                  v-for="(row, idx) in gastos[tipo.key].fijos"
+                  :key="`fijo-${tipo.key}-${row.catalogo_id || idx}`"
+                  class="fila-ordenable"
+                  :class="{
+                    'fila-dragging': dragEstado.activo && dragEstado.tipo === tipo.key && dragEstado.seccion === 'fijos' && dragEstado.fromIndex === idx,
+                    'fila-drop-target': filaEsDropTarget(tipo.key, 'fijos', idx),
+                  }"
+                  @dragover="onDragOverFila($event, tipo.key, 'fijos', idx)"
+                  @drop="onDropFila($event, tipo.key, 'fijos', idx)"
+                >
+                  <td>
+                    <button
+                      type="button"
+                      class="btn-drag"
+                      title="Arrastrar para reordenar"
+                      draggable="true"
+                      @dragstart="onDragStartFila($event, tipo.key, 'fijos', idx)"
+                      @dragend="onDragEndFila($event)"
+                    >
+                      ⋮⋮
+                    </button>
+                  </td>
                   <td><input v-model="row.descripcion" type="text" placeholder="Descripcion fija" disabled /></td>
                   <td><input v-model.number="row.iva_impuesto" type="number" step="0.01" min="0" @change="programarGuardadoTipo(tipo.key)" /></td>
                   <td><input v-model.number="row.subtotal" type="number" step="0.01" min="0" @change="programarGuardadoTipo(tipo.key)" /></td>
                   <td><input v-model.number="row.total" type="number" step="0.01" min="0" @change="programarGuardadoTipo(tipo.key)" /></td>
-                    <td><input v-model.number="row.pago_tesla" type="number" step="0.01" min="0" @change="programarGuardadoTipo(tipo.key)" /></td>
-
+                  <td><input v-model.number="row.pago_tesla" type="number" step="0.01" min="0" @change="programarGuardadoTipo(tipo.key)" /></td>
                   <td>
                     <div class="acciones-fijo">
                       <button class="btn-editar" @click="abrirEditarFijo(tipo.key, row)">
                         Editar
                       </button>
-
                       <button class="btn-eliminar" @click="quitarFijo(tipo.key, idx)">
                         Quitar
                       </button>
                     </div>
                   </td>
-
                 </tr>
                 <tr v-if="gastos[tipo.key].fijos.length === 0">
-                  <td colspan="6" class="sin-datos">No hay items fijos definidos para este tipo</td>
+                  <td colspan="7" class="sin-datos">No hay items fijos definidos para este tipo</td>
                 </tr>
               </tbody>
             </table>
@@ -514,6 +646,7 @@ onMounted(async () => {
             <table class="gastos-tabla">
               <thead>
                 <tr>
+                  <th style="width: 3.2rem;">Orden</th>
                   <th>Descripción</th>
                   <th>IVA / Imp.</th>
                   <th>{{ getColumnLabel(tipo.key, 'subtotal') }}</th>
@@ -523,7 +656,29 @@ onMounted(async () => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(row, idx) in gastos[tipo.key].temporales" :key="`tmp-${tipo.key}-${row.id || idx}`">
+                <tr
+                  v-for="(row, idx) in gastos[tipo.key].temporales"
+                  :key="`tmp-${tipo.key}-${row.id || idx}`"
+                  class="fila-ordenable"
+                  :class="{
+                    'fila-dragging': dragEstado.activo && dragEstado.tipo === tipo.key && dragEstado.seccion === 'temporales' && dragEstado.fromIndex === idx,
+                    'fila-drop-target': filaEsDropTarget(tipo.key, 'temporales', idx),
+                  }"
+                  @dragover="onDragOverFila($event, tipo.key, 'temporales', idx)"
+                  @drop="onDropFila($event, tipo.key, 'temporales', idx)"
+                >
+                  <td>
+                    <button
+                      type="button"
+                      class="btn-drag"
+                      title="Arrastrar para reordenar"
+                      draggable="true"
+                      @dragstart="onDragStartFila($event, tipo.key, 'temporales', idx)"
+                      @dragend="onDragEndFila($event)"
+                    >
+                      ⋮⋮
+                    </button>
+                  </td>
                   <td><input v-model="row.descripcion" type="text" placeholder="Detalle temporal" @change="programarGuardadoTipo(tipo.key)" /></td>
                   <td><input v-model.number="row.iva_impuesto" type="number" step="0.01" min="0" @change="programarGuardadoTipo(tipo.key)" /></td>
                   <td><input v-model.number="row.subtotal" type="number" step="0.01" min="0" @change="programarGuardadoTipo(tipo.key)" /></td>
@@ -532,11 +687,12 @@ onMounted(async () => {
                   <td><button class="btn-eliminar" @click="quitarTemporal(tipo.key, idx)">Quitar</button></td>
                 </tr>
                 <tr v-if="gastos[tipo.key].temporales.length === 0">
-                  <td colspan="6" class="sin-datos">Sin gastos temporales en este periodo</td>
+                  <td colspan="7" class="sin-datos">Sin gastos temporales en este periodo</td>
                 </tr>
               </tbody>
               <tfoot>
                 <tr>
+                  <td></td>
                   <td><strong>Totales</strong></td>
                   <td>{{ formatCurrency(resumenPorTipo[tipo.key].iva) }}</td>
                   <td>{{ formatCurrency(resumenPorTipo[tipo.key].subtotal) }}</td>
@@ -749,6 +905,33 @@ onMounted(async () => {
   display: inline-flex;
   gap: 0.35rem;
   align-items: center;
+}
+
+.btn-drag {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  background: rgba(30, 41, 59, 0.95);
+  color: #cbd5e1;
+  font-size: 0.95rem;
+  letter-spacing: -0.12em;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.btn-drag:active {
+  cursor: grabbing;
+}
+
+.fila-ordenable.fila-dragging {
+  opacity: 0.45;
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.fila-ordenable.fila-drop-target td {
+  box-shadow: inset 0 2px 0 0 rgba(96, 165, 250, 0.85);
 }
 
 .btn-editar {

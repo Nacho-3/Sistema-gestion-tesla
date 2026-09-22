@@ -1,4 +1,4 @@
-﻿﻿import express from "express"
+﻿import express from "express"
 import db from "../db.js"
 import { pool } from "../db.js"
 import { getIo } from '../socket.js'
@@ -319,12 +319,14 @@ router.get("/:id/ficha-pdf", async (req, res) => {
     const presupuestosAceptadosList = presupuestosList.filter(isAceptado)
     const certificadosQ = await pool.query(
       `
-        SELECT c.id, c.presupuesto_id, c.numero, c.secuencia, c.fecha, c.total_cert_con_iva,
+        SELECT c.id, c.presupuesto_id, c.numero, c.secuencia, c.fecha,
+          c.total_cert_con_iva, c.total_cert_sin_iva, c.iva,
           COALESCE((SELECT SUM(mcc.monto_asignado) FROM movimientos_caja_certificados mcc WHERE mcc.certificado_id = c.id), 0) AS pagos_asignados,
           p.numero AS presupuesto_numero, p.obra_id
         FROM certificados c
         INNER JOIN presupuestos p ON p.id = c.presupuesto_id
         WHERE p.cliente_id = $1
+          AND COALESCE(p.usa_certificados, FALSE) = TRUE
         ORDER BY c.fecha ASC, c.secuencia ASC, c.id ASC
       `,
       [id]
@@ -371,6 +373,8 @@ router.get("/:id/ficha-pdf", async (req, res) => {
 
     const estadoCuentaCertificados = certificadosList.map((certificado) => {
       const total = roundMoney(certificado.total_cert_con_iva)
+      const sinIva = roundMoney(certificado.total_cert_sin_iva)
+      const iva = roundMoney(certificado.iva)
       const pagado = roundMoney(certificado.pagos_asignados)
       const saldoPendiente = roundMoney(Math.max(0, total - pagado))
       return {
@@ -381,8 +385,8 @@ router.get("/:id/ficha-pdf", async (req, res) => {
         fecha: certificado.fecha,
         obra: obraNombrePorId.get(Number(certificado.obra_id)) || "Sin obra",
         moneda: "ARS",
-        sin_iva: total,
-        iva: 0,
+        sin_iva: sinIva,
+        iva,
         total,
         pagado,
         saldo_pendiente: saldoPendiente,
@@ -526,7 +530,7 @@ router.get("/:id/ficha-pdf", async (req, res) => {
     drawSectionTitle("ESTADO DE CUENTA")
     drawSummaryGrid([
       `Saldo inicial\n$ ${formatMoneyAr(saldoInicialArrastre)}`,
-      `Cargos presupuestos\n$ ${formatMoneyAr(totalCargosPresupuestos)}`,
+      `Cargos (presupuestos / certificados)\n$ ${formatMoneyAr(totalCargosPresupuestos)}`,
       `Pagos por caja\n$ ${formatMoneyAr(totalPagosCaja)}`,
       `No imputado\n$ ${formatMoneyAr(totalNoImputado)}`,
       `Saldo pendiente final\n$ ${formatMoneyAr(saldoPendienteFinal)}`,
@@ -546,7 +550,9 @@ router.get("/:id/ficha-pdf", async (req, res) => {
         { key: "estado", label: "ESTADO", x: 503, width: 43 },
       ],
       rows: estadoCuenta.map((p) => ({
-        numero: `#${p.numero || "-"}`,
+        numero: p.certificado_id
+          ? `#${p.numero || "-"}/C${p.certificado_numero || "-"}`
+          : `#${p.numero || "-"}`,
         fecha: p.fecha ? new Date(p.fecha).toLocaleDateString("es-AR") : "-",
         obra: p.obra,
         moneda: p.moneda,
@@ -557,7 +563,7 @@ router.get("/:id/ficha-pdf", async (req, res) => {
         saldo: formatMoneyByMoneda(p.saldo_pendiente, p.moneda),
         estado: p.estado_cobro,
       })),
-      emptyText: "No hay presupuestos aceptados para estado de cuenta.",
+      emptyText: "No hay cargos (presupuestos o certificados) para estado de cuenta.",
       rowHeight: 24,
       useGrid: true,
     })
@@ -631,7 +637,7 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
 
     const presupuestosTieneIvaMonto = await hasTableColumn("presupuestos", "iva_monto")
     const presupuestosTieneMoneda = await hasTableColumn("presupuestos", "moneda")
-    const selectPresupuestos = ["id", "numero", "fecha", "created_at", "estado", "total", "obra_id"]
+    const selectPresupuestos = ["id", "numero", "fecha", "created_at", "estado", "total", "obra_id", "usa_certificados"]
     if (presupuestosTieneIvaMonto) {
       selectPresupuestos.push("iva_monto")
     }
@@ -669,7 +675,24 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
     const obraNombrePorId = new Map(obrasList.map((obra) => [Number(obra.id), obra.nombre || "Sin obra"]))
     const presupuestoById = new Map(presupuestosList.map((p) => [Number(p.id), p]))
     const isAceptado = (p) => ["aprobado", "aceptado"].includes(String(p.estado || "").toLowerCase())
-    const presupuestosAceptadosList = presupuestosList.filter(isAceptado)
+    // Solo presupuestos de cobro directo; los de certificados no generan deuda en CC.
+    const presupuestosAceptadosList = presupuestosList
+      .filter(isAceptado)
+      .filter((p) => !Boolean(p.usa_certificados))
+
+    const certificadosHistoricosQ = await pool.query(
+      `
+        SELECT c.id, c.presupuesto_id, c.secuencia, c.fecha, c.created_at, c.total_cert_con_iva,
+          p.numero AS presupuesto_numero, p.obra_id
+        FROM certificados c
+        INNER JOIN presupuestos p ON p.id = c.presupuesto_id
+        WHERE p.cliente_id = $1
+          AND COALESCE(p.usa_certificados, FALSE) = TRUE
+        ORDER BY c.fecha ASC, c.secuencia ASC, c.id ASC
+      `,
+      [id]
+    )
+    const certificadosHistoricosList = certificadosHistoricosQ.rows || []
 
     const mediosPorMovimiento = new Map()
     const movimientoIds = movimientosList
@@ -691,6 +714,7 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
     }
 
     let asignacionesPorMovimiento = new Map()
+    let certificadosPorMovimiento = new Map()
     if (movimientoIds.length > 0) {
       try {
         const asigRes = await pool.query(
@@ -716,6 +740,39 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
         }
       } catch (err) {
         console.warn("[clientes] ficha_historica_pdf_cliente: no se pudieron cargar asignaciones de movimientos_caja_presupuestos", err)
+      }
+
+      try {
+        const certRes = await pool.query(
+          `
+            SELECT
+              mcc.movimiento_id,
+              mcc.certificado_id,
+              mcc.monto_asignado,
+              c.secuencia AS certificado_secuencia,
+              p.numero AS presupuesto_numero
+            FROM movimientos_caja_certificados mcc
+            INNER JOIN certificados c ON c.id = mcc.certificado_id
+            INNER JOIN presupuestos p ON p.id = c.presupuesto_id
+            WHERE mcc.movimiento_id = ANY($1::int[])
+            ORDER BY mcc.movimiento_id, p.numero, c.secuencia
+          `,
+          [movimientoIds]
+        )
+
+        for (const row of certRes.rows || []) {
+          const movId = Number(row.movimiento_id)
+          const list = certificadosPorMovimiento.get(movId) || []
+          list.push({
+            certificado_id: Number(row.certificado_id),
+            certificado_secuencia: Number(row.certificado_secuencia) || null,
+            presupuesto_numero: row.presupuesto_numero,
+            monto_asignado: roundMoney(row.monto_asignado),
+          })
+          certificadosPorMovimiento.set(movId, list)
+        }
+      } catch (err) {
+        console.warn("[clientes] ficha_historica_pdf_cliente: no se pudieron cargar asignaciones de movimientos_caja_certificados", err)
       }
     }
 
@@ -789,11 +846,36 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
       })
     }
 
+    for (const certificado of certificadosHistoricosList) {
+      const total = roundMoney(certificado.total_cert_con_iva)
+      const obra = obraNombrePorId.get(Number(certificado.obra_id)) || "Sin obra"
+      ledgerRows.push({
+        kind: "certificado",
+        sortDate: certificado.fecha || "0000-00-00",
+        sortCreatedAt: certificado.created_at || `${certificado.fecha || "0000-00-00"}T00:00:00`,
+        sortOrder: Number(certificado.id) || 0,
+        sortId: Number(certificado.id) || 0,
+        fecha: certificado.fecha ? new Date(certificado.fecha).toLocaleDateString("es-AR") : "-",
+        tipo: "Certificado",
+        referencia: `Certificado ${String(certificado.secuencia || "-")} - Presupuesto #${String(certificado.presupuesto_numero || "-")} - ${obra}`,
+        debe: formatMoneyAr(total),
+        haber: "-",
+        signedAmount: total,
+      })
+    }
+
     for (const nota of notasList) {
-      const presupuestosTxt = nota.asignaciones
+      const asignacionesDeuda = (nota.asignaciones || []).filter((a) => {
+        const presupuesto = presupuestoById.get(Number(a.presupuesto_id))
+        return presupuesto && !Boolean(presupuesto.usa_certificados)
+      })
+      if (asignacionesDeuda.length === 0) continue
+
+      const presupuestosTxt = asignacionesDeuda
         .map((a) => `#${String(a.presupuesto_numero || a.presupuesto_id)}`)
         .join(", ")
       const refPres = presupuestosTxt ? ` (Presupuestos: ${presupuestosTxt})` : ""
+      const montoNota = roundMoney(asignacionesDeuda.reduce((acc, a) => acc + roundMoney(a.monto_asignado), 0))
 
       ledgerRows.push({
         kind: "nota_credito",
@@ -805,8 +887,8 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
         tipo: "Nota de crédito",
         referencia: `Nota de crédito: ${nota.concepto || "-"}${refPres}`,
         debe: "-",
-        haber: formatMoneyAr(nota.monto_total),
-        signedAmount: -nota.monto_total,
+        haber: formatMoneyAr(montoNota),
+        signedAmount: -montoNota,
       })
     }
 
@@ -834,12 +916,23 @@ router.get("/:id/ficha-historica-pdf", async (req, res) => {
       }
 
       const asig = asignacionesPorMovimiento.get(Number(mov.id || 0)) || []
+      const certificadosAsig = certificadosPorMovimiento.get(Number(mov.id || 0)) || []
       const numeros = asig.length
         ? asig.map((a) => `#${String(a.presupuesto_numero || a.presupuesto_id)}`).join(", ")
         : ""
+      const certificadosTxt = certificadosAsig.length
+        ? certificadosAsig
+          .map((a) => `Presupuesto #${String(a.presupuesto_numero || "-")} / Cert. ${String(a.certificado_secuencia || a.certificado_id)}`)
+          .join(", ")
+        : ""
       
       const detalle = String(mov[columnaDetalleMovimiento] || mov.detalle || "Cobro en caja")
-      const referencia = numeros ? `${detalle} - Presupuestos ${numeros}` : `${detalle} - Pago sin imputar`
+      let referencia = `${detalle} - Pago sin imputar`
+      if (certificadosTxt) {
+        referencia = `${detalle} - Certificados: ${certificadosTxt}`
+      } else if (numeros) {
+        referencia = `${detalle} - Presupuestos ${numeros}`
+      }
 
       ledgerRows.push({
         kind: "pago",
