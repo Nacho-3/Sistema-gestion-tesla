@@ -690,6 +690,52 @@ async function obtenerChequesControladosSemana(cajaSemanalId) {
   return result.rows || []
 }
 
+async function asegurarControlSemanalConsistente(semana) {
+  if (!semana?.id) return semana
+
+  const flag = Boolean(semana.control_inicial_realizado)
+  const movimientoId = Number(semana.control_inicial_movimiento_id || 0)
+  if (!flag && !(movimientoId > 0)) return semana
+
+  let movimientoVigente = false
+  if (movimientoId > 0) {
+    const movQ = await pool.query(
+      `
+        SELECT id
+        FROM movimientos_caja
+        WHERE id = $1
+          AND COALESCE(es_control_semanal, FALSE) = TRUE
+        LIMIT 1
+      `,
+      [movimientoId]
+    )
+    movimientoVigente = Boolean(movQ.rows?.[0])
+  }
+
+  if (flag && movimientoVigente) return semana
+
+  await pool.query(
+    `
+      UPDATE cajas_semanales
+      SET control_inicial_realizado = FALSE,
+          control_inicial_movimiento_id = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+    `,
+    [semana.id]
+  )
+  await pool.query(
+    `DELETE FROM cajas_semanales_cheques_control WHERE caja_semanal_id = $1`,
+    [semana.id]
+  )
+
+  return {
+    ...semana,
+    control_inicial_realizado: false,
+    control_inicial_movimiento_id: null,
+  }
+}
+
 async function obtenerChequesDisponiblesSemana({ cajaCodigo, cajaSemanalId, fechaReferencia }) {
   const semanaId = Number(cajaSemanalId || 0)
   if (!Number.isInteger(semanaId) || semanaId <= 0) return []
@@ -698,7 +744,7 @@ async function obtenerChequesDisponiblesSemana({ cajaCodigo, cajaSemanalId, fech
     `SELECT * FROM cajas_semanales WHERE id = $1 LIMIT 1`,
     [semanaId]
   )
-  const semana = semanaQ.rows?.[0]
+  const semana = await asegurarControlSemanalConsistente(semanaQ.rows?.[0])
   if (!semana) return []
 
   if (!semana.control_inicial_realizado) {
@@ -731,6 +777,171 @@ async function obtenerChequesDisponiblesSemana({ cajaCodigo, cajaSemanalId, fech
   })
 
   return Array.from(mapa.values())
+}
+
+function medioPagoControl(cheque) {
+  return String(cheque?.medio_pago || "cheque").toLowerCase() === "echeq" ? "echeq" : "cheque"
+}
+
+function identificadorControl(cheque) {
+  return String(cheque?.identificador || "").trim() || null
+}
+
+function numeroChequeControl(cheque) {
+  return String(cheque?.numero_cheque || "").trim() || null
+}
+
+function filtrarFilasLibroPorCorte(rows, fechaInicio, fechaFin) {
+  return (rows || [])
+    .map((row) => {
+      const fechaEntradaCheque = normalizarFechaISO(row.fecha_entrada)
+      const fechaSalidaCheque = normalizarFechaISO(row.fecha_salida)
+      const estadoActual = String(row.estado || "").toLowerCase()
+      if (estadoActual === "anulado") return null
+
+      const disponibleAlCorte = Boolean(
+        fechaEntradaCheque
+        && fechaEntradaCheque <= fechaFin
+        && (!fechaSalidaCheque || fechaSalidaCheque > fechaFin)
+      )
+      const salioEnSemana = Boolean(
+        fechaSalidaCheque
+        && fechaSalidaCheque >= fechaInicio
+        && fechaSalidaCheque <= fechaFin
+      )
+      if (!disponibleAlCorte && !salioEnSemana) return null
+
+      return {
+        ...row,
+        estado_vista: disponibleAlCorte ? "disponible" : "no_disponible",
+        semana_inicio: fechaInicio,
+        semana_fin: fechaFin,
+      }
+    })
+    .filter(Boolean)
+}
+
+async function clasificarFilasLibroPorSemana(rows, semana) {
+  const semanaConsistente = await asegurarControlSemanalConsistente(semana)
+  const fechaInicio = normalizarFechaISO(semanaConsistente?.fecha_inicio)
+  const fechaFin = normalizarFechaISO(semanaConsistente?.fecha_fin)
+  const semanaAbierta = !fechaFin
+  const controlHecho = Boolean(semanaConsistente?.control_inicial_realizado)
+
+  if (!controlHecho && !semanaAbierta && fechaInicio && fechaFin) {
+    return filtrarFilasLibroPorCorte(rows, fechaInicio, fechaFin)
+  }
+
+  const semanaId = Number(semanaConsistente?.id || 0)
+  const idsStock = new Set()
+
+  if (controlHecho && Number.isInteger(semanaId) && semanaId > 0) {
+    const controlados = await obtenerChequesControladosSemana(semanaId)
+    for (const item of controlados || []) idsStock.add(Number(item.id))
+  }
+
+  if (Number.isInteger(semanaId) && semanaId > 0) {
+    const ingresosQ = await pool.query(
+      `
+        SELECT l.id
+        FROM libro_cheques_caja l
+        JOIN movimientos_caja m ON m.id = l.movimiento_entrada_id
+        WHERE m.caja_semanal_id = $1
+          AND COALESCE(m.es_control_semanal, FALSE) = FALSE
+      `,
+      [semanaId]
+    )
+    for (const item of ingresosQ.rows || []) idsStock.add(Number(item.id))
+  }
+
+  return (rows || [])
+    .map((row) => {
+      const estadoActual = String(row.estado || "").toLowerCase()
+      if (estadoActual === "anulado") return null
+
+      const id = Number(row.id)
+      const fechaSalidaCheque = normalizarFechaISO(row.fecha_salida)
+      const salioEnSemana = Boolean(
+        fechaSalidaCheque
+        && fechaInicio
+        && fechaSalidaCheque >= fechaInicio
+        && (!fechaFin || fechaSalidaCheque <= fechaFin)
+      )
+      const esStock = idsStock.has(id)
+      if (!esStock && !salioEnSemana) return null
+
+      const sigueEnCaja = !fechaSalidaCheque || (Boolean(fechaFin) && fechaSalidaCheque > fechaFin)
+      const estadoVista = esStock && sigueEnCaja ? "disponible" : "no_disponible"
+
+      return {
+        ...row,
+        estado_vista: estadoVista,
+        semana_inicio: fechaInicio,
+        semana_fin: fechaFin,
+      }
+    })
+    .filter(Boolean)
+}
+
+async function listarLibroChequesFiltrado({ cajaCodigo, busqueda, cajaSemanalId, fechaInicio, fechaFin }) {
+  const params = [cajaCodigo]
+  const where = ["l.caja_codigo = $1", "l.medio_pago = 'cheque'"]
+
+  if (busqueda) {
+    params.push(`%${busqueda}%`)
+    const idx = params.length
+    where.push(`(
+      LOWER(COALESCE(l.numero_cheque, '')) LIKE $${idx}
+      OR LOWER(COALESCE(l.identificador, '')) LIKE $${idx}
+      OR LOWER(COALESCE(l.banco, '')) LIKE $${idx}
+      OR LOWER(COALESCE(l.librador_endosante, '')) LIKE $${idx}
+      OR LOWER(COALESCE(l.endosado_a, '')) LIKE $${idx}
+    )`)
+  }
+
+  const result = await pool.query(
+    `
+      SELECT
+        l.*,
+        mi.fecha AS movimiento_entrada_fecha,
+        ms.fecha AS movimiento_salida_fecha
+      FROM libro_cheques_caja l
+      LEFT JOIN movimientos_caja mi ON mi.id = l.movimiento_entrada_id
+      LEFT JOIN movimientos_caja ms ON ms.id = l.movimiento_salida_id
+      WHERE ${where.join(" AND ")}
+      ORDER BY l.estado ASC, l.fecha_entrada DESC, l.id DESC
+    `,
+    params
+  )
+
+  const rows = result.rows || []
+  if (cajaSemanalId) {
+    const semanaQ = await pool.query(
+      `SELECT * FROM cajas_semanales WHERE id = $1 AND caja_codigo = $2 LIMIT 1`,
+      [cajaSemanalId, cajaCodigo]
+    )
+    const semana = semanaQ.rows?.[0]
+    if (!semana) {
+      const error = new Error("Semana de caja no encontrada")
+      error.status = 404
+      throw error
+    }
+    return {
+      rows: await clasificarFilasLibroPorSemana(rows, semana),
+      semana,
+      filtrado: true,
+    }
+  }
+
+  if (fechaInicio && fechaFin) {
+    return {
+      rows: filtrarFilasLibroPorCorte(rows, fechaInicio, fechaFin),
+      semana: null,
+      filtrado: true,
+    }
+  }
+
+  return { rows, semana: null, filtrado: false }
 }
 
 async function obtenerSemanaAbierta(cajaCodigo) {
@@ -1917,6 +2128,7 @@ router.get("/libro-cheques", async (req, res) => {
     const fechaInicio = normalizarFechaISO(req.query.fecha_inicio)
     const fechaFin = normalizarFechaISO(req.query.fecha_fin)
     const filtroSemanal = Boolean(fechaInicio && fechaFin)
+    const cajaSemanalId = normalizarCajaSemanalId(req.query.caja_semanal_id)
 
     if (!CAJAS_DISPONIBLES.includes(cajaCodigo)) {
       return res.status(400).json({ error: "Caja inválida" })
@@ -1930,116 +2142,53 @@ router.get("/libro-cheques", async (req, res) => {
       return res.status(400).json({ error: "Rango semanal inválido" })
     }
 
-    const params = [cajaCodigo]
-    const where = ["l.caja_codigo = $1", "l.medio_pago = 'cheque'"]
-
-    if (estado) {
-      if (!ESTADOS_LIBRO_CHEQUES.includes(estado)) {
-        return res.status(400).json({ error: "Estado de cheque inválido" })
-      }
-
-      if (!filtroSemanal) {
-        params.push(estado)
-        where.push(`l.estado = $${params.length}`)
-      }
+    if (estado && !ESTADOS_LIBRO_CHEQUES.includes(estado)) {
+      return res.status(400).json({ error: "Estado de cheque inválido" })
     }
 
-    if (busqueda) {
-      params.push(`%${busqueda}%`)
-      const idx = params.length
-      where.push(`(
-        LOWER(COALESCE(l.numero_cheque, '')) LIKE $${idx}
-        OR LOWER(COALESCE(l.identificador, '')) LIKE $${idx}
-        OR LOWER(COALESCE(l.banco, '')) LIKE $${idx}
-        OR LOWER(COALESCE(l.librador_endosante, '')) LIKE $${idx}
-        OR LOWER(COALESCE(l.endosado_a, '')) LIKE $${idx}
-      )`)
-    }
-
-    const query = `
-      SELECT
-        l.*,
-        mi.fecha AS movimiento_entrada_fecha,
-        ms.fecha AS movimiento_salida_fecha
-      FROM libro_cheques_caja l
-      LEFT JOIN movimientos_caja mi ON mi.id = l.movimiento_entrada_id
-      LEFT JOIN movimientos_caja ms ON ms.id = l.movimiento_salida_id
-      WHERE ${where.join(" AND ")}
-      ORDER BY l.estado ASC, l.fecha_entrada DESC, l.id DESC
-    `
-
-    const result = await pool.query(query, params)
-    const rows = result.rows || []
-
-    if (!filtroSemanal) {
-      res.json(rows)
-      return
-    }
-
-    const rowsSemana = rows
-      .map((row) => {
-        const fechaEntradaCheque = normalizarFechaISO(row.fecha_entrada)
-        const fechaSalidaCheque = normalizarFechaISO(row.fecha_salida)
-        const estadoActual = String(row.estado || "").toLowerCase()
-
-        if (estadoActual === "anulado") return null
-
-        const disponibleAlCorte = Boolean(
-          fechaEntradaCheque
-          && fechaEntradaCheque <= fechaFin
-          && (!fechaSalidaCheque || fechaSalidaCheque > fechaFin)
-        )
-
-        const salioEnSemana = Boolean(
-          fechaSalidaCheque
-          && fechaSalidaCheque >= fechaInicio
-          && fechaSalidaCheque <= fechaFin
-        )
-
-        if (!disponibleAlCorte && !salioEnSemana) return null
-
-        const estadoVista = disponibleAlCorte ? "disponible" : "no_disponible"
-        return {
-          ...row,
-          estado_vista: estadoVista,
-          semana_inicio: fechaInicio,
-          semana_fin: fechaFin,
-        }
-      })
-      .filter(Boolean)
+    const { rows, filtrado } = await listarLibroChequesFiltrado({
+      cajaCodigo,
+      busqueda,
+      cajaSemanalId,
+      fechaInicio,
+      fechaFin,
+    })
 
     const filtradosPorEstado = estado
-      ? rowsSemana.filter((row) => row.estado_vista === (estado === "disponible" ? "disponible" : "no_disponible"))
-      : rowsSemana
+      ? rows.filter((row) => {
+        const vista = String(filtrado ? row.estado_vista : row.estado || "").toLowerCase()
+        return vista === (estado === "disponible" ? "disponible" : "no_disponible")
+      })
+      : rows
 
     res.json(filtradosPorEstado)
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    res.status(err.status || 500).json({ error: err.message })
   }
 })
 
 router.get("/libro-cheques/disponibles", async (req, res) => {
   try {
     await ensureLibroChequesSchema()
+    await ensureCajasSemanalesSchema()
     const cajaCodigo = String(req.query.caja_codigo || "tesla").toLowerCase()
+    const cajaSemanalId = normalizarCajaSemanalId(req.query.caja_semanal_id)
 
     if (!CAJAS_DISPONIBLES.includes(cajaCodigo)) {
       return res.status(400).json({ error: "Caja inválida" })
     }
 
-    const result = await pool.query(
-      `
-      SELECT *
-      FROM libro_cheques_caja
-      WHERE caja_codigo = $1
-        AND medio_pago IN ('cheque', 'echeq')
-        AND estado = 'disponible'
-      ORDER BY fecha_cheque DESC, id ASC
-      `,
-      [cajaCodigo]
-    )
+    if (!cajaSemanalId) {
+      return res.json([])
+    }
 
-    res.json(result.rows || [])
+    const rows = await obtenerChequesDisponiblesSemana({
+      cajaCodigo,
+      cajaSemanalId,
+      fechaReferencia: req.query.fecha,
+    })
+
+    res.json(rows)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -2054,7 +2203,7 @@ router.get("/libro-cheques/pdf", async (req, res) => {
     const busqueda = String(req.query.busqueda || "").trim().toLowerCase()
     const fechaInicio = normalizarFechaISO(req.query.fecha_inicio)
     const fechaFin = normalizarFechaISO(req.query.fecha_fin)
-    const filtroSemanal = Boolean(fechaInicio && fechaFin)
+    const cajaSemanalId = normalizarCajaSemanalId(req.query.caja_semanal_id)
 
     if (!CAJAS_DISPONIBLES.includes(cajaCodigo)) {
       return res.status(400).json({ error: "Caja inválida" })
@@ -2065,92 +2214,36 @@ router.get("/libro-cheques/pdf", async (req, res) => {
       return res.status(400).json({ error: "Listado inválido" })
     }
 
-    const params = [cajaCodigo]
-    const where = ["l.caja_codigo = $1", "l.medio_pago = 'cheque'"]
+    const { rows: allRows, semana, filtrado } = await listarLibroChequesFiltrado({
+      cajaCodigo,
+      busqueda,
+      cajaSemanalId,
+      fechaInicio,
+      fechaFin,
+    })
+    const filtroSemanal = filtrado
 
-    if (busqueda) {
-      params.push(`%${busqueda}%`)
-      const idx = params.length
-      where.push(`(
-        LOWER(COALESCE(l.numero_cheque, '')) LIKE $${idx}
-        OR LOWER(COALESCE(l.identificador, '')) LIKE $${idx}
-        OR LOWER(COALESCE(l.banco, '')) LIKE $${idx}
-        OR LOWER(COALESCE(l.librador_endosante, '')) LIKE $${idx}
-        OR LOWER(COALESCE(l.endosado_a, '')) LIKE $${idx}
-      )`)
-    }
+    const ordenarDisponibles = (rows) => rows.sort((a, b) => {
+      const fechaA = normalizarFechaISO(a.fecha_cheque) || ""
+      const fechaB = normalizarFechaISO(b.fecha_cheque) || ""
+      if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
+      return String(a.numero_cheque || "").localeCompare(String(b.numero_cheque || ""))
+    })
+    const ordenarNoDisponibles = (rows) => rows.sort((a, b) => {
+      const fechaA = normalizarFechaISO(a.fecha_salida || a.fecha_cheque) || ""
+      const fechaB = normalizarFechaISO(b.fecha_salida || b.fecha_cheque) || ""
+      if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
+      return String(a.numero_cheque || "").localeCompare(String(b.numero_cheque || ""))
+    })
 
-    const result = await pool.query(
-      `
-      SELECT l.*
-      FROM libro_cheques_caja l
-      WHERE ${where.join(" AND ")}
-      `,
-      params
-    )
-
-    const allRows = result.rows || []
-
-    let disponibles, noDisponibles
-
-    if (filtroSemanal) {
-      // Mismo cálculo que /libro-cheques: disponibles al corte y salidos en semana
-      const rowsSemana = allRows
-        .filter((row) => String(row.estado || "").toLowerCase() !== "anulado")
-        .map((row) => {
-          const fechaEntradaCheque = normalizarFechaISO(row.fecha_entrada)
-          const fechaSalidaCheque = normalizarFechaISO(row.fecha_salida)
-          const disponibleAlCorte = Boolean(
-            fechaEntradaCheque
-            && fechaEntradaCheque <= fechaFin
-            && (!fechaSalidaCheque || fechaSalidaCheque > fechaFin)
-          )
-          const salioEnSemana = Boolean(
-            fechaSalidaCheque
-            && fechaSalidaCheque >= fechaInicio
-            && fechaSalidaCheque <= fechaFin
-          )
-          if (!disponibleAlCorte && !salioEnSemana) return null
-          return { ...row, estado_vista: disponibleAlCorte ? "disponible" : "no_disponible" }
-        })
-        .filter(Boolean)
-
-      disponibles = rowsSemana
-        .filter((row) => row.estado_vista === "disponible")
-        .sort((a, b) => {
-          const fechaA = normalizarFechaISO(a.fecha_cheque) || ""
-          const fechaB = normalizarFechaISO(b.fecha_cheque) || ""
-          if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
-          return String(a.numero_cheque || "").localeCompare(String(b.numero_cheque || ""))
-        })
-
-      noDisponibles = rowsSemana
-        .filter((row) => row.estado_vista === "no_disponible")
-        .sort((a, b) => {
-          const fechaA = normalizarFechaISO(a.fecha_salida || a.fecha_cheque) || ""
-          const fechaB = normalizarFechaISO(b.fecha_salida || b.fecha_cheque) || ""
-          if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
-          return String(a.numero_cheque || "").localeCompare(String(b.numero_cheque || ""))
-        })
-    } else {
-      disponibles = allRows
-        .filter((row) => String(row.estado || "").toLowerCase() === "disponible")
-        .sort((a, b) => {
-          const fechaA = normalizarFechaISO(a.fecha_cheque) || ""
-          const fechaB = normalizarFechaISO(b.fecha_cheque) || ""
-          if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
-          return String(a.numero_cheque || "").localeCompare(String(b.numero_cheque || ""))
-        })
-
-      noDisponibles = allRows
-        .filter((row) => String(row.estado || "").toLowerCase() !== "disponible")
-        .sort((a, b) => {
-          const fechaA = normalizarFechaISO(a.fecha_salida || a.fecha_cheque) || ""
-          const fechaB = normalizarFechaISO(b.fecha_salida || b.fecha_cheque) || ""
-          if (fechaA && fechaB && fechaA !== fechaB) return fechaB.localeCompare(fechaA)
-          return String(a.numero_cheque || "").localeCompare(String(b.numero_cheque || ""))
-        })
-    }
+    const disponibles = ordenarDisponibles(allRows.filter((row) => {
+      if (filtrado) return row.estado_vista === "disponible"
+      return String(row.estado || "").toLowerCase() === "disponible"
+    }))
+    const noDisponibles = ordenarNoDisponibles(allRows.filter((row) => {
+      if (filtrado) return row.estado_vista === "no_disponible"
+      return String(row.estado || "").toLowerCase() !== "disponible"
+    }))
 
     const rowsParaTotal = listado === "disponibles" ? disponibles : listado === "no_disponibles" ? noDisponibles : [...disponibles, ...noDisponibles]
     const totalImporte = rowsParaTotal.reduce((acc, row) => acc + Number(row.importe || 0), 0)
@@ -2178,8 +2271,10 @@ router.get("/libro-cheques/pdf", async (req, res) => {
         ? "Cheques no disponibles"
         : "Cheques disponibles y no disponibles"
 
-    const etiquetaSemana = filtroSemanal
-      ? ` · Semana ${new Date(`${fechaInicio}T00:00:00`).toLocaleDateString("es-AR")} al ${new Date(`${fechaFin}T00:00:00`).toLocaleDateString("es-AR")}`
+    const inicioEtiqueta = normalizarFechaISO(semana?.fecha_inicio) || fechaInicio
+    const finEtiqueta = normalizarFechaISO(semana?.fecha_fin) || fechaFin
+    const etiquetaSemana = filtroSemanal && inicioEtiqueta
+      ? ` · Semana ${new Date(`${inicioEtiqueta}T00:00:00`).toLocaleDateString("es-AR")} al ${finEtiqueta ? new Date(`${finEtiqueta}T00:00:00`).toLocaleDateString("es-AR") : "hoy"}`
       : ""
 
     const headerBottom = drawPremiumHeader(doc, {
@@ -2415,7 +2510,7 @@ router.get("/libro-cheques/pdf", async (req, res) => {
 
     doc.end()
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    res.status(err.status || 500).json({ error: err.message })
   }
 })
 
@@ -2619,6 +2714,9 @@ router.post("/semanas/:id/control-inicial", async (req, res) => {
       return res.status(400).json({ error: "El efectivo y el banco iniciales no pueden ser negativos" })
     }
 
+    const semanaPreviaQ = await pool.query(`SELECT * FROM cajas_semanales WHERE id = $1 LIMIT 1`, [semanaId])
+    await asegurarControlSemanalConsistente(semanaPreviaQ.rows?.[0])
+
     await client.query("BEGIN")
 
     const semanaQ = await client.query(
@@ -2708,21 +2806,27 @@ router.post("/semanas/:id/control-inicial", async (req, res) => {
         INSERT INTO detalles_medio_pago (
           movimiento_id, medio_pago, monto, identificador, banco, fecha_cobro,
           librador_endosante, numero_cheque, fecha_cheque, fecha_entrada, libro_cheque_id
-        ) VALUES ($1,'cheque',$2,$3,$4,NULL,$5,$6,$7,$8,$9)
+        ) VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,$8,$9,$10)
         `,
         [
           movimiento.id,
+          medioPagoControl(cheque),
           roundMoney(Number(cheque.importe || 0)),
-          String(cheque.numero_cheque || "").trim() || null,
+          identificadorControl(cheque),
           String(cheque.banco || "").trim() || null,
           String(cheque.librador_endosante || "").trim() || null,
-          String(cheque.numero_cheque || "").trim() || null,
+          numeroChequeControl(cheque),
           normalizarFechaISO(cheque.fecha_cheque),
           normalizarFechaISO(cheque.fecha_entrada),
           Number(cheque.id),
         ]
       )
     }
+
+    await client.query(
+      `DELETE FROM cajas_semanales_cheques_control WHERE caja_semanal_id = $1`,
+      [semanaId]
+    )
 
     for (const id of ids) {
       await client.query(
@@ -4370,12 +4474,12 @@ router.put("/:id", async (req, res) => {
             `,
             [
               Number(id),
-              String(cheque.medio_pago || "cheque").toLowerCase(),
+              medioPagoControl(cheque),
               roundMoney(Number(cheque.importe || 0)),
-              String(cheque.numero_cheque || "").trim() || null,
+              identificadorControl(cheque),
               String(cheque.banco || "").trim() || null,
               String(cheque.librador_endosante || "").trim() || null,
-              String(cheque.numero_cheque || "").trim() || null,
+              numeroChequeControl(cheque),
               normalizarFechaISO(cheque.fecha_cheque),
               normalizarFechaISO(cheque.fecha_entrada),
               Number(cheque.id),
@@ -4955,7 +5059,7 @@ router.delete("/:id", async (req, res) => {
 
     const { data: movimientoActual, error: errorMovimientoActual } = await db
       .from("movimientos_caja")
-      .select("id, caja_semanal_id, tipo")
+      .select("id, caja_semanal_id, tipo, es_control_semanal")
       .eq("id", id)
       .single()
 

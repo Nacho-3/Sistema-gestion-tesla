@@ -232,7 +232,7 @@ router.get("/:id/ficha-pdf", async (req, res) => {
     const nombreCliente = sanitizeFileText(cliente.razon_social || "Cliente")
     const nombreArchivo = `Ficha ${nombreCliente} ${fechaArchivo}.pdf`
 
-    const doc = new PDFDocument({ size: "A4", margin: 45 })
+    const doc = new PDFDocument({ size: "A4", layout: "landscape", margin: 40 })
     const chunks = []
     doc.on("data", (chunk) => chunks.push(chunk))
     doc.on("end", async () => {
@@ -278,7 +278,7 @@ router.get("/:id/ficha-pdf", async (req, res) => {
     const presupuestosTieneMoneda = await hasTableColumn("presupuestos", "moneda")
     const movimientosTienePresupuestoId = await hasTableColumn("movimientos_caja", "presupuesto_id")
 
-    const selectPresupuestos = ["id", "numero", "fecha", "estado", "total", "obra_id", "usa_certificados"]
+    const selectPresupuestos = ["id", "numero", "fecha", "created_at", "estado", "total", "obra_id", "usa_certificados"]
     if (presupuestosTieneIvaMonto) {
       selectPresupuestos.push("iva_monto")
     }
@@ -290,7 +290,7 @@ router.get("/:id/ficha-pdf", async (req, res) => {
       .from("presupuestos")
       .select(selectPresupuestos.join(", "))
       .eq("cliente_id", id)
-      .order("fecha", { ascending: false })
+      .order("created_at", { ascending: false })
 
     if (presupuestosError) throw presupuestosError
 
@@ -321,40 +321,95 @@ router.get("/:id/ficha-pdf", async (req, res) => {
       `
         SELECT c.id, c.presupuesto_id, c.numero, c.secuencia, c.fecha,
           c.total_cert_con_iva, c.total_cert_sin_iva, c.iva,
-          COALESCE((SELECT SUM(mcc.monto_asignado) FROM movimientos_caja_certificados mcc WHERE mcc.certificado_id = c.id), 0) AS pagos_asignados,
+          COALESCE(c.pagos, 0) AS pagos_asignados,
           p.numero AS presupuesto_numero, p.obra_id
         FROM certificados c
         INNER JOIN presupuestos p ON p.id = c.presupuesto_id
         WHERE p.cliente_id = $1
           AND COALESCE(p.usa_certificados, FALSE) = TRUE
-        ORDER BY c.fecha ASC, c.secuencia ASC, c.id ASC
+        ORDER BY c.fecha DESC, c.secuencia DESC, c.id DESC
       `,
       [id]
     )
     const certificadosList = certificadosQ.rows || []
-    const pagosImputadosPorPresupuesto = new Map()
-    const pagosNoImputadosList = []
-    movimientosList.forEach((mov) => {
-      const presupuestoId = Number(mov.presupuesto_id || 0)
-      const monto = roundMoney(mov.monto_total)
-      if (presupuestoId > 0) {
-        pagosImputadosPorPresupuesto.set(presupuestoId, roundMoney((pagosImputadosPorPresupuesto.get(presupuestoId) || 0) + monto))
-      } else {
-        pagosNoImputadosList.push(mov)
-      }
+    const pagosCajaPorPresupuesto = new Map()
+    const pagosAsignadosQ = await pool.query(
+      `
+        SELECT mcp.presupuesto_id,
+          SUM(COALESCE(NULLIF(mcp.monto_asignado, 0), mc.monto_total)) AS total_pagado_caja
+        FROM movimientos_caja_presupuestos mcp
+        INNER JOIN movimientos_caja mc ON mc.id = mcp.movimiento_id
+        INNER JOIN presupuestos p ON p.id = mcp.presupuesto_id
+        WHERE mc.tipo = 'ingreso'
+          AND p.cliente_id = $1
+        GROUP BY mcp.presupuesto_id
+      `,
+      [id]
+    )
+    for (const row of pagosAsignadosQ.rows || []) {
+      pagosCajaPorPresupuesto.set(Number(row.presupuesto_id), roundMoney(row.total_pagado_caja))
+    }
+
+    const notasPorPresupuesto = new Map()
+    const notasQ = await pool.query(
+      `
+        SELECT ncp.presupuesto_id, SUM(ncp.monto_asignado) AS total_notas
+        FROM notas_credito_cliente_presupuestos ncp
+        INNER JOIN notas_credito_cliente nc ON nc.id = ncp.nota_credito_id
+        INNER JOIN presupuestos p ON p.id = ncp.presupuesto_id
+        WHERE p.cliente_id = $1
+          AND LOWER(TRIM(COALESCE(nc.estado, 'activa'))) = 'activa'
+        GROUP BY ncp.presupuesto_id
+      `,
+      [id]
+    )
+    for (const row of notasQ.rows || []) {
+      notasPorPresupuesto.set(Number(row.presupuesto_id), roundMoney(row.total_notas))
+    }
+
+    const imputadosQ = await pool.query(
+      `
+        SELECT mc.id
+        FROM movimientos_caja mc
+        WHERE mc.cliente_id = $1
+          AND mc.tipo = 'ingreso'
+          AND (
+            mc.presupuesto_id IS NOT NULL
+            OR EXISTS (
+              SELECT 1 FROM movimientos_caja_presupuestos mcp WHERE mcp.movimiento_id = mc.id
+            )
+            OR EXISTS (
+              SELECT 1 FROM movimientos_caja_certificados mcc WHERE mcc.movimiento_id = mc.id
+            )
+          )
+      `,
+      [id]
+    )
+    const movimientosImputados = new Set((imputadosQ.rows || []).map((row) => Number(row.id)))
+    const pagosNoImputadosList = movimientosList.filter((mov) => {
+      if (String(mov.tipo || "") !== "ingreso") return false
+      return !movimientosImputados.has(Number(mov.id))
     })
+
+    const etiquetaEstadoCobro = (total, pagado) => {
+      if (total <= 0.01) return "Sin deuda"
+      if (pagado <= 0) return "Pendiente"
+      if (total - pagado <= 0.009) return "Pagado"
+      return "Parcial"
+    }
 
     const estadoCuentaPresupuestos = presupuestosAceptadosList
       .filter((p) => !Boolean(p.usa_certificados))
       .map((p) => {
-      const total = roundMoney(p.total)
+      const totalOriginal = roundMoney(p.total)
       const iva = roundMoney(p.iva_monto)
-      const sinIva = roundMoney(total - iva)
+      const sinIva = roundMoney(totalOriginal - iva)
       const moneda = normalizeMonedaPresupuesto(p.moneda)
-      const pagado = roundMoney(pagosImputadosPorPresupuesto.get(Number(p.id)) || 0)
+      const notas = roundMoney(notasPorPresupuesto.get(Number(p.id)) || 0)
+      const total = roundMoney(Math.max(0, totalOriginal - notas))
+      const pagado = roundMoney(pagosCajaPorPresupuesto.get(Number(p.id)) || 0)
       const saldoPendiente = roundMoney(Math.max(0, total - pagado))
       const saldoAFavor = roundMoney(Math.max(0, pagado - total))
-      const estadoCobro = pagado <= 0 ? "Pendiente" : (pagado < total ? "Parcial" : (pagado === total ? "Pagado" : "A favor"))
       return {
         presupuesto_id: Number(p.id),
         numero: p.numero,
@@ -367,7 +422,7 @@ router.get("/:id/ficha-pdf", async (req, res) => {
         pagado,
         saldo_pendiente: saldoPendiente,
         saldo_a_favor: saldoAFavor,
-        estado_cobro: estadoCobro,
+        estado_cobro: etiquetaEstadoCobro(total, pagado),
       }
       })
 
@@ -377,6 +432,7 @@ router.get("/:id/ficha-pdf", async (req, res) => {
       const iva = roundMoney(certificado.iva)
       const pagado = roundMoney(certificado.pagos_asignados)
       const saldoPendiente = roundMoney(Math.max(0, total - pagado))
+      const estadoCobro = saldoPendiente <= 0.009 ? "Pagado" : (pagado > 0.009 ? "Parcial" : "Pendiente")
       return {
         presupuesto_id: Number(certificado.presupuesto_id),
         certificado_id: Number(certificado.id),
@@ -391,13 +447,16 @@ router.get("/:id/ficha-pdf", async (req, res) => {
         pagado,
         saldo_pendiente: saldoPendiente,
         saldo_a_favor: 0,
-        estado_cobro: pagado <= 0 ? "Pendiente" : (saldoPendiente > 0 ? "Parcial" : "Pagado"),
+        estado_cobro: estadoCobro,
       }
     })
     const estadoCuenta = [...estadoCuentaPresupuestos, ...estadoCuentaCertificados]
 
     const totalCargosPresupuestos = roundMoney(estadoCuenta.reduce((acc, item) => acc + item.total, 0))
-    const totalPagosCaja = roundMoney(movimientosList.reduce((acc, mov) => acc + roundMoney(mov.monto_total), 0))
+    const totalPagosCaja = roundMoney(movimientosList.reduce((acc, mov) => {
+      const monto = roundMoney(mov.monto_total)
+      return acc + (String(mov.tipo || "") === "egreso" ? -monto : monto)
+    }, 0))
     const totalNoImputado = roundMoney(pagosNoImputadosList.reduce((acc, mov) => acc + roundMoney(mov.monto_total), 0))
     const saldoPendienteFinal = roundMoney(saldoInicialArrastre + totalCargosPresupuestos - totalPagosCaja)
 
@@ -421,19 +480,26 @@ router.get("/:id/ficha-pdf", async (req, res) => {
     }
 
     const drawSummaryGrid = (rows = []) => {
-      ensureSpace(72)
-      const cardHeight = 48
       const availableWidth = pageWidth - 90
       const colW = availableWidth / Math.max(rows.length, 1)
+      const innerW = colW - 16
+      doc.font("Helvetica-Bold").fontSize(8)
+      let titleH = 12
+      rows.forEach((item) => {
+        const [title] = String(item).split("\n")
+        titleH = Math.max(titleH, doc.heightOfString(title || "", { width: innerW }))
+      })
+      const cardHeight = 12 + titleH + 20
+      ensureSpace(cardHeight + 16)
 
       rows.forEach((item, idx) => {
         const x = 45 + idx * colW
         doc.rect(x, cursorY, colW, cardHeight).fillAndStroke("#f8fafc", PDF_COLORS.line)
         const [title, value] = String(item).split("\n")
         doc.fillColor(PDF_COLORS.slate).font("Helvetica-Bold").fontSize(8)
-        doc.text(title || "", x + 8, cursorY + 9, { width: colW - 16 })
+        doc.text(title || "", x + 8, cursorY + 8, { width: innerW })
         doc.fillColor(PDF_COLORS.ink).font("Helvetica-Bold").fontSize(12)
-        doc.text(value || "", x + 8, cursorY + 22, { width: colW - 16 })
+        doc.text(value || "", x + 8, cursorY + 10 + titleH, { width: innerW, lineBreak: false })
       })
 
       doc.fillColor(PDF_COLORS.ink)
@@ -536,37 +602,117 @@ router.get("/:id/ficha-pdf", async (req, res) => {
       `Saldo pendiente final\n$ ${formatMoneyAr(saldoPendienteFinal)}`,
     ])
 
-    drawTable({
-      columns: [
-        { key: "numero", label: "NRO", x: 55, width: 30 },
-        { key: "fecha", label: "FECHA", x: 87, width: 52 },
-        { key: "obra", label: "OBRA", x: 141, width: 74 },
-        { key: "moneda", label: "MON", x: 217, width: 24 },
-        { key: "sin_iva", label: "S/IVA", x: 243, width: 52, align: "right" },
-        { key: "iva", label: "IVA", x: 297, width: 40, align: "right" },
-        { key: "total", label: "TOTAL", x: 339, width: 54, align: "right" },
-        { key: "pagado", label: "PAGADO", x: 395, width: 54, align: "right" },
-        { key: "saldo", label: "SALDO", x: 451, width: 54, align: "right" },
-        { key: "estado", label: "ESTADO", x: 503, width: 43 },
-      ],
-      rows: estadoCuenta.map((p) => ({
-        numero: p.certificado_id
-          ? `#${p.numero || "-"}/C${p.certificado_numero || "-"}`
-          : `#${p.numero || "-"}`,
-        fecha: p.fecha ? new Date(p.fecha).toLocaleDateString("es-AR") : "-",
-        obra: p.obra,
-        moneda: p.moneda,
-        sin_iva: formatMoneyByMoneda(p.sin_iva, p.moneda),
-        iva: formatMoneyByMoneda(p.iva, p.moneda),
-        total: formatMoneyByMoneda(p.total, p.moneda),
-        pagado: formatMoneyByMoneda(p.pagado, p.moneda),
-        saldo: formatMoneyByMoneda(p.saldo_pendiente, p.moneda),
-        estado: p.estado_cobro,
-      })),
-      emptyText: "No hay cargos (presupuestos o certificados) para estado de cuenta.",
-      rowHeight: 24,
-      useGrid: true,
-    })
+    const filasEstadoCuenta = estadoCuenta.map((p) => ({
+      numero: p.certificado_id
+        ? `#${p.numero || "-"}/C${p.certificado_numero || "-"}`
+        : `#${p.numero || "-"}`,
+      fecha: p.fecha ? new Date(p.fecha).toLocaleDateString("es-AR") : "-",
+      obra: p.obra,
+      moneda: p.moneda,
+      sin_iva: formatMoneyByMoneda(p.sin_iva, p.moneda),
+      iva: formatMoneyByMoneda(p.iva, p.moneda),
+      total: formatMoneyByMoneda(p.total, p.moneda),
+      pagado: formatMoneyByMoneda(p.pagado, p.moneda),
+      saldo: Number(p.saldo_a_favor || 0) > 0
+        ? `${formatMoneyByMoneda(p.saldo_pendiente, p.moneda)}\nA favor ${formatMoneyByMoneda(p.saldo_a_favor, p.moneda)}`
+        : formatMoneyByMoneda(p.saldo_pendiente, p.moneda),
+      estado: p.estado_cobro,
+    }))
+
+    const drawEstadoCuentaTable = (rows) => {
+      const marginX = 45
+      const fontSize = 8
+      const headerH = 20
+      const minRowH = 18
+      const weights = [
+        { key: "numero", label: "NRO", w: 68 },
+        { key: "fecha", label: "FECHA", w: 58 },
+        { key: "obra", label: "OBRA", w: 130 },
+        { key: "moneda", label: "MON", w: 34 },
+        { key: "sin_iva", label: "S/IVA", w: 82, align: "right", nowrap: true },
+        { key: "iva", label: "IVA", w: 68, align: "right", nowrap: true },
+        { key: "total", label: "TOTAL", w: 88, align: "right", nowrap: true },
+        { key: "pagado", label: "PAGADO", w: 88, align: "right", nowrap: true },
+        { key: "saldo", label: "SALDO", w: 100, align: "right" },
+        { key: "estado", label: "ESTADO", w: 62 },
+      ]
+      const widthSum = weights.reduce((acc, col) => acc + col.w, 0)
+      const tableWidth = doc.page.width - 90
+      let cursorX = marginX
+      const columns = weights.map((col) => {
+        const width = (col.w / widthSum) * tableWidth
+        const current = { ...col, x: cursorX, width }
+        cursorX += width
+        return current
+      })
+
+      const drawHeader = () => {
+        doc.rect(marginX, cursorY, tableWidth, headerH).fill(PDF_COLORS.navy)
+        doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(8)
+        columns.forEach((col) => {
+          doc.text(col.label, col.x + 3, cursorY + 6, {
+            width: col.width - 6,
+            align: col.align || "left",
+            lineBreak: false,
+          })
+        })
+        doc.fillColor(PDF_COLORS.ink)
+        cursorY += headerH
+      }
+
+      const medirFila = (row) => {
+        doc.font("Helvetica").fontSize(fontSize)
+        let height = minRowH
+        columns.forEach((col) => {
+          const text = String(row[col.key] ?? "-")
+          const textHeight = doc.heightOfString(text, {
+            width: Math.max(8, col.width - 6),
+            align: col.align || "left",
+            lineBreak: !col.nowrap,
+          })
+          height = Math.max(height, textHeight + 8)
+        })
+        return height
+      }
+
+      const asegurarFila = (needed) => {
+        if (cursorY + needed <= doc.page.height - footerSafe) return
+        doc.addPage()
+        cursorY = 48
+        drawHeader()
+      }
+
+      drawHeader()
+
+      if (!rows.length) {
+        doc.font("Helvetica").fontSize(10).fillColor(PDF_COLORS.ink)
+        doc.text("No hay cargos (presupuestos o certificados) para estado de cuenta.", marginX, cursorY + 6)
+        cursorY += 28
+        return
+      }
+
+      rows.forEach((row, idx) => {
+        const rowH = medirFila(row)
+        asegurarFila(rowH)
+        if (idx % 2 === 0) {
+          doc.rect(marginX, cursorY, tableWidth, rowH).fill("#f8fafc")
+        }
+        doc.moveTo(marginX, cursorY + rowH).lineTo(marginX + tableWidth, cursorY + rowH).strokeColor(PDF_COLORS.line).lineWidth(0.3).stroke()
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(fontSize)
+        columns.forEach((col) => {
+          doc.text(String(row[col.key] ?? "-"), col.x + 3, cursorY + 4, {
+            width: col.width - 6,
+            align: col.align || "left",
+            lineBreak: !col.nowrap,
+          })
+        })
+        cursorY += rowH
+      })
+
+      cursorY += 12
+    }
+
+    drawEstadoCuentaTable(filasEstadoCuenta)
 
     doc.end()
   } catch (err) {
