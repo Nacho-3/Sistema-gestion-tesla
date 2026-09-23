@@ -443,13 +443,14 @@ export default {
     return api.post(`/caja/semanas/${id}/control-inicial`, payload)
   },
 
-  getLibroChequesCaja(caja_codigo, estado, busqueda, fecha_inicio, fecha_fin) {
+  getLibroChequesCaja(caja_codigo, estado, busqueda, fecha_inicio, fecha_fin, caja_semanal_id) {
     const params = new URLSearchParams()
     if (caja_codigo) params.append("caja_codigo", caja_codigo)
     if (estado) params.append("estado", estado)
     if (busqueda) params.append("busqueda", busqueda)
     if (fecha_inicio) params.append("fecha_inicio", fecha_inicio)
     if (fecha_fin) params.append("fecha_fin", fecha_fin)
+    if (caja_semanal_id) params.append("caja_semanal_id", caja_semanal_id)
     return api.get(`/caja/libro-cheques?${params.toString()}`)
   },
 
@@ -461,13 +462,14 @@ export default {
     return api.get(`/caja/libro-cheques/disponibles?${params.toString()}`)
   },
 
-  getLibroChequesPdf(caja_codigo, listado = "ambos", busqueda, fecha_inicio, fecha_fin) {
+  getLibroChequesPdf(caja_codigo, listado = "ambos", busqueda, fecha_inicio, fecha_fin, caja_semanal_id) {
     const params = new URLSearchParams()
     if (caja_codigo) params.append("caja_codigo", caja_codigo)
     if (listado) params.append("listado", listado)
     if (busqueda) params.append("busqueda", busqueda)
     if (fecha_inicio) params.append("fecha_inicio", fecha_inicio)
     if (fecha_fin) params.append("fecha_fin", fecha_fin)
+    if (caja_semanal_id) params.append("caja_semanal_id", caja_semanal_id)
     return api.get(`/caja/libro-cheques/pdf?${params.toString()}`, { responseType: "blob" })
   },
 

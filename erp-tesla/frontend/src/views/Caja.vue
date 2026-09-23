@@ -515,16 +515,16 @@ const haySemanaAbierta = computed(() => {
 })
 
 const claveSemanaLibro = (semana) => {
-  const inicio = String(semana?.fecha_inicio || "")
-  const fin = String(semana?.fecha_fin || "")
-  if (!inicio || !fin) return ""
-  return `${inicio}|${fin}`
+  const id = extraerSemanaIdNumerica(semana?.id)
+  if (!id || !semana?.fecha_inicio) return ""
+  return String(id)
 }
 
 const etiquetaSemanaLibro = (semana) => {
   if (!semana?.fecha_inicio) return "Semana"
   const inicio = new Date(`${semana.fecha_inicio}T00:00:00`).toLocaleDateString("es-AR")
-  if (!semana?.fecha_fin) return `${inicio} al día de hoy`
+  const abierta = normalizarEstadoSemana(semana?.estado) === "abierta" || !semana?.fecha_fin
+  if (abierta) return `${inicio} al día de hoy (abierta)`
   const fin = new Date(`${semana.fecha_fin}T00:00:00`).toLocaleDateString("es-AR")
   return `${inicio} al ${fin}`
 }
@@ -552,7 +552,7 @@ const sincronizarFiltroSemanaLibroCheques = ({ forzar = false } = {}) => {
   const filtroActual = String(filtroSemanaLibroCheques.value || "").toLowerCase()
   const existeFiltroActual = opcionesSemanaLibroCheques.value.some((semana) => String(semana.id) === String(filtroSemanaLibroCheques.value))
 
-  if (!forzar && filtroActual !== "global" && existeFiltroActual) {
+  if (!forzar && (filtroActual === "global" || existeFiltroActual)) {
     return
   }
 
@@ -580,9 +580,9 @@ const libroChequesFiltrado = computed(() => {
   const termino = String(filtroBusquedaLibroCheques.value || "").trim().toLowerCase()
 
   return (libroCheques.value || []).filter((item) => {
-    if (!["cheque", "echeq"].includes(String(item?.medio_pago || "").toLowerCase())) return false
+    if (String(item?.medio_pago || "").toLowerCase() !== "cheque") return false
     if (!termino) return true
-    return [item.numero_cheque, item.banco, item.librador_endosante, item.endosado_a]
+    return [item.numero_cheque, item.identificador, item.banco, item.librador_endosante, item.endosado_a]
       .some((v) => String(v || "").toLowerCase().includes(termino))
   })
 })
@@ -600,6 +600,20 @@ const libroChequesDisponibles = computed(() => {
       return String(a?.numero_cheque || "").localeCompare(String(b?.numero_cheque || ""))
     })
 })
+
+const libroSemanaEsperaControl = computed(() => {
+  const semana = semanaLibroChequesActiva.value
+  if (!semana) return false
+  const abierta = normalizarEstadoSemana(semana?.estado) === "abierta" || !semana?.fecha_fin
+  return abierta && !semana.control_inicial_realizado
+})
+
+const textoNumeroLibro = (item) => {
+  const numero = String(item?.numero_cheque || "").trim() || "-"
+  const identificador = String(item?.identificador || "").trim()
+  if (identificador && identificador !== numero) return `${numero} · ${identificador}`
+  return numero
+}
 
 const libroChequesNoDisponibles = computed(() => {
   return libroChequesFiltrado.value
@@ -842,6 +856,21 @@ const todosChequesControlSeleccionados = computed(() => {
   if (!candidatos.length) return false
   return candidatos.every((item) => (chequesControlSemanalSeleccionados.value || []).includes(Number(item.id)))
 })
+const chequesControlSemanalFisicos = computed(() => {
+  return (chequesControlSemanalCandidatos.value || []).filter((item) => String(item?.medio_pago || "").toLowerCase() !== "echeq")
+})
+const echeqsControlSemanalCandidatos = computed(() => {
+  return (chequesControlSemanalCandidatos.value || []).filter((item) => String(item?.medio_pago || "").toLowerCase() === "echeq")
+})
+const etiquetaControlValor = (item) => {
+  const identificador = String(item?.identificador || "").trim()
+  const numero = String(item?.numero_cheque || "").trim()
+  const partes = []
+  if (identificador) partes.push(identificador)
+  if (numero && numero !== identificador) partes.push(`N° ${numero}`)
+  if (!partes.length) partes.push("-")
+  return `${partes.join(" · ")} · ${item?.banco || "-"} · ${formatoMoneda(item?.importe || 0)}`
+}
 
 const etiquetaSemanaRango = (semana) => {
   if (!semana?.fecha_inicio) return "Semana"
@@ -1799,10 +1828,11 @@ const descargarLibroChequesPdf = async () => {
   const listado = String(opcionPdfCheques.value || "disponibles")
   const fechaInicio = semanaLibroChequesActiva.value?.fecha_inicio || ""
   const fechaFin = semanaLibroChequesActiva.value?.fecha_fin || ""
+  const semanaId = extraerSemanaIdNumerica(semanaLibroChequesActiva.value?.id)
 
   try {
     generandoPdfCheques.value = true
-    const res = await api.getLibroChequesPdf(filtroCaja.value, listado, filtroBusquedaLibroCheques.value, fechaInicio, fechaFin)
+    const res = await api.getLibroChequesPdf(filtroCaja.value, listado, filtroBusquedaLibroCheques.value, fechaInicio, fechaFin, semanaId)
     const blob = new Blob([res.data], { type: "application/pdf" })
     const url = window.URL.createObjectURL(blob)
     const link = document.createElement("a")
@@ -2331,14 +2361,17 @@ const payloadMovimiento = () => ({
 const cargarLibroCheques = async () => {
   try {
     loadingLibroCheques.value = true
-    const fechaInicio = semanaLibroChequesActiva.value?.fecha_inicio || ""
-    const fechaFin = semanaLibroChequesActiva.value?.fecha_fin || ""
+    const semanaLibro = semanaLibroChequesActiva.value
+    const fechaInicio = semanaLibro?.fecha_inicio || ""
+    const fechaFin = semanaLibro?.fecha_fin || ""
+    const semanaId = extraerSemanaIdNumerica(semanaLibro?.id)
     const res = await api.getLibroChequesCaja(
       filtroCaja.value,
       "",
       filtroBusquedaLibroCheques.value,
       fechaInicio,
       fechaFin,
+      semanaId,
     )
     libroCheques.value = res.data || []
   } catch (err) {
@@ -2357,8 +2390,9 @@ const cargarChequesDisponibles = async () => {
       ? (semanasCajaVisibles.value || []).find((semana) => {
         const inicio = String(semana?.fecha_inicio || "")
         const fin = String(semana?.fecha_fin || "")
-        if (!inicio || !fin) return false
-        return fechaFormulario >= inicio && fechaFormulario <= fin
+        if (!inicio || fechaFormulario < inicio) return false
+        if (fin) return fechaFormulario <= fin
+        return normalizarEstadoSemana(semana?.estado) === "abierta"
       })
       : null
 
@@ -2622,9 +2656,16 @@ const getEcheqsMovimiento = (movimiento) => {
 
 const getCantidadEcheqs = (movimiento) => getEcheqsMovimiento(movimiento).length
 
+const etiquetaValorControlado = (detalle) => {
+  const identificador = String(detalle?.identificador || "").trim()
+  const numero = String(detalle?.numero_cheque || "").trim()
+  if (identificador && numero && identificador !== numero) return `${identificador} · N° ${numero}`
+  return identificador || numero
+}
+
 const getIdentificadoresCheque = (movimiento) => {
   const ids = getChequesMovimiento(movimiento)
-    .map((detalle) => String(detalle?.identificador || "").trim())
+    .map((detalle) => etiquetaValorControlado(detalle))
     .filter(Boolean)
 
   return ids.join(" · ")
@@ -2641,7 +2682,7 @@ const getResumenCheques = (movimiento) => {
 
 const getIdentificadoresEcheq = (movimiento) => {
   const ids = getEcheqsMovimiento(movimiento)
-    .map((detalle) => String(detalle?.identificador || detalle?.numero_cheque || "").trim())
+    .map((detalle) => etiquetaValorControlado(detalle))
     .filter(Boolean)
 
   return ids.join(" · ")
@@ -3320,8 +3361,14 @@ onUnmounted(() => {
 
           <div v-if="loadingLibroCheques" class="spinner">Cargando libro de cheques...</div>
           <div v-else-if="!libroChequesFiltrado.length" class="empty">
-            <strong>Sin cheques en el libro</strong>
-            <span>Los cheques ingresados desde movimientos se verán acá.</span>
+            <template v-if="libroSemanaEsperaControl">
+              <strong>Semana sin control inicial</strong>
+              <span>Los cheques de la semana anterior se ven como disponibles recién cuando confirmás el control semanal.</span>
+            </template>
+            <template v-else>
+              <strong>Sin cheques en el libro</strong>
+              <span>Los cheques ingresados desde movimientos se verán acá.</span>
+            </template>
           </div>
           <div v-else class="libro-cheques-split">
           <div>
@@ -3352,7 +3399,7 @@ onUnmounted(() => {
                 <tbody>
                   <tr v-for="item in libroChequesDisponibles" :key="`disp-${item.id}`">
                     <td>{{ formatearFechaLibro(item.fecha_entrada) }}</td>
-                    <td>{{ item.numero_cheque || '-' }}</td>
+                    <td>{{ textoNumeroLibro(item) }}</td>
                     <td>{{ item.librador_endosante || '-' }}</td>
                     <td>{{ item.banco || '-' }}</td>
                     <td>{{ formatoMoneda(item.importe || 0) }}</td>
@@ -3403,7 +3450,7 @@ onUnmounted(() => {
                 <tbody>
                   <tr v-for="item in libroChequesNoDisponibles" :key="`nodisp-${item.id}`">
                     <td>{{ formatearFechaLibro(item.fecha_entrada) }}</td>
-                    <td>{{ item.numero_cheque || '-' }}</td>
+                    <td>{{ textoNumeroLibro(item) }}</td>
                     <td>{{ item.librador_endosante || '-' }}</td>
                     <td>{{ item.banco || '-' }}</td>
                     <td>{{ formatoMoneda(item.importe || 0) }}</td>
@@ -3861,7 +3908,7 @@ onUnmounted(() => {
         <div class="modal-header-copy">
           <span class="section-kicker">Caja semanal</span>
           <h3>Control semanal inicial</h3>
-          <p>Definí efectivo y cheques controlados para iniciar la semana.</p>
+          <p>Definí efectivo, cheques y eCheqs controlados para iniciar la semana.</p>
         </div>
         <button type="button" class="btn-close" aria-label="Cerrar modal" @click="mostrarModalControlSemanal = false">×</button>
       </div>
@@ -3890,7 +3937,7 @@ onUnmounted(() => {
         <div class="form-group">
           <div class="cheques-transfer-toolbar cheques-transfer-toolbar-control">
             <div class="cheques-transfer-toolbar-copy">
-              <span class="cheques-transfer-toolbar-title">Cheques disponibles de la semana anterior</span>
+              <span class="cheques-transfer-toolbar-title">Valores disponibles de la semana anterior</span>
               <small class="cheques-transfer-toolbar-meta">
                 {{ chequesControlSemanalSeleccionados.length }} de {{ chequesControlSemanalCandidatos.length }} seleccionados
               </small>
@@ -3899,17 +3946,26 @@ onUnmounted(() => {
               {{ todosChequesControlSeleccionados ? "Deseleccionar todos" : "Seleccionar todos" }}
             </button>
           </div>
+          <p class="control-grupo-titulo">Cheques</p>
           <div class="cheques-transfer-list">
-            <label v-for="item in chequesControlSemanalCandidatos" :key="`control-${item.id}`" class="cheque-transfer-item">
+            <label v-for="item in chequesControlSemanalFisicos" :key="`control-cheque-${item.id}`" class="cheque-transfer-item">
               <input v-model="chequesControlSemanalSeleccionados" type="checkbox" :value="Number(item.id)" />
-              <span>#{{ item.numero_cheque || '-' }} · {{ item.banco || '-' }} · {{ formatoMoneda(item.importe || 0) }}</span>
+              <span>{{ etiquetaControlValor(item) }}</span>
             </label>
-            <small v-if="!chequesControlSemanalCandidatos.length" class="form-help">No hay cheques disponibles de la semana anterior.</small>
+            <small v-if="!chequesControlSemanalFisicos.length" class="form-help">No hay cheques disponibles de la semana anterior.</small>
+          </div>
+          <p class="control-grupo-titulo">eCheqs</p>
+          <div class="cheques-transfer-list">
+            <label v-for="item in echeqsControlSemanalCandidatos" :key="`control-echeq-${item.id}`" class="cheque-transfer-item">
+              <input v-model="chequesControlSemanalSeleccionados" type="checkbox" :value="Number(item.id)" />
+              <span>{{ etiquetaControlValor(item) }}</span>
+            </label>
+            <small v-if="!echeqsControlSemanalCandidatos.length" class="form-help">No hay eCheqs disponibles de la semana anterior.</small>
           </div>
         </div>
 
         <div class="transfer-cheques-total">
-          <span>Total cheques seleccionados</span>
+          <span>Total cheques y eCheqs seleccionados</span>
           <strong>{{ formatoMoneda(totalChequesControlSemanal || 0) }}</strong>
         </div>
 
@@ -6286,6 +6342,15 @@ onUnmounted(() => {
   color: #e2e8f0;
   font-weight: 700;
   font-size: 0.93rem;
+}
+
+.control-grupo-titulo {
+  margin: 0.85rem 0 0.35rem;
+  color: #cbd5e1;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 
 .cheques-transfer-toolbar-meta {
