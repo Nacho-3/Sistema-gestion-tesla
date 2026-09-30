@@ -4793,7 +4793,7 @@ router.put("/:id", async (req, res) => {
         presupuestosAsignaciones: tipoFinal === "ingreso" ? presupuestosAsignacionesFinal : [],
       })
       await sincronizarMovimientosCajaCertificados({
-        client,
+        client: clientPresupuestos,
         movimientoId: id,
         asignaciones: tipoFinal === "ingreso" ? certificadosAsignacionesFinal : [],
       })
