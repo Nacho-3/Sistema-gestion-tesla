@@ -340,6 +340,11 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
     ? roundMoney(diasNoTrabajados8h + diasNoTrabajados9h)
     : diasNoTrabajadosLegacy
   const diasEnfermedad = preferColumn(liq.dias_enfermedad, meta.dias_enfermedad)
+  const horasEnfermedadMeta = Number(meta.horas_enfermedad)
+  const horasEnfermedad = Number.isFinite(horasEnfermedadMeta)
+    ? roundMoney(Math.max(0, horasEnfermedadMeta))
+    : roundMoney(Math.max(0, diasEnfermedad * 8))
+  const enfermedadModo = String(meta.enfermedad_modo || "").toLowerCase() === "horas" ? "horas" : "dias"
   // Treat `adicional` as a standard column (fallback to 0). Do not prefer legacy meta.
   const adicional = roundMoney(liq.adicional ?? 0)
 
@@ -353,7 +358,7 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
     ? roundMoney(feriadosCantidad * 8 * valorHora)
     : roundMoney(Number(liq.importe_feriados ?? 0))
   const importeEnfermedad = valorHora > 0
-    ? roundMoney(diasEnfermedad * 8 * valorHora)
+    ? roundMoney(horasEnfermedad * valorHora)
     : roundMoney(Number(liq.importe_enfermedad ?? 0))
   const descuentoDiasNoTrabajados = valorHora > 0
     ? roundMoney((((diasNoTrabajados8h > 0 || diasNoTrabajados9h > 0) ? diasNoTrabajados8h : diasNoTrabajados) * 8 + diasNoTrabajados9h * 9) * valorHora)
@@ -373,7 +378,9 @@ const getConceptosFromLiquidacion = (liq = {}, valorHora = 0) => {
     dias_no_trabajados_8h: (diasNoTrabajados8h > 0 || diasNoTrabajados9h > 0) ? diasNoTrabajados8h : diasNoTrabajados,
     dias_no_trabajados_9h: (diasNoTrabajados8h > 0 || diasNoTrabajados9h > 0) ? diasNoTrabajados9h : 0,
     dias_no_trabajados: diasNoTrabajados,
-    dias_enfermedad: diasEnfermedad,
+    dias_enfermedad: roundMoney(horasEnfermedad / 8),
+    horas_enfermedad: horasEnfermedad,
+    enfermedad_modo: enfermedadModo,
     importe_horas_extra: importeHorasExtra,
     importe_horas_extra_100: importeHorasExtra100,
     importe_feriados: importeFeriados,
@@ -438,6 +445,8 @@ const mapLiquidacion = (liq, totalPagado = 0) => {
     dias_no_trabajados_9h: conceptos.dias_no_trabajados_9h,
     dias_no_trabajados: conceptos.dias_no_trabajados,
     dias_enfermedad: conceptos.dias_enfermedad,
+    horas_enfermedad: conceptos.horas_enfermedad,
+    enfermedad_modo: conceptos.enfermedad_modo,
     importe_feriados: conceptos.importe_feriados,
     importe_enfermedad: conceptos.importe_enfermedad,
     descuento_dias_no_trabajados: conceptos.descuento_dias_no_trabajados,
@@ -867,7 +876,17 @@ router.get("/:id/pdf", async (req, res) => {
         { label: "Presentismo", amount: Number(liquidacion.presentismo || 0) },
         { label: "No remunerativo", amount: Number(liquidacion.no_remunerativo || 0) },
         { label: `Feriados (${formatoCantidad(liquidacion.feriados_cantidad)} dias)`, amount: Number(liquidacion.importe_feriados || 0) },
-        { label: `Dias por enfermedad (${formatoCantidad(liquidacion.dias_enfermedad)} dias)`, amount: Number(liquidacion.importe_enfermedad || 0) },
+        {
+          label: (() => {
+            const horas = Number(liquidacion.horas_enfermedad ?? (Number(liquidacion.dias_enfermedad || 0) * 8))
+            const modoHoras = String(liquidacion.enfermedad_modo || "").toLowerCase() === "horas"
+            if (modoHoras) {
+              return `Enfermedad (${formatoCantidad(horas)} hs)`
+            }
+            return `Dias por enfermedad (${formatoCantidad(Number(liquidacion.dias_enfermedad || horas / 8))} dias)`
+          })(),
+          amount: Number(liquidacion.importe_enfermedad || 0),
+        },
         { label: `Horas extra 50% (${formatoCantidad(liquidacion.horas_extra_cantidad)} hs)`, amount: Number(liquidacion.importe_horas_extra || 0) },
         { label: `Horas extra 100% (${formatoCantidad(liquidacion.horas_extra_100_cantidad)} hs)`, amount: Number(liquidacion.importe_horas_extra_100 || 0) },
         { label: "Adicional", amount: Number(liquidacion.adicional || 0) },
@@ -1157,6 +1176,8 @@ router.put("/:id", async (req, res) => {
       dias_no_trabajados_9h,
       dias_no_trabajados,
       dias_enfermedad,
+      horas_enfermedad,
+      enfermedad_modo,
       adelantos,
       adicional,
       conceptos_extra,
@@ -1217,6 +1238,14 @@ router.put("/:id", async (req, res) => {
       dias_no_trabajados_8h: roundMoney(dias_no_trabajados_8h ?? conceptosActuales.dias_no_trabajados_8h ?? dias_no_trabajados ?? conceptosActuales.dias_no_trabajados),
       dias_no_trabajados_9h: roundMoney(dias_no_trabajados_9h ?? conceptosActuales.dias_no_trabajados_9h ?? 0),
       dias_enfermedad: roundMoney(dias_enfermedad ?? conceptosActuales.dias_enfermedad ?? 0),
+      horas_enfermedad: roundMoney(
+        horas_enfermedad !== undefined && horas_enfermedad !== null
+          ? horas_enfermedad
+          : (conceptosActuales.horas_enfermedad ?? ((dias_enfermedad ?? conceptosActuales.dias_enfermedad ?? 0) * 8))
+      ),
+      enfermedad_modo: String(enfermedad_modo || conceptosActuales.enfermedad_modo || "dias").toLowerCase() === "horas"
+        ? "horas"
+        : "dias",
       adelantos: roundMoney(adelantos ?? conceptosActuales.adelantos),
       adicional: roundMoney(adicional ?? conceptosActuales.adicional ?? 0),
       conceptos_extra: normalizeConceptosExtras(conceptos_extra ?? conceptosActuales.conceptos_extra),
@@ -1224,10 +1253,14 @@ router.put("/:id", async (req, res) => {
 
     conceptos.ajuste_conceptos_extra = getConceptosExtrasTotal(conceptos.conceptos_extra)
 
+    const horasEnfermedadEfectivas = roundMoney(Math.max(0, Number(conceptos.horas_enfermedad || 0)))
+    conceptos.horas_enfermedad = horasEnfermedadEfectivas
+    conceptos.dias_enfermedad = roundMoney(horasEnfermedadEfectivas / 8)
+
     const importeHorasExtra = roundMoney(conceptos.horas_extra_cantidad * valorHoraCalculado * 1.5)
     const importeHorasExtra100 = roundMoney(conceptos.horas_extra_100_cantidad * valorHoraCalculado * 2)
     const importeFeriados = roundMoney(conceptos.feriados_cantidad * 8 * valorHoraCalculado)
-    const importeEnfermedad = roundMoney(conceptos.dias_enfermedad * 8 * valorHoraCalculado)
+    const importeEnfermedad = roundMoney(horasEnfermedadEfectivas * valorHoraCalculado)
     conceptos.dias_no_trabajados = roundMoney(conceptos.dias_no_trabajados_8h + conceptos.dias_no_trabajados_9h)
     const descuentoDiasNoTrabajados = roundMoney((conceptos.dias_no_trabajados_8h * 8 + conceptos.dias_no_trabajados_9h * 9) * valorHoraCalculado)
 
@@ -1266,6 +1299,8 @@ router.put("/:id", async (req, res) => {
       conceptos_extra: conceptos.conceptos_extra,
       dias_no_trabajados_8h: conceptos.dias_no_trabajados_8h,
       dias_no_trabajados_9h: conceptos.dias_no_trabajados_9h,
+      horas_enfermedad: conceptos.horas_enfermedad,
+      enfermedad_modo: conceptos.enfermedad_modo,
     })
 
     const { data: pagosExistentes } = await db

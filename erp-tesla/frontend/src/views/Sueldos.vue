@@ -62,6 +62,8 @@ const formConceptos = ref({
   vacaciones: 0,
   feriados_cantidad: 0,
   dias_enfermedad: 0,
+  horas_enfermedad: 0,
+  enfermedad_modo: "dias",
   dias_no_trabajados_8h: 0,
   dias_no_trabajados_9h: 0,
   dias_no_trabajados: 0,
@@ -102,6 +104,12 @@ const normalizarLiquidacion = (liq = {}) => ({
   dias_no_trabajados_9h: toNumber(liq.dias_no_trabajados_9h),
   dias_no_trabajados: toNumber(liq.dias_no_trabajados),
   dias_enfermedad: toNumber(liq.dias_enfermedad),
+  horas_enfermedad: (() => {
+    const horasMeta = Number(liq.horas_enfermedad)
+    if (Number.isFinite(horasMeta)) return horasMeta
+    return toNumber(liq.dias_enfermedad) * 8
+  })(),
+  enfermedad_modo: String(liq.enfermedad_modo || "").toLowerCase() === "horas" ? "horas" : "dias",
   importe_feriados: toNumber(liq.importe_feriados),
   importe_enfermedad: toNumber(liq.importe_enfermedad),
   descuento_dias_no_trabajados: toNumber(liq.descuento_dias_no_trabajados),
@@ -136,6 +144,12 @@ const crearFormularioConceptos = (liquidacion = {}, opciones = {}) => {
     dias_no_trabajados_9h: toNumber(liquidacion.dias_no_trabajados_9h),
     dias_no_trabajados: liquidacion.dias_no_trabajados || 0,
     dias_enfermedad: toNumber(liquidacion.dias_enfermedad),
+    horas_enfermedad: (() => {
+      const horasMeta = Number(liquidacion.horas_enfermedad)
+      if (Number.isFinite(horasMeta)) return horasMeta
+      return toNumber(liquidacion.dias_enfermedad) * 8
+    })(),
+    enfermedad_modo: String(liquidacion.enfermedad_modo || "").toLowerCase() === "horas" ? "horas" : "dias",
     adelantos: liquidacion.adelantos || 0,
     observaciones: liquidacion.observaciones || "",
     adicional: liquidacion.adicional || 0,
@@ -311,12 +325,49 @@ const volverALista = async () => {
 
 
 // Actualizar conceptos de liquidación
+const horasEnfermedadEfectivasForm = () => {
+  if (String(formConceptos.value.enfermedad_modo || "dias").toLowerCase() === "horas") {
+    return Math.max(0, toNumber(formConceptos.value.horas_enfermedad))
+  }
+  return Math.max(0, toNumber(formConceptos.value.dias_enfermedad) * 8)
+}
+
+const sincronizarEnfermedadForm = () => {
+  const horas = roundMoney(horasEnfermedadEfectivasForm())
+  formConceptos.value.horas_enfermedad = horas
+  formConceptos.value.dias_enfermedad = roundMoney(horas / 8)
+  formConceptos.value.enfermedad_modo =
+    String(formConceptos.value.enfermedad_modo || "dias").toLowerCase() === "horas" ? "horas" : "dias"
+}
+
+const cambiarModoEnfermedad = (modo) => {
+  const modoNormalizado = String(modo || "dias").toLowerCase() === "horas" ? "horas" : "dias"
+  const horasActuales = horasEnfermedadEfectivasForm()
+  formConceptos.value.enfermedad_modo = modoNormalizado
+  formConceptos.value.horas_enfermedad = roundMoney(horasActuales)
+  formConceptos.value.dias_enfermedad = roundMoney(horasActuales / 8)
+}
+
+const etiquetaEnfermedadLiquidacion = (liquidacion) => {
+  const horasMeta = Number(liquidacion?.horas_enfermedad)
+  const horas = Number.isFinite(horasMeta)
+    ? horasMeta
+    : toNumber(liquidacion?.dias_enfermedad) * 8
+  const modoHoras = String(liquidacion?.enfermedad_modo || "").toLowerCase() === "horas"
+  if (modoHoras) {
+    return `Enfermedad (${formatearCantidad(horas)} hs)`
+  }
+  const dias = toNumber(liquidacion?.dias_enfermedad) || (horas / 8)
+  return `Días por enfermedad (${formatearCantidad(dias)} días)`
+}
+
 const actualizarConceptos = async () => {
   error.value = ""
   loading.value = true
   try {
     formConceptos.value.dias_no_trabajados =
       toNumber(formConceptos.value.dias_no_trabajados_8h) + toNumber(formConceptos.value.dias_no_trabajados_9h)
+    sincronizarEnfermedadForm()
     const res = await api.updateLiquidacion(liquidacionSeleccionada.value.id, formConceptos.value)
     liquidacionSeleccionada.value = normalizarLiquidacion(res.data)
     await cargarLiquidaciones()
@@ -520,7 +571,7 @@ const importeFeriadosPreview = computed(() => {
 })
 
 const importeEnfermedadPreview = computed(() => {
-  return toNumber(formConceptos.value.dias_enfermedad) * 8 * valorHoraDetalle.value
+  return horasEnfermedadEfectivasForm() * valorHoraDetalle.value
 })
 
 const descuentoDiasNoTrabajadosPreview = computed(() => {
@@ -1079,7 +1130,7 @@ const puedeDescargarPdfLiquidacion = computed(() => !!liquidacionSeleccionada.va
               <span>{{ formatearMoneda(liquidacionSeleccionada.importe_feriados) }}</span>
             </div>
             <div class="concepto">
-              <span>Días por enfermedad ({{ formatearCantidad(liquidacionSeleccionada.dias_enfermedad) }} días):</span>
+              <span>{{ etiquetaEnfermedadLiquidacion(liquidacionSeleccionada) }}:</span>
               <span>{{ formatearMoneda(liquidacionSeleccionada.importe_enfermedad) }}</span>
             </div>
             <div class="concepto">
@@ -1415,9 +1466,39 @@ const puedeDescargarPdfLiquidacion = computed(() => !!liquidacionSeleccionada.va
                 </label>
 
                 <label class="form-group form-card-field">
-                  <span>Días por enfermedad (cantidad)</span>
-                  <input v-model.number="formConceptos.dias_enfermedad" type="number" min="0" step="1" @wheel.prevent />
-                  <small class="form-help">Cada día suma 8 horas al valor común. Importe calculado: {{ formatearMoneda(importeEnfermedadPreview) }}</small>
+                  <span>Enfermedad</span>
+                  <div class="enfermedad-modo-row">
+                    <select
+                      class="select-sm"
+                      :value="formConceptos.enfermedad_modo"
+                      @change="cambiarModoEnfermedad($event.target.value)"
+                    >
+                      <option value="dias">Días</option>
+                      <option value="horas">Horas</option>
+                    </select>
+                    <input
+                      v-if="formConceptos.enfermedad_modo === 'horas'"
+                      v-model.number="formConceptos.horas_enfermedad"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      @wheel.prevent
+                    />
+                    <input
+                      v-else
+                      v-model.number="formConceptos.dias_enfermedad"
+                      type="number"
+                      min="0"
+                      step="1"
+                      @wheel.prevent
+                    />
+                  </div>
+                  <small v-if="formConceptos.enfermedad_modo === 'horas'" class="form-help">
+                    Se liquidan por horas al valor común. Importe calculado: {{ formatearMoneda(importeEnfermedadPreview) }}
+                  </small>
+                  <small v-else class="form-help">
+                    Cada día suma 8 horas al valor común. Importe calculado: {{ formatearMoneda(importeEnfermedadPreview) }}
+                  </small>
                 </label>
 
                 <label class="form-group form-card-field">
@@ -2876,6 +2957,18 @@ td {
   border-radius: 0.9rem;
   border: 1px solid rgba(148, 163, 184, 0.14);
   background: linear-gradient(180deg, rgba(30, 41, 59, 0.62), rgba(15, 23, 42, 0.86));
+}
+
+.enfermedad-modo-row {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.enfermedad-modo-row .select-sm {
+  width: 100%;
+  min-height: 2.4rem;
 }
 
 .form-card-field-accent {
