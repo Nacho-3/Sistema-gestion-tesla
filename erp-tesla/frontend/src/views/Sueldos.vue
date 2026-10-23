@@ -1386,7 +1386,7 @@ const puedeDescargarPdfLiquidacion = computed(() => !!liquidacionSeleccionada.va
                     @blur="normalizarHorasConceptosInput"
                   />
                   <small class="form-help">Al cambiar este valor, se autocalcula el sueldo base con el valor hora del empleado. Después podés retocarlo manualmente.</small>
-                  <small class="form-help">Formato hora real. Ejemplo: 0.30 = media hora, 8.30 = ocho horas y media.</small>
+                  <small class="form-help">Formato hora real. 87.4 o 87.40 = 87 horas y 40 minutos; 87,04 = 87 horas y 4 minutos.</small>
                 </label>
 
                 <label class="form-group form-card-field">

@@ -18,6 +18,8 @@ export const sanitizeFileText = (value = "") =>
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[\\/:*?"<>|]/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/^[. ]+|[. ]+$/g, "")
     .trim()
 
 const normalizeSingleLineText = (value = "") =>

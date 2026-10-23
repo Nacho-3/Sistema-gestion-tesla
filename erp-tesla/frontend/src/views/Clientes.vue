@@ -83,11 +83,18 @@ const form = ref({
   nota_saldo_inicial_arrastre: "",
 })
 
+const nombreOrdenCliente = (cliente) => String(cliente?.empresa || cliente?.razon_social || "").trim()
+
+const ordenarClientesAlfabetico = (lista = []) =>
+  [...lista].sort((a, b) =>
+    nombreOrdenCliente(a).localeCompare(nombreOrdenCliente(b), "es", { sensitivity: "base", numeric: true })
+  )
+
 const clientesFiltrados = computed(() => {
   const termino = String(filtroBusqueda.value || "").trim().toLowerCase()
-  if (!termino) return clientes.value
+  if (!termino) return ordenarClientesAlfabetico(clientes.value)
 
-  return clientes.value.filter((cliente) => {
+  return ordenarClientesAlfabetico(clientes.value.filter((cliente) => {
     const campos = [
       cliente.empresa,
       cliente.razon_social,
@@ -98,7 +105,7 @@ const clientesFiltrados = computed(() => {
     ]
 
     return campos.some((campo) => String(campo || "").toLowerCase().includes(termino))
-  })
+  }))
 })
 
 const getclientesFiltradosPorIva = computed(() => {
@@ -129,7 +136,7 @@ const clientesDisponibles = computed(() => {
     resultado = resultado.filter(c => String(c.iva || "").toLowerCase() === String(filtroIva.value).toLowerCase())
   }
 
-  return resultado
+  return ordenarClientesAlfabetico(resultado)
 })
 
 const clientesConEmpresa = computed(() => clientes.value.filter((cliente) => String(cliente.empresa || "").trim()).length)
@@ -618,7 +625,9 @@ const loadClientes = async () => {
   error.value = ""
   try {
     const res = await api.getClientes()
-    clientes.value = (res.data || []).filter(c => String(c.razon_social || "").toUpperCase() !== "ADMINISTRACION INTERNA")
+    clientes.value = ordenarClientesAlfabetico(
+      (res.data || []).filter(c => String(c.razon_social || "").toUpperCase() !== "ADMINISTRACION INTERNA")
+    )
   } catch (err) {
     error.value = extractApiErrorMessage(err, "Error al cargar clientes")
     console.error(err)

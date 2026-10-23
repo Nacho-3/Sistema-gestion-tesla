@@ -172,11 +172,6 @@ const isSaturdayDate = (dateValue) => {
   return Boolean(parsedDate) && parsedDate.getDay() === 6
 }
 
-const isSundayDate = (dateValue) => {
-  const parsedDate = parseLocalDateOnly(dateValue)
-  return Boolean(parsedDate) && parsedDate.getDay() === 0
-}
-
 const resolveHorasExtraDetalle = ({
   fecha,
   horasComputadas,
@@ -666,10 +661,10 @@ router.get("/resumen/pdf", async (req, res) => {
 
     const drawTransferDifferences = (items) => {
       if (grupoSolicitado) {
-        // Calcular primero para saber cuántas filas habrá y reservar espacio exacto.
         // "origen prestó a destino" = origen envió trabajadores a destino
         // → destino RECIBIÓ trabajo → destino le DEBE a origen
         const netPorContraparte = {}
+        const grupoNombre = String(grupo).toUpperCase()
 
         items.forEach((item) => {
           const origenNormalizado = normalizeGroupName(item.origen)
@@ -677,44 +672,52 @@ router.get("/resumen/pdf", async (req, res) => {
           const horas = Number(item.horas || 0)
 
           if (isTargetGroupName(destinoNormalizado) && !isTargetGroupName(origenNormalizado)) {
-            if (!netPorContraparte[item.origen]) netPorContraparte[item.origen] = 0
-            netPorContraparte[item.origen] += horas
+            netPorContraparte[item.origen] = addHourValues(netPorContraparte[item.origen] || 0, horas)
           } else if (isTargetGroupName(origenNormalizado) && !isTargetGroupName(destinoNormalizado)) {
-            if (!netPorContraparte[item.destino]) netPorContraparte[item.destino] = 0
-            netPorContraparte[item.destino] -= horas
+            netPorContraparte[item.destino] = addHourValues(netPorContraparte[item.destino] || 0, -horas)
           }
         })
 
-        const deudas = Object.entries(netPorContraparte)
+        const saldos = Object.entries(netPorContraparte)
           .map(([contraparte, horas]) => ({ contraparte, horas: Number(horas || 0) }))
+
+        const deudas = saldos
           .filter((item) => item.horas > 0.009)
           .sort((a, b) => b.horas - a.horas)
+        const aFavor = saldos
+          .filter((item) => item.horas < -0.009)
+          .map((item) => ({ ...item, horas: Math.abs(item.horas) }))
+          .sort((a, b) => b.horas - a.horas)
 
-        // Calcular espacio necesario: título (~70) + header (26) + filas (26 c/u) + padding (20)
-        const rowCount = deudas.length || 1
-        const neededSpace = 70 + 26 + rowCount * 26 + 20
-        ensureSpace(neededSpace)
-        drawSectionTitle("Diferencia entre horas prestadas", neededSpace)
-
-        if (!deudas.length) {
-          drawList(
-            [{
-              label: `${String(grupo).toUpperCase()} no le debe horas a otros grupos`,
-              value: 0,
-            }],
-            "DEUDA",
-            "HORAS"
-          )
-          return
+        const drawNetList = (title, filas, emptyLabel, headerLabel) => {
+          const rowCount = filas.length || 1
+          const neededSpace = 70 + 26 + rowCount * 26 + 20
+          ensureSpace(neededSpace)
+          drawSectionTitle(title, neededSpace)
+          if (!filas.length) {
+            drawList([{ label: emptyLabel, value: 0 }], headerLabel, "HORAS")
+            return
+          }
+          drawList(filas, headerLabel, "HORAS")
         }
 
-        drawList(
+        drawNetList(
+          `${grupoNombre} le debe a otros grupos`,
           deudas.map((item) => ({
-            label: `${String(grupo).toUpperCase()} le debe a ${item.contraparte}`,
+            label: `${grupoNombre} le debe a ${item.contraparte}`,
             value: item.horas,
           })),
-          "DEUDA",
-          "HORAS"
+          `${grupoNombre} no le debe horas a otros grupos`,
+          "DEUDA"
+        )
+        drawNetList(
+          `Otros grupos le deben a ${grupoNombre}`,
+          aFavor.map((item) => ({
+            label: `${item.contraparte} le debe a ${grupoNombre}`,
+            value: item.horas,
+          })),
+          `Ningún grupo le debe horas a ${grupoNombre}`,
+          "A FAVOR"
         )
         return
       }
@@ -941,10 +944,6 @@ router.post("/", async (req, res) => {
       })
     }
 
-    if (isSundayDate(fecha)) {
-      return res.status(400).json({ error: "No se pueden registrar horas los domingos" })
-    }
-
     // Resolver obra automáticamente si no viene en el request y el empleado es administrativo
     let clienteIdFinal = normalizeNullableId(cliente_id) ?? null
     let obraIdFinal = normalizeNullableId(obra_id) ?? null
@@ -1150,10 +1149,6 @@ router.put("/:id", async (req, res) => {
     }
 
     const fechaResolved = fecha || actual.fecha
-
-    if (isSundayDate(fechaResolved)) {
-      return res.status(400).json({ error: "No se pueden registrar horas los domingos" })
-    }
 
     const {
       horasExtra50,

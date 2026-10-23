@@ -719,8 +719,21 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 			y += 64
 			const blockGap = 12
 			const blockW = (width - blockGap) / 2
-			const blockH = 116
 			const logoBandW = 82
+			const clienteInnerW = blockW - 16
+			const clienteCampos = [
+				`Empresa: ${clienteEmpresa}`,
+				`CUIT: ${clienteCuit}`,
+				`IVA: ${clienteIva}`,
+				`Direccion: ${clienteDireccion}`,
+				`Telefono: ${clienteTelefono}`,
+			]
+			doc.font("Helvetica").fontSize(8.4)
+			let clienteCamposH = 0
+			for (const campo of clienteCampos) {
+				clienteCamposH += Math.max(13, doc.heightOfString(campo, { width: clienteInnerW }) + 2)
+			}
+			const blockH = Math.max(116, 21 + clienteCamposH + 8)
 
 			doc.rect(left, y, blockW, blockH).lineWidth(0.8).strokeColor(lineColor).stroke()
 			if (existsSync(logoToUse)) {
@@ -740,12 +753,13 @@ const renderPresupuestoPdfBuffer = async (presupuesto, options = {}) => {
 			const rightBoxX = left + blockW + blockGap
 			doc.rect(rightBoxX, y, blockW, blockH).lineWidth(0.8).strokeColor(lineColor).stroke()
 			doc.font("Helvetica-Bold").fontSize(9).fillColor("#111").text("CLIENTE", rightBoxX + 8, y + 6)
-			doc.font("Helvetica").fontSize(8.4)
-			doc.text(`Empresa: ${clienteEmpresa}`, rightBoxX + 8, y + 21, { width: blockW - 16, lineBreak: false })
-			doc.text(`CUIT: ${clienteCuit}`, rightBoxX + 8, y + 34, { width: blockW - 16, lineBreak: false })
-			doc.text(`IVA: ${clienteIva}`, rightBoxX + 8, y + 47, { width: blockW - 16, lineBreak: false })
-			doc.text(`Direccion: ${clienteDireccion}`, rightBoxX + 8, y + 60, { width: blockW - 16, lineBreak: false })
-			doc.text(`Telefono: ${clienteTelefono}`, rightBoxX + 8, y + 73, { width: blockW - 16, lineBreak: false })
+			doc.font("Helvetica").fontSize(8.4).fillColor("#111")
+			let clienteY = y + 21
+			for (const campo of clienteCampos) {
+				const campoH = Math.max(13, doc.heightOfString(campo, { width: clienteInnerW }) + 2)
+				doc.text(campo, rightBoxX + 8, clienteY, { width: clienteInnerW })
+				clienteY += campoH
+			}
 
 			y += blockH + 8
 			const boxDatosH = 42
