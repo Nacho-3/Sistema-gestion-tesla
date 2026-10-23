@@ -178,12 +178,15 @@ router.get("/", async (req, res) => {
       .from("clientes")
       .select("*")
       .eq("activo", true)
-      .order("created_at", { ascending: false })
+      .order("razon_social", { ascending: true })
 
     if (error) return res.status(400).json({ error: error.message })
-    const clientesVisibles = (data || []).filter(
-      (c) => String(c?.razon_social || "").trim().toUpperCase() !== "ADMINISTRACION INTERNA"
-    )
+    const nombreOrdenCliente = (c) => String(c?.empresa || c?.razon_social || "").trim()
+    const clientesVisibles = (data || [])
+      .filter((c) => String(c?.razon_social || "").trim().toUpperCase() !== "ADMINISTRACION INTERNA")
+      .sort((a, b) =>
+        nombreOrdenCliente(a).localeCompare(nombreOrdenCliente(b), "es", { sensitivity: "base", numeric: true })
+      )
     res.json(clientesVisibles)
   } catch (err) {
     return handleInternalError(res, err, "listar_clientes")

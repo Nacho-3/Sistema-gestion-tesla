@@ -48,17 +48,13 @@ export const parseHoursInput = (value) => {
     return roundHourDecimal(Number(normalized))
   }
 
-  if (/^\d+[.]\d{2}$/.test(normalized)) {
-    const [hoursPart, minutesPart] = normalized.split(".")
+  if (/^\d+[.]\d{1,2}$/.test(normalized)) {
+    const [hoursPart, minutesRaw] = normalized.split(".")
     const hours = Number(hoursPart)
-    const minutes = Number(minutesPart)
+    const minutes = Number(minutesRaw.padEnd(2, "0"))
 
     if (!Number.isFinite(hours) || !Number.isFinite(minutes) || minutes >= 60) return null
     return roundHourDecimal(hours + (minutes / 60))
-  }
-
-  if (/^\d+[.]\d{1}$/.test(normalized)) {
-    return null
   }
 
   return null

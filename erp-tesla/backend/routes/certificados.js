@@ -13,8 +13,93 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const LOGO_PATH = path.join(__dirname, "..", "assets", "logo.png")
 const LOGO_PRESUPUESTO_PATH = path.join(__dirname, "..", "assets", "logo_presupuesto.png")
 
-const CERTIFICADOS_BASE_FOLDER=
-	process.env.CERTIFICADOS_BASE_FOLDER || path.join("C:\\Users\\usuario\\Desktop\\GESTION TESLA\\certificados")
+const CERTIFICADOS_BASE_FOLDER =
+	process.env.CERTIFICADOS_BASE_FOLDER || path.join("C:\\Users\\usuario\\Desktop\\GESTION TESLA", "Certificados")
+
+const padSecuencia = (valor) => String(Math.max(0, toNumber(valor, 0))).padStart(2, "0")
+
+const getCertificadoClienteFolderName = (certificado = {}) =>
+	sanitizeFileText(certificado.cliente_nombre || certificado.cliente_razon_social || "Cliente") || "Cliente"
+
+const getCertificadoPdfFileName = (certificado = {}) => {
+	const secuencia = padSecuencia(certificado.secuencia)
+	const presupuesto = sanitizeFileText(certificado.presupuesto_numero || certificado.presupuesto_id || "S") || "S"
+	const obra = sanitizeFileText(certificado.obra_nombre || "Sin obra") || "Sin obra"
+	return `Presupuesto ${presupuesto} - Certificado ${secuencia} - ${obra}.pdf`
+}
+
+const getCertificadoPdfFolderPath = (certificado = {}) => {
+	return path.join(CERTIFICADOS_BASE_FOLDER, getCertificadoClienteFolderName(certificado))
+}
+
+const writeCertificadoPdfToDisk = async ({ certificado = {}, buffer, fileName, context = "unknown" }) => {
+	const folderPath = getCertificadoPdfFolderPath(certificado)
+	const nombre = fileName || getCertificadoPdfFileName(certificado)
+	const filePath = path.join(folderPath, nombre)
+	try {
+		await fs.mkdir(folderPath, { recursive: true })
+		await fs.writeFile(filePath, buffer)
+		console.log(`[Certificados] PDF guardado en: ${filePath}`)
+		return filePath
+	} catch (error) {
+		console.error("[Certificados] No se pudo guardar el PDF en GESTION TESLA", {
+			context,
+			filePath,
+			error: error?.message,
+		})
+		return null
+	}
+}
+
+const collectPdfBuffer = (doc) =>
+	new Promise((resolve, reject) => {
+		const chunks = []
+		doc.on("data", (chunk) => chunks.push(chunk))
+		doc.on("end", () => resolve(Buffer.concat(chunks)))
+		doc.on("error", reject)
+	})
+
+const getListadoCertificadosFileName = (certificado = {}) => {
+	const presupuesto = sanitizeFileText(certificado.presupuesto_numero || certificado.presupuesto_id || "S") || "S"
+	return `Presupuesto ${presupuesto} - Listado de certificados.pdf`
+}
+
+const unlinkIfExists = async (filePath) => {
+	try {
+		await fs.unlink(filePath)
+		return true
+	} catch (error) {
+		if (error?.code !== "ENOENT") {
+			console.error("[Certificados] No se pudo borrar archivo", { filePath, error: error?.message })
+		}
+		return false
+	}
+}
+
+const removeStoredCertificadoPdf = async (certificado = {}) => {
+	const folderPath = getCertificadoPdfFolderPath(certificado)
+	await unlinkIfExists(path.join(folderPath, getCertificadoPdfFileName(certificado)))
+}
+
+const removeStoredListadoCertificadosPdf = async (certificado = {}) => {
+	const folderPath = getCertificadoPdfFolderPath(certificado)
+	await unlinkIfExists(path.join(folderPath, getListadoCertificadosFileName(certificado)))
+}
+
+const removeCertificadoClienteFolder = async (certificado = {}) => {
+	const folderPath = getCertificadoPdfFolderPath(certificado)
+	try {
+		await fs.rm(folderPath, { recursive: true, force: true })
+		console.log(`[Certificados] Carpeta de cliente eliminada: ${folderPath}`)
+	} catch (error) {
+		if (error?.code !== "ENOENT") {
+			console.error("[Certificados] No se pudo borrar la carpeta del cliente", {
+				folderPath,
+				error: error?.message,
+			})
+		}
+	}
+}
 
 const router = express.Router()
 
@@ -432,13 +517,10 @@ router.get("/presupuesto/:presupuestoId/pdf", async (req, res) => {
 
 		const certificadosGrupo = result.rows.map(mapCertificado)
 		const base = certificadosGrupo[0]
-		const title = `Certificados-Presupuesto-${base.presupuesto_numero || presupuestoId}.pdf`
-
-		res.setHeader("Content-Type", "application/pdf")
-		res.setHeader("Content-Disposition", `inline; filename="${title}"`)
+		const title = getListadoCertificadosFileName(base)
 
 		const doc = new PDFDocument({ size: "A4", margin: 42, bufferPages: true })
-		doc.pipe(res)
+		const pdfPromise = collectPdfBuffer(doc)
 
 		const left = 42
 		const right = doc.page.width - 42
@@ -567,6 +649,16 @@ router.get("/presupuesto/:presupuestoId/pdf", async (req, res) => {
 		}
 
 		doc.end()
+		const buffer = await pdfPromise
+		await writeCertificadoPdfToDisk({
+			certificado: base,
+			buffer,
+			fileName: title,
+			context: "listado_presupuesto",
+		})
+		res.setHeader("Content-Type", "application/pdf")
+		res.setHeader("Content-Disposition", `inline; filename="${title}"`)
+		res.send(buffer)
 	} catch (err) {
 		res.status(500).json({ error: err.message })
 	}
@@ -623,13 +715,10 @@ router.get("/:id/pdf", async (req, res) => {
 		}
 
 		const cert = mapCertificado(result.rows[0])
-		const title = `Certificado-${cert.presupuesto_numero || cert.presupuesto_id}-${cert.secuencia}.pdf`
-
-		res.setHeader("Content-Type", "application/pdf")
-		res.setHeader("Content-Disposition", `inline; filename="${title}"`)
+		const title = getCertificadoPdfFileName(cert)
 
 		const doc = new PDFDocument({ size: "A4", margin: 45, bufferPages: true })
-		doc.pipe(res)
+		const pdfPromise = collectPdfBuffer(doc)
 
 		const left = 45
 		const pageWidth = doc.page.width
@@ -805,6 +894,16 @@ router.get("/:id/pdf", async (req, res) => {
 		}
 
 		doc.end()
+		const buffer = await pdfPromise
+		await writeCertificadoPdfToDisk({
+			certificado: cert,
+			buffer,
+			fileName: title,
+			context: "certificado",
+		})
+		res.setHeader("Content-Type", "application/pdf")
+		res.setHeader("Content-Disposition", `inline; filename="${title}"`)
+		res.send(buffer)
 	} catch (err) {
 		res.status(500).json({ error: err.message })
 	}
@@ -1095,7 +1194,22 @@ router.delete("/:id", async (req, res) => {
 
 		await client.query("BEGIN")
 		const certificadoResult = await client.query(
-			`SELECT id, presupuesto_id FROM certificados WHERE id = $1 LIMIT 1`,
+			`
+				SELECT
+					c.id,
+					c.secuencia,
+					c.presupuesto_id,
+					p.numero AS presupuesto_numero,
+					p.cliente_id,
+					COALESCE(NULLIF(TRIM(cl.empresa), ''), cl.razon_social) AS cliente_nombre,
+					o.nombre AS obra_nombre
+				FROM certificados c
+				INNER JOIN presupuestos p ON p.id = c.presupuesto_id
+				INNER JOIN clientes cl ON cl.id = p.cliente_id
+				LEFT JOIN obras o ON o.id = p.obra_id
+				WHERE c.id = $1
+				LIMIT 1
+			`,
 			[certificadoId]
 		)
 
@@ -1108,6 +1222,34 @@ router.delete("/:id", async (req, res) => {
 		await client.query(`DELETE FROM certificados WHERE id = $1`, [certificadoId])
 		await recalcularCertificadosPresupuesto(client, certificado.presupuesto_id)
 		await client.query("COMMIT")
+
+		try {
+			const restantesClienteQ = await pool.query(
+				`
+					SELECT COUNT(*)::int AS total
+					FROM certificados c
+					INNER JOIN presupuestos p ON p.id = c.presupuesto_id
+					WHERE p.cliente_id = $1
+				`,
+				[certificado.cliente_id]
+			)
+			const restantesCliente = Number(restantesClienteQ.rows?.[0]?.total || 0)
+
+			if (restantesCliente === 0) {
+				await removeCertificadoClienteFolder(certificado)
+			} else {
+				await removeStoredCertificadoPdf(certificado)
+				const restantesPresupuestoQ = await pool.query(
+					`SELECT COUNT(*)::int AS total FROM certificados WHERE presupuesto_id = $1`,
+					[certificado.presupuesto_id]
+				)
+				if (Number(restantesPresupuestoQ.rows?.[0]?.total || 0) === 0) {
+					await removeStoredListadoCertificadosPdf(certificado)
+				}
+			}
+		} catch (storageError) {
+			console.error("[Certificados] El certificado se eliminó, pero falló la limpieza de carpeta", storageError)
+		}
 
 		getIo()?.emit("certificados:changed")
 		getIo()?.emit("presupuestos:changed")

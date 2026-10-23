@@ -4664,7 +4664,7 @@ onUnmounted(() => {
               v-model="formRecibo.incluir_saldos_presupuestos"
               type="checkbox"
             />
-            <span>Incluir en el PDF el saldo restante por presupuesto (debajo del total)</span>
+            <span>Incluir en el PDF el saldo restante y el saldo a favor por presupuesto (debajo del total)</span>
           </label>
         </div>
 

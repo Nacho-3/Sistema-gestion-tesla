@@ -48,6 +48,12 @@ const formatoFecha = (valor) => {
     }
 }
 
+const roundMoney = (valor) => {
+    const numero = Number(valor)
+    if (!Number.isFinite(numero)) return 0
+    return Math.round((numero + Number.EPSILON) * 100) / 100
+}
+
 const formatoMoneda = (valor) =>
     new Intl.NumberFormat("es-AR", {
         style: "currency",
@@ -179,11 +185,11 @@ const cargarSaldosRestantesPresupuestos = async (presupuestoIds = []) => {
     .map((id) => byId.get(id))
     .filter(Boolean)
     .map((row) => {
-      const total = Number(row.total || 0)
-      const totalPagadoCaja = Number(row.total_pagado_caja || 0)
-      const totalNotasCredito = Number(row.total_notas_credito || 0)
-      const totalExigible = Math.max(0, total - totalNotasCredito)
-      const saldoRestante = Math.max(0, totalExigible - totalPagadoCaja)
+      const total = roundMoney(row.total)
+      const totalPagadoCaja = roundMoney(row.total_pagado_caja)
+      const totalNotasCredito = roundMoney(row.total_notas_credito)
+      const totalExigible = roundMoney(Math.max(0, total - totalNotasCredito))
+      const saldoRaw = roundMoney(totalExigible - totalPagadoCaja)
       return {
         id: Number(row.id),
         numero: Number(row.numero || 0),
@@ -191,9 +197,38 @@ const cargarSaldosRestantesPresupuestos = async (presupuestoIds = []) => {
         total_pagado_caja: totalPagadoCaja,
         total_notas_credito: totalNotasCredito,
         total_exigible: totalExigible,
-        saldo_restante: saldoRestante,
+        saldo_restante: roundMoney(Math.max(0, saldoRaw)),
+        saldo_a_favor: roundMoney(Math.max(0, -saldoRaw)),
       }
     })
+}
+
+const cargarSobranteNoImputadoMovimiento = async (movimientoId, montoTotal) => {
+  const id = Number(movimientoId)
+  const monto = roundMoney(montoTotal)
+  if (!Number.isInteger(id) || id <= 0) return 0
+
+  const presResult = await db.query(
+    `SELECT COALESCE(SUM(COALESCE(monto_asignado, 0)), 0) AS total
+     FROM movimientos_caja_presupuestos
+     WHERE movimiento_id = $1`,
+    [id]
+  )
+  let asignado = roundMoney(presResult.rows[0]?.total)
+
+  try {
+    const certResult = await db.query(
+      `SELECT COALESCE(SUM(COALESCE(monto_asignado, 0)), 0) AS total
+       FROM movimientos_caja_certificados
+       WHERE movimiento_id = $1`,
+      [id]
+    )
+    asignado = roundMoney(asignado + roundMoney(certResult.rows[0]?.total))
+  } catch {
+    // Si la tabla de certificados no existe, el sobrante se calcula solo con presupuestos.
+  }
+
+  return roundMoney(Math.max(0, monto - asignado))
 }
 
 const cargarMovimientoIngreso = async (movimientoId) => {
@@ -607,43 +642,100 @@ router.get("/:id/pdf", async (req, res) => {
 
     const mostrarSaldos = parseBooleanFlag(recibo.mostrar_saldos_presupuestos, false)
     let rowYFinal = rowY
-    if (mostrarSaldos) {
-      let presupuestoIds = sanitizePresupuestosIdsSnapshot(recibo.presupuestos_ids_snapshot)
-      if (!presupuestoIds.length) {
-        presupuestoIds = await cargarPresupuestoIdsDesdeMovimiento(Number(recibo.movimiento_caja_id))
-      }
 
-      if (presupuestoIds.length) {
-        const saldosPresupuestos = await cargarSaldosRestantesPresupuestos(presupuestoIds)
-        const neededHeight = 26 + 18 + (Math.max(1, saldosPresupuestos.length) * 16) + 8
-        if ((rowYFinal + neededHeight) > (doc.page.height - 120)) {
-          doc.addPage()
-          rowYFinal = 60
-        }
+    let presupuestoIds = sanitizePresupuestosIdsSnapshot(recibo.presupuestos_ids_snapshot)
+    if (!presupuestoIds.length) {
+      presupuestoIds = await cargarPresupuestoIdsDesdeMovimiento(Number(recibo.movimiento_caja_id))
+    }
+    const saldosPresupuestos = presupuestoIds.length
+      ? await cargarSaldosRestantesPresupuestos(presupuestoIds)
+      : []
+    const sobranteNoImputado = await cargarSobranteNoImputadoMovimiento(
+      Number(recibo.movimiento_caja_id),
+      recibo.monto_total
+    )
+    const hayAFavorPresupuesto = saldosPresupuestos.some((item) => Number(item.saldo_a_favor || 0) > 0.009)
+    const haySobrante = Number(sobranteNoImputado || 0) > 0.009
+    const mostrarTablaSaldos = mostrarSaldos && saldosPresupuestos.length > 0
+    const mostrarSaldoAFavor = hayAFavorPresupuesto || haySobrante
 
-        const sectionY = rowYFinal + 24
-        doc.fillColor("#64748b").font("Helvetica-Bold").fontSize(7.5)
-        doc.text("SALDO RESTANTE POR PRESUPUESTO", 45, sectionY)
+    if (mostrarTablaSaldos || mostrarSaldoAFavor) {
+      const filasSaldos = []
+      const itemsPresupuesto = mostrarTablaSaldos
+        ? saldosPresupuestos
+        : saldosPresupuestos.filter((item) => Number(item.saldo_a_favor || 0) > 0.009)
 
-        const saldosTableY = sectionY + 10
-        doc.rect(45, saldosTableY, pageWidth - 90, 18).fill(PDF_COLORS.navy)
-        doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(8.5)
-        doc.text("PRESUPUESTO", 58, saldosTableY + 5, { width: 200 })
-        doc.text("SALDO RESTANTE", 310, saldosTableY + 5, { width: 100, align: "right" })
-
-        let saldoRowY = saldosTableY + 18
-        ;(saldosPresupuestos.length ? saldosPresupuestos : [{ numero: "-", saldo_restante: 0 }]).forEach((item, index) => {
-          const bg = index % 2 === 0 ? "#ffffff" : "#f8fafc"
-          doc.rect(45, saldoRowY, pageWidth - 90, 16).fill(bg)
-          doc.strokeColor("#e2e8f0").lineWidth(0.5).rect(45, saldoRowY, pageWidth - 90, 16).stroke()
-          doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(8.5)
-          doc.text(`Presupuesto #${item.numero}`, 58, saldoRowY + 4, { width: 200 })
-          doc.text(formatoMoneda(item.saldo_restante), 310, saldoRowY + 4, { width: 100, align: "right" })
-          saldoRowY += 16
+      itemsPresupuesto.forEach((item) => {
+        filasSaldos.push({
+          label: `Presupuesto #${item.numero}`,
+          saldo_restante: mostrarTablaSaldos ? Number(item.saldo_restante || 0) : 0,
+          saldo_a_favor: Number(item.saldo_a_favor || 0),
         })
-
-        rowYFinal = saldoRowY
+      })
+      if (haySobrante) {
+        filasSaldos.push({
+          label: "Sobrante no imputado de este cobro",
+          saldo_restante: 0,
+          saldo_a_favor: sobranteNoImputado,
+        })
       }
+
+      const totalAFavor = roundMoney(filasSaldos.reduce((acc, item) => acc + Number(item.saldo_a_favor || 0), 0))
+      const mostrarTotalAFavor = totalAFavor > 0.009
+      const neededHeight = 26 + 18 + (Math.max(1, filasSaldos.length) * 16) + (mostrarTotalAFavor ? 18 : 0) + 8
+      if ((rowYFinal + neededHeight) > (doc.page.height - 120)) {
+        doc.addPage()
+        rowYFinal = 60
+      }
+
+      const sectionY = rowYFinal + 24
+      doc.fillColor("#64748b").font("Helvetica-Bold").fontSize(7.5)
+      doc.text(mostrarTablaSaldos ? "SALDOS POR PRESUPUESTO" : "SALDO A FAVOR DEL CLIENTE", 45, sectionY)
+
+      const saldosTableY = sectionY + 10
+      const tableWidth = pageWidth - 90
+      doc.rect(45, saldosTableY, tableWidth, 18).fill(PDF_COLORS.navy)
+      doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(8.5)
+      doc.text("CONCEPTO", 58, saldosTableY + 5, { width: 190 })
+      doc.text("SALDO RESTANTE", 250, saldosTableY + 5, { width: 110, align: "right" })
+      doc.text("SALDO A FAVOR", 370, saldosTableY + 5, { width: 120, align: "right" })
+
+      let saldoRowY = saldosTableY + 18
+      const filas = filasSaldos.length
+        ? filasSaldos
+        : [{ label: "Sin saldos", saldo_restante: 0, saldo_a_favor: 0 }]
+      filas.forEach((item, index) => {
+        const bg = index % 2 === 0 ? "#ffffff" : "#f8fafc"
+        doc.rect(45, saldoRowY, tableWidth, 16).fill(bg)
+        doc.strokeColor("#e2e8f0").lineWidth(0.5).rect(45, saldoRowY, tableWidth, 16).stroke()
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(8.5)
+        doc.text(item.label, 58, saldoRowY + 4, { width: 190 })
+        doc.text(
+          Number(item.saldo_restante || 0) > 0.009 ? formatoMoneda(item.saldo_restante) : "-",
+          250,
+          saldoRowY + 4,
+          { width: 110, align: "right" }
+        )
+        doc.text(
+          Number(item.saldo_a_favor || 0) > 0.009 ? formatoMoneda(item.saldo_a_favor) : "-",
+          370,
+          saldoRowY + 4,
+          { width: 120, align: "right" }
+        )
+        saldoRowY += 16
+      })
+
+      if (mostrarTotalAFavor) {
+        doc.rect(45, saldoRowY, tableWidth, 18).fill("#ecfdf5")
+        doc.strokeColor("#bbf7d0").lineWidth(0.5).rect(45, saldoRowY, tableWidth, 18).stroke()
+        doc.fillColor(PDF_COLORS.ink).font("Helvetica-Bold").fontSize(9)
+        doc.text("SALDO A FAVOR DEL CLIENTE", 58, saldoRowY + 4, { width: 190 })
+        doc.text("-", 250, saldoRowY + 4, { width: 110, align: "right" })
+        doc.text(formatoMoneda(totalAFavor), 370, saldoRowY + 4, { width: 120, align: "right" })
+        saldoRowY += 18
+      }
+
+      rowYFinal = saldoRowY
     }
 
     // Firmas - Posición dinámica basada en la cantidad de medios de pago y saldos

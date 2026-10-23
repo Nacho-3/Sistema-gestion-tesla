@@ -52,16 +52,8 @@ const filtroCliente = ref("")
 const nombresMes = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 const ADMIN_GROUP_REGEX = /admin/i
 
-const normalizeToNonSunday = (date) => {
-  const nextDate = new Date(date)
-  if (nextDate.getDay() === 0) {
-    nextDate.setDate(nextDate.getDate() + 1)
-  }
-  return nextDate
-}
-
 const getTodayInputDate = () => {
-  const now = normalizeToNonSunday(new Date())
+  const now = new Date()
   const year = now.getFullYear()
   const month = String(now.getMonth() + 1).padStart(2, "0")
   const day = String(now.getDate()).padStart(2, "0")
@@ -345,14 +337,6 @@ const syncExtraState = (formValue) => {
 }
 
 watch(() => [formDiaria.value.fecha, formDiaria.value.es_feriado], ([fecha]) => {
-if (esDomingo(fecha)) {
-const fechaAjustada = parseLocalDate(fecha)
-fechaAjustada.setDate(fechaAjustada.getDate() + 1)
-formDiaria.value.fecha = formatLocalDate(fechaAjustada)
-error.value = "Los domingos no se cargan. La fecha se ajustó automáticamente al lunes."
-return
-}
-
 if (!permiteExtra100(fecha, formDiaria.value.es_feriado)) {
 formDiaria.value.cantidad_horas_extra_100 = ""
 syncExtraState(formDiaria.value)
@@ -510,9 +494,7 @@ const getDiasRango = (fechaDesde, fechaHasta) => {
   const dias = []
   const cursor = new Date(inicio)
   while (cursor <= fin) {
-    if (cursor.getDay() !== 0) {
-      dias.push(formatLocalDate(cursor))
-    }
+    dias.push(formatLocalDate(cursor))
     cursor.setDate(cursor.getDate() + 1)
   }
   return dias
@@ -1055,7 +1037,7 @@ const getProximaFechaPorRegistros = (registros = []) => {
 
   const fechaMasAlta = new Date(Math.max(...fechasValidas.map((fecha) => fecha.getTime())))
   fechaMasAlta.setDate(fechaMasAlta.getDate() + 1)
-  return formatLocalDate(normalizeToNonSunday(fechaMasAlta))
+  return formatLocalDate(fechaMasAlta)
 }
 
 const getUltimaCargaGuardada = () => {
@@ -1106,7 +1088,7 @@ const abrirCargaRapidaConDatos = ({ empleado_id, cliente_id, obra_id, fecha }) =
     empleado_id: empleado_id || "",
     cliente_id: cliente_id || "",
     obra_id: obra_id || "",
-    fecha: formatLocalDate(normalizeToNonSunday(fechaBase)),
+    fecha: formatLocalDate(fechaBase),
   })
 
   syncObraDiariaPorEmpleado()
@@ -1163,11 +1145,6 @@ const calcularHorasDesdeHorario = (horaInicio, horaFin) => {
 const esSabado = (fechaStr) => {
   const fecha = parseLocalDate(fechaStr)
   return Boolean(fecha) && fecha.getDay() === 6
-}
-
-const esDomingo = (fechaStr) => {
-  const fecha = parseLocalDate(fechaStr)
-  return Boolean(fecha) && fecha.getDay() === 0
 }
 
 const permiteExtra100 = (fechaStr, esFeriado = false) => {
@@ -1316,11 +1293,6 @@ const saveHoraDiaria = async () => {
     error.value = cargaDiariaMultiple.value
       ? "Seleccioná al menos un empleado para la carga múltiple"
       : "Empleado y fecha son obligatorios"
-    return
-  }
-
-  if (esDomingo(formDiaria.value.fecha)) {
-    error.value = "No se pueden registrar horas los domingos"
     return
   }
 
@@ -2503,7 +2475,7 @@ onUnmounted(() => {
             </div>
 
             <div class="info-rango">
-              <div>Formato de carga: <strong>hora real</strong>. Ejemplos: <strong>8.30</strong> = 8 horas y media, <strong>0.30</strong> = media hora.</div>
+              <div>Formato de carga: <strong>hora real</strong>. Ejemplos: <strong>8.3</strong> o <strong>8.30</strong> = 8 horas y media, <strong>0.04</strong> = 4 minutos.</div>
               <template v-if="esExtra100DiariaHabilitada">
                 Podés separar en la misma carga cuántas horas van al <strong>50%</strong> y cuántas al <strong>100%</strong>.
               </template>
@@ -2650,8 +2622,8 @@ onUnmounted(() => {
 
             <div class="info-rango">
               <div>Definí una plantilla general y usala para todo el rango. Después sólo abrís excepciones en los días que cambian.</div>
-              <div>Formato de carga: <strong>hora real</strong>. Ejemplos: <strong>8.30</strong> = 8 horas y media, <strong>0.30</strong> = media hora.</div>
-              <div>Los domingos se omiten automáticamente. Si un día ya tenía varios registros, queda bloqueado para no pisar información mezclada.</div>
+              <div>Formato de carga: <strong>hora real</strong>. Ejemplos: <strong>8.3</strong> o <strong>8.30</strong> = 8 horas y media, <strong>0.04</strong> = 4 minutos.</div>
+              <div>Si un día ya tenía varios registros, queda bloqueado para no pisar información mezclada.</div>
             </div>
 
             <div v-if="conflictoCargaRangoVisible" class="conflicto-rango-box">
