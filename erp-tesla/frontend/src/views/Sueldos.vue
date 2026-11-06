@@ -230,11 +230,29 @@ const cargarLiquidaciones = async () => {
   }
 }
 
+const nombreVisibleEmpleado = (empleado) => {
+  const apellido = String(empleado?.apellido || "").trim()
+  const nombre = String(empleado?.nombre || "").trim()
+  return `${apellido} ${nombre}`.trim()
+}
+
+const ordenarEmpleadosAlfabetico = (lista = []) => {
+  // Visible y orden: "Apellido Nombre"
+  return [...(lista || [])].sort((a, b) => {
+    const apellidoA = String(a?.apellido || "").trim().toLocaleLowerCase("es")
+    const apellidoB = String(b?.apellido || "").trim().toLocaleLowerCase("es")
+    if (apellidoA !== apellidoB) return apellidoA.localeCompare(apellidoB, "es")
+    const nombreA = String(a?.nombre || "").trim().toLocaleLowerCase("es")
+    const nombreB = String(b?.nombre || "").trim().toLocaleLowerCase("es")
+    return nombreA.localeCompare(nombreB, "es")
+  })
+}
+
 // Cargar empleados
 const cargarEmpleados = async () => {
   try {
     const res = await api.getEmpleados()
-    empleados.value = res.data || []
+    empleados.value = ordenarEmpleadosAlfabetico(res.data || [])
   } catch (err) {
     console.error("Error al cargar empleados:", err)
   }
@@ -596,23 +614,36 @@ const totalRedondeoPagosDetalle = computed(() => {
 
 const liquidacionesFiltradas = computed(() => {
   const termino = filtroBusqueda.value.trim().toLowerCase()
-  if (!termino) return liquidaciones.value
+  const base = !termino
+    ? [...liquidaciones.value]
+    : liquidaciones.value.filter((liquidacion) => {
+      const empleado = getNombreEmpleado(liquidacion.empleado_id)
+      const periodo = `${liquidacion.mes}/${liquidacion.anio}`
+      const searchable = [
+        empleado,
+        periodo,
+        liquidacion.estado,
+        formatearHoras(liquidacion.horas_computadas),
+        formatearMoneda(liquidacion.total),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase()
 
-  return liquidaciones.value.filter((liquidacion) => {
-    const empleado = getNombreEmpleado(liquidacion.empleado_id)
-    const periodo = `${liquidacion.mes}/${liquidacion.anio}`
-    const searchable = [
-      empleado,
-      periodo,
-      liquidacion.estado,
-      formatearHoras(liquidacion.horas_computadas),
-      formatearMoneda(liquidacion.total),
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase()
+      return searchable.includes(termino)
+    })
 
-    return searchable.includes(termino)
+  // Ordenar por el mismo texto que se muestra en la columna Empleado.
+  return base.sort((a, b) => {
+    const empA = empleados.value.find((e) => Number(e.id) === Number(a?.empleado_id))
+    const empB = empleados.value.find((e) => Number(e.id) === Number(b?.empleado_id))
+    const apellidoA = String(empA?.apellido || getNombreEmpleado(a?.empleado_id) || "").trim().toLocaleLowerCase("es")
+    const apellidoB = String(empB?.apellido || getNombreEmpleado(b?.empleado_id) || "").trim().toLocaleLowerCase("es")
+    if (apellidoA !== apellidoB) return apellidoA.localeCompare(apellidoB, "es")
+    const nombreA = String(empA?.nombre || "").trim().toLocaleLowerCase("es")
+    const nombreB = String(empB?.nombre || "").trim().toLocaleLowerCase("es")
+    if (nombreA !== nombreB) return nombreA.localeCompare(nombreB, "es")
+    return Number(a?.id || 0) - Number(b?.id || 0)
   })
 })
 
@@ -789,8 +820,9 @@ const confirmarImportarACaja = async () => {
 
 // Obtener nombre empleado
 const getNombreEmpleado = (empleadoId) => {
-  const empleado = empleados.value.find((e) => e.id === empleadoId)
-  return empleado ? `${empleado.nombre} ${empleado.apellido}` : "-"
+  const empleado = empleados.value.find((e) => Number(e.id) === Number(empleadoId))
+  if (!empleado) return "-"
+  return nombreVisibleEmpleado(empleado) || "-"
 }
 
 const getValorHoraEmpleado = (empleadoId) => {
@@ -950,7 +982,7 @@ const puedeDescargarPdfLiquidacion = computed(() => !!liquidacionSeleccionada.va
               <select v-model="filtroEmpleado" @change="cargarLiquidaciones">
                 <option value="">Todos</option>
                 <option v-for="emp in empleados" :key="emp.id" :value="emp.id">
-                  {{ emp.nombre }} {{ emp.apellido }}
+                  {{ emp.apellido }} {{ emp.nombre }}
                 </option>
               </select>
             </div>
@@ -1288,7 +1320,7 @@ const puedeDescargarPdfLiquidacion = computed(() => !!liquidacionSeleccionada.va
             <tbody>
               <tr v-for="emp in empleados" :key="emp.id">
                 <td>
-                  <strong>{{ emp.nombre }} {{ emp.apellido }}</strong>
+                  <strong>{{ emp.apellido }} {{ emp.nombre }}</strong>
                 </td>
                 <td v-if="empleadoEditando?.id !== emp.id">
                   <span class="valor-tarifa">{{ formatearMoneda(emp.valor_hora) }}</span>

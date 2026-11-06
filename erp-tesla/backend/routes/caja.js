@@ -1983,6 +1983,22 @@ async function obtenerCertificadosAsignacionesPorMovimiento(movimientoId) {
   return mapa.get(Number(movimientoId)) || []
 }
 
+function ordenarMovimientosComoEnSistema(movimientos = []) {
+  // Misma regla que la grilla de Caja:
+  // fecha desc; mismo día: control semanal al final; luego id desc.
+  return [...(movimientos || [])].sort((a, b) => {
+    const fechaA = normalizarFechaISO(a?.fecha) || String(a?.fecha || "").split("T")[0] || ""
+    const fechaB = normalizarFechaISO(b?.fecha) || String(b?.fecha || "").split("T")[0] || ""
+    if (fechaA !== fechaB) return fechaB.localeCompare(fechaA)
+
+    const controlA = Boolean(a?.es_control_semanal)
+    const controlB = Boolean(b?.es_control_semanal)
+    if (controlA !== controlB) return controlA ? 1 : -1
+
+    return Number(b?.id || 0) - Number(a?.id || 0)
+  })
+}
+
 async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_codigo, caja_semanal_id, cliente_id } = {}) {
   await getDetallesSchema()
   await ensureMovimientosCajaPresupuestosSchema()
@@ -2034,7 +2050,7 @@ async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_
     },
   }
 
-  const movimientos = (data || []).map(normalizarMovimiento)
+  let movimientos = (data || []).map(normalizarMovimiento)
   const mapaPresupuestos = await obtenerPresupuestosIdsPorMovimientos(movimientos.map((mov) => mov.id))
   const mapaAsignaciones = await obtenerPresupuestosAsignacionesPorMovimientos(movimientos.map((mov) => mov.id))
   const mapaCertificados = await obtenerCertificadosAsignacionesPorMovimientos(movimientos.map((mov) => mov.id))
@@ -2066,6 +2082,8 @@ async function obtenerMovimientosYTotales({ fecha_inicio, fecha_fin, tipo, caja_
       }
     })
   })
+
+  movimientos = ordenarMovimientosComoEnSistema(movimientos)
 
   return { movimientos, totales }
 }
@@ -3945,7 +3963,15 @@ router.get("/:id", async (req, res) => {
         movimiento.endosado_a_cheques = String(chequesSalida[0]?.endosado_a || "").trim() || null
       }
     } else if (String(movimiento?.tipo || "").toLowerCase() === "ingreso") {
-      movimiento.cheques_ingreso_detalle = await obtenerChequesIngresoPorMovimiento(movimiento.id)
+      if (Boolean(movimiento?.es_control_semanal)) {
+        const semanaControlId = normalizarCajaSemanalId(movimiento.caja_semanal_id)
+        movimiento.cheques_control_detalle = semanaControlId
+          ? await obtenerChequesControladosSemana(semanaControlId)
+          : []
+        movimiento.cheques_ingreso_detalle = []
+      } else {
+        movimiento.cheques_ingreso_detalle = await obtenerChequesIngresoPorMovimiento(movimiento.id)
+      }
     }
 
     res.json(movimiento)
@@ -4345,9 +4371,102 @@ router.put("/:id", async (req, res) => {
               AND COALESCE(es_control_semanal, FALSE) = FALSE`,
           [semanaId, Number(id)]
         )
-        if (Number(movsQ.rows?.[0]?.total || 0) > 0) {
-          await client.query("ROLLBACK")
-          return res.status(400).json({ error: "No se puede editar el control semanal cuando ya existen otros movimientos en la semana" })
+        const hayOtrosMovimientos = Number(movsQ.rows?.[0]?.total || 0) > 0
+
+        const identificadoresPorLibro = new Map()
+        if (Array.isArray(detalles_medio_pago)) {
+          for (const item of detalles_medio_pago) {
+            if (!["cheque", "echeq"].includes(String(item?.medio_pago || "").toLowerCase())) continue
+            const libroId = Number(item?.libro_cheque_id || 0)
+            if (!Number.isInteger(libroId) || libroId <= 0) continue
+            const identificador = String(item?.identificador || "").trim()
+            identificadoresPorLibro.set(libroId, identificador || null)
+          }
+        }
+
+        // Si la semana ya tiene movimientos, solo se permiten actualizar identificadores
+        // de cheques/eCheqs del control (sin cambiar montos ni el set controlado).
+        if (hayOtrosMovimientos) {
+          if (identificadoresPorLibro.size === 0) {
+            await client.query("ROLLBACK")
+            return res.status(400).json({
+              error: "No se puede editar el control semanal cuando ya existen otros movimientos en la semana. Solo se pueden actualizar identificadores de cheques/eCheqs."
+            })
+          }
+
+          const controlActualQ = await client.query(
+            `SELECT libro_cheque_id FROM cajas_semanales_cheques_control WHERE caja_semanal_id = $1`,
+            [semanaId]
+          )
+          const idsControlActual = new Set(
+            (controlActualQ.rows || [])
+              .map((row) => Number(row.libro_cheque_id))
+              .filter((valor) => Number.isInteger(valor) && valor > 0)
+          )
+
+          const idsPayload = Array.from(identificadoresPorLibro.keys())
+          const invalidosPayload = idsPayload.filter((libroId) => !idsControlActual.has(libroId))
+          if (invalidosPayload.length > 0) {
+            await client.query("ROLLBACK")
+            return res.status(400).json({ error: "Hay cheques fuera del control semanal actual; no se pueden modificar con la semana en curso" })
+          }
+
+          for (const [libroId, identificador] of identificadoresPorLibro.entries()) {
+            await client.query(
+              `
+                UPDATE detalles_medio_pago
+                SET identificador = $3
+                WHERE movimiento_id = $1
+                  AND libro_cheque_id = $2
+                  AND medio_pago IN ('cheque', 'echeq')
+              `,
+              [Number(id), libroId, identificador]
+            )
+            await client.query(
+              `
+                UPDATE libro_cheques_caja
+                SET identificador = $2,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $1
+              `,
+              [libroId, identificador || ""]
+            )
+          }
+
+          if (observaciones !== undefined || detalle !== undefined) {
+            const detalleControl = String(detalle ?? movimientoActual?.[detalleColumn] ?? "Control semanal inicial de caja").trim() || "Control semanal inicial de caja"
+            const observacionesControl = observaciones !== undefined
+              ? (String(observaciones || "").trim() || null)
+              : (String(movimientoActual?.observaciones || "").trim() || null)
+            await client.query(
+              `
+                UPDATE movimientos_caja
+                SET ${detalleColumn} = $2,
+                    observaciones = $3,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $1
+              `,
+              [Number(id), detalleControl, observacionesControl]
+            )
+          }
+
+          await client.query("COMMIT")
+
+          const { data: movimientoSoloIdent } = await db
+            .from("movimientos_caja")
+            .select(`
+              *,
+              detalles_medio_pago(*)
+            `)
+            .eq("id", id)
+            .single()
+
+          const movimientoSoloIdentNormalizado = normalizarMovimiento(movimientoSoloIdent)
+          movimientoSoloIdentNormalizado.presupuestos_ids = []
+          movimientoSoloIdentNormalizado.presupuestos_asignaciones = []
+          movimientoSoloIdentNormalizado.certificados_asignaciones = []
+          getIo()?.emit('caja:changed')
+          return res.json(movimientoSoloIdentNormalizado)
         }
 
         const anterior = await obtenerCajaSemanalAnterior(semana.caja_codigo, semana.fecha_inicio, semana.id)
@@ -4465,6 +4584,11 @@ router.put("/:id", async (req, res) => {
         }
 
         for (const cheque of chequesSeleccionados) {
+          const libroId = Number(cheque.id)
+          const identificador = identificadoresPorLibro.has(libroId)
+            ? identificadoresPorLibro.get(libroId)
+            : identificadorControl(cheque)
+
           await client.query(
             `
               INSERT INTO detalles_medio_pago (
@@ -4476,15 +4600,27 @@ router.put("/:id", async (req, res) => {
               Number(id),
               medioPagoControl(cheque),
               roundMoney(Number(cheque.importe || 0)),
-              identificadorControl(cheque),
+              identificador,
               String(cheque.banco || "").trim() || null,
               String(cheque.librador_endosante || "").trim() || null,
               numeroChequeControl(cheque),
               normalizarFechaISO(cheque.fecha_cheque),
               normalizarFechaISO(cheque.fecha_entrada),
-              Number(cheque.id),
+              libroId,
             ]
           )
+
+          if (identificadoresPorLibro.has(libroId)) {
+            await client.query(
+              `
+                UPDATE libro_cheques_caja
+                SET identificador = $2,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $1
+              `,
+              [libroId, identificador || ""]
+            )
+          }
         }
 
         await client.query(`DELETE FROM cajas_semanales_cheques_control WHERE caja_semanal_id = $1`, [semanaId])

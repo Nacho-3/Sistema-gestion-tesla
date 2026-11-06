@@ -33,6 +33,7 @@ router.get("/", async (req, res) => {
       .from("empleados")
       .select("*")
       .eq("activo", true)
+      .order("apellido", { ascending: true })
       .order("nombre", { ascending: true })
 
     if (error) return res.status(400).json({ error: error.message })

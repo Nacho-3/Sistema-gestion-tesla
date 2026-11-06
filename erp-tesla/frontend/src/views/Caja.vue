@@ -2140,6 +2140,9 @@ const abrirEdicion = async (movimiento) => {
     const detalleChequesIngreso = Array.isArray(movimientoCompleto.cheques_ingreso_detalle)
       ? movimientoCompleto.cheques_ingreso_detalle
       : []
+    const detalleChequesControl = Array.isArray(movimientoCompleto.cheques_control_detalle)
+      ? movimientoCompleto.cheques_control_detalle
+      : []
     const chequesSalidaIdsBackend = Array.isArray(movimientoCompleto.cheques_salida_ids)
       ? movimientoCompleto.cheques_salida_ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
       : []
@@ -2188,9 +2191,11 @@ const abrirEdicion = async (movimiento) => {
       const libroId = Number(item?.id || 0)
       const numero = String(item?.numero_cheque || "").trim()
       const importe = Number(item?.importe || 0)
+      const identificadorLibro = String(item?.identificador || "").trim()
 
       if (Number.isInteger(libroId) && libroId > 0) cheque.libro_cheque_id = libroId
       if (!String(cheque.numero_cheque || "").trim()) cheque.numero_cheque = numero
+      if (!String(cheque.identificador || "").trim() && identificadorLibro) cheque.identificador = identificadorLibro
       if (!String(cheque.librador_endosante || "").trim()) cheque.librador_endosante = String(item?.librador_endosante || "").trim()
       if (!String(cheque.banco || "").trim()) cheque.banco = String(item?.banco || "").trim()
       if (!String(cheque.fecha_cheque || "").trim()) cheque.fecha_cheque = String(item?.fecha_cheque || "").split("T")[0]
@@ -2198,53 +2203,58 @@ const abrirEdicion = async (movimiento) => {
       if (!(Number(cheque.monto || 0) > 0) && importe > 0) cheque.monto = importe
     }
 
-    detalleChequesIngreso.forEach((item) => {
-      const libroId = Number(item?.id || 0)
-      const numero = String(item?.numero_cheque || "").trim()
-      const importe = Number(item?.importe || 0)
+    const completarDesdeListaLibro = (lista) => {
+      ;(lista || []).forEach((item) => {
+        const libroId = Number(item?.id || 0)
+        const numero = String(item?.numero_cheque || "").trim()
+        const importe = Number(item?.importe || 0)
 
-      let existente = chequesMovimiento.find((cheque, idx) => {
-        if (usedChequeRows.has(idx)) return false
-        return Number(cheque?.libro_cheque_id || 0) === libroId && Number.isInteger(libroId) && libroId > 0
+        let existente = chequesMovimiento.find((cheque, idx) => {
+          if (usedChequeRows.has(idx)) return false
+          return Number(cheque?.libro_cheque_id || 0) === libroId && Number.isInteger(libroId) && libroId > 0
+        })
+
+        if (!existente) {
+          existente = chequesMovimiento.find((cheque, idx) => {
+            if (usedChequeRows.has(idx)) return false
+            const numeroCheque = String(cheque?.numero_cheque || "").trim()
+            return Boolean(numero && numeroCheque && numeroCheque === numero)
+          })
+        }
+
+        if (!existente) {
+          existente = chequesMovimiento.find((cheque, idx) => {
+            if (usedChequeRows.has(idx)) return false
+            const montoCheque = Number(cheque?.monto || 0)
+            return importe > 0 && montoCheque > 0 && Math.abs(montoCheque - importe) < 0.01
+          })
+        }
+
+        if (existente) {
+          const idx = chequesMovimiento.indexOf(existente)
+          if (idx >= 0) usedChequeRows.add(idx)
+          completarChequeDesdeLibro(existente, item)
+          return
+        }
+
+        const nuevo = {
+          medio_pago: String(item?.medio_pago || "cheque").toLowerCase(),
+          monto: importe,
+          identificador: String(item?.identificador || "").trim(),
+          numero_cheque: numero,
+          librador_endosante: String(item?.librador_endosante || "").trim(),
+          banco: String(item?.banco || "").trim(),
+          fecha_cheque: String(item?.fecha_cheque || "").split("T")[0],
+          fecha_entrada: String(item?.fecha_entrada || movimientoCompleto.fecha || "").split("T")[0],
+          libro_cheque_id: Number.isInteger(libroId) && libroId > 0 ? libroId : null,
+        }
+        chequesMovimiento.push(nuevo)
+        usedChequeRows.add(chequesMovimiento.length - 1)
       })
+    }
 
-      if (!existente) {
-        existente = chequesMovimiento.find((cheque, idx) => {
-          if (usedChequeRows.has(idx)) return false
-          const numeroCheque = String(cheque?.numero_cheque || "").trim()
-          return Boolean(numero && numeroCheque && numeroCheque === numero)
-        })
-      }
-
-      if (!existente) {
-        existente = chequesMovimiento.find((cheque, idx) => {
-          if (usedChequeRows.has(idx)) return false
-          const montoCheque = Number(cheque?.monto || 0)
-          return importe > 0 && montoCheque > 0 && Math.abs(montoCheque - importe) < 0.01
-        })
-      }
-
-      if (existente) {
-        const idx = chequesMovimiento.indexOf(existente)
-        if (idx >= 0) usedChequeRows.add(idx)
-        completarChequeDesdeLibro(existente, item)
-        return
-      }
-
-      const nuevo = {
-        medio_pago: String(item?.medio_pago || "cheque").toLowerCase(),
-        monto: importe,
-        identificador: "",
-        numero_cheque: numero,
-        librador_endosante: String(item?.librador_endosante || "").trim(),
-        banco: String(item?.banco || "").trim(),
-        fecha_cheque: String(item?.fecha_cheque || "").split("T")[0],
-        fecha_entrada: String(item?.fecha_entrada || movimientoCompleto.fecha || "").split("T")[0],
-        libro_cheque_id: Number.isInteger(libroId) && libroId > 0 ? libroId : null,
-      }
-      chequesMovimiento.push(nuevo)
-      usedChequeRows.add(chequesMovimiento.length - 1)
-    })
+    completarDesdeListaLibro(detalleChequesIngreso)
+    completarDesdeListaLibro(detalleChequesControl)
 
     form.value = {
       fecha: String(movimientoCompleto.fecha || "").split("T")[0],
