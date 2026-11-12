@@ -186,18 +186,43 @@ const loadDatos = async () => {
 const getEmpleadoById = (empleadoId) => empleados.value.find((e) => String(e.id) === String(empleadoId))
 const getEtiquetaTipoHora = (hora) => {
   const etiquetas = []
+  const esExtra = Boolean(hora?.es_hora_extra)
+    || String(hora?.tipo || "").includes("extra_50")
+    || String(hora?.tipo || "").includes("extra_100")
+  const esPrestada = Boolean(hora?.es_prestada)
+    || String(hora?.tipo || "").toLowerCase() === "prestada"
+  const es100 = String(hora?.tipo_hora_extra || "") === "100"
+    || String(hora?.tipo || "").includes("extra_100")
 
-  if (hora?.es_hora_extra) {
-    const es100 = String(hora?.tipo_hora_extra || "") === "100" || String(hora?.tipo || "") === "extra_100"
+  if (esExtra) {
     etiquetas.push(es100 ? "Extra 100%" : "Extra 50%")
   }
 
-  if (hora?.es_prestada) {
+  if (esPrestada) {
     etiquetas.push("Prestada")
   }
 
   if (!etiquetas.length) return "Normal"
   return etiquetas.join(" + ")
+}
+
+const getClaseBadgeTipoHora = (hora) => {
+  const esExtra = Boolean(hora?.es_hora_extra)
+    || String(hora?.tipo || "").includes("extra_50")
+    || String(hora?.tipo || "").includes("extra_100")
+  const esPrestada = Boolean(hora?.es_prestada)
+    || String(hora?.tipo || "").toLowerCase() === "prestada"
+  const es100 = String(hora?.tipo_hora_extra || "") === "100"
+    || String(hora?.tipo || "").includes("extra_100")
+
+  if (esExtra && esPrestada) {
+    return es100 ? "badge-extra-prestada-100" : "badge-extra-prestada"
+  }
+  if (esExtra) {
+    return es100 ? "badge-extra-100" : "badge-extra"
+  }
+  if (esPrestada) return "badge-prestada"
+  return "badge-normal"
 }
 
 const isGrupoAdministrativo = (grupoId) => {
@@ -1147,8 +1172,13 @@ const esSabado = (fechaStr) => {
   return Boolean(fecha) && fecha.getDay() === 6
 }
 
+const esDomingo = (fechaStr) => {
+  const fecha = parseLocalDate(fechaStr)
+  return Boolean(fecha) && fecha.getDay() === 0
+}
+
 const permiteExtra100 = (fechaStr, esFeriado = false) => {
-  return esSabado(fechaStr) || Boolean(esFeriado)
+  return esSabado(fechaStr) || esDomingo(fechaStr) || Boolean(esFeriado)
 }
 
 const esExtra100DiariaHabilitada = computed(() =>
@@ -1335,7 +1365,7 @@ const saveHoraDiaria = async () => {
   }
 
   if (horasExtra100Diaria > 0 && !permiteExtra100(formDiaria.value.fecha, formDiaria.value.es_feriado)) {
-  error.value = "Las horas extra al 100% corresponden a sábados o feriados marcados."
+  error.value = "Las horas extra al 100% corresponden a sábados, domingos o feriados marcados."
   return
   }
 
@@ -1572,7 +1602,7 @@ const saveHoraRango = async (accionConflictos = null) => {
     }
 
     if (horasExtra100 > 0 && !permiteExtra100(fila.fecha, fila.es_feriado)) {
-      error.value = `Las horas al 100% solo corresponden a sábados y feriados. Revisá ${formatearFecha(fila.fecha)}`
+      error.value = `Las horas al 100% solo corresponden a sábados, domingos y feriados. Revisá ${formatearFecha(fila.fecha)}`
       return
     }
 
@@ -1814,6 +1844,15 @@ const toggleEmpleadoHoras = (empleadoId) => {
   expandedEmpleadosHoras.value = new Set(expandedEmpleadosHoras.value)
 }
 
+const formatearHorasHm = (value) => {
+  const totalMinutes = Math.round(Number(value || 0) * 60)
+  const sign = totalMinutes < 0 ? "-" : ""
+  const absMinutes = Math.abs(totalMinutes)
+  const hours = Math.floor(absMinutes / 60)
+  const minutes = absMinutes % 60
+  return minutes > 0 ? `${sign}${hours}h ${minutes}m` : `${sign}${hours}h`
+}
+
 const prestadasAgrupadasEmpleado = computed(() => {
   const byEmpleado = new Map()
 
@@ -1839,6 +1878,60 @@ const prestadasAgrupadasEmpleado = computed(() => {
       registros: g.registros.sort((a, b) => new Date(b.fecha) - new Date(a.fecha))
     }))
     .sort((a, b) => b.totalHoras - a.totalHoras)
+})
+
+const prestadasPasajeEntreGrupos = computed(() => {
+  const brutos = new Map()
+
+  for (const item of resumenPrestadas.value || []) {
+    const origen = String(item.grupo_origen || "Sin grupo origen").trim()
+    const destino = String(item.grupo_destino || "Sin grupo destino").trim()
+    if (!origen || !destino || origen.toLowerCase() === destino.toLowerCase()) continue
+
+    const key = `${origen.toLowerCase()}|||${destino.toLowerCase()}`
+    if (!brutos.has(key)) {
+      brutos.set(key, { origen, destino, horas: 0 })
+    }
+    const hs = Number(item.cantidad_horas || 0)
+    const fila = brutos.get(key)
+    fila.horas = addHourValues(fila.horas, Number.isFinite(hs) ? hs : 0)
+  }
+
+  const transferencias = Array.from(brutos.values())
+    .filter((item) => item.horas > 0.009)
+    .sort((a, b) => b.horas - a.horas)
+
+  const netosMap = new Map()
+  for (const item of transferencias) {
+    const [grupoA, grupoB] = [item.origen, item.destino].sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }))
+    const key = `${grupoA.toLowerCase()}|||${grupoB.toLowerCase()}`
+    if (!netosMap.has(key)) {
+      netosMap.set(key, { grupoA, grupoB, horasAaB: 0, horasBaA: 0 })
+    }
+    const neto = netosMap.get(key)
+    if (item.origen.toLowerCase() === grupoA.toLowerCase()) {
+      neto.horasAaB = addHourValues(neto.horasAaB, item.horas)
+    } else {
+      neto.horasBaA = addHourValues(neto.horasBaA, item.horas)
+    }
+  }
+
+  const netos = Array.from(netosMap.values())
+    .map((item) => {
+      const diferencia = addHourValues(item.horasAaB, -item.horasBaA)
+      const deudor = diferencia > 0 ? item.grupoB : item.grupoA
+      const acreedor = diferencia > 0 ? item.grupoA : item.grupoB
+      return {
+        ...item,
+        diferencia,
+        abs: Math.abs(diferencia),
+        etiqueta: `${deudor} le debe a ${acreedor}`,
+      }
+    })
+    .filter((item) => item.abs > 0.009)
+    .sort((a, b) => b.abs - a.abs)
+
+  return { transferencias, netos }
 })
 
 const togglePrestadasEmpleado = (empleado) => {
@@ -2092,12 +2185,7 @@ onUnmounted(() => {
                         <td>
                           <span
                             v-if="hora.es_hora_extra || hora.es_prestada"
-                            :class="[
-                              'badge',
-                              String(hora.tipo_hora_extra || '') === '100' || String(hora.tipo || '') === 'extra_100'
-                                ? 'badge-extra-100'
-                                : (hora.es_prestada ? 'badge-prestada' : 'badge-extra')
-                            ]"
+                            :class="['badge', getClaseBadgeTipoHora(hora)]"
                           >
                             {{ getEtiquetaTipoHora(hora) }}
                           </span>
@@ -2278,13 +2366,58 @@ onUnmounted(() => {
           <p v-else class="sin-datos">Sin datos para este período</p>
         </div>
 
+        <!-- Pasaje neto de horas prestadas entre grupos -->
+        <div class="resumen-seccion">
+          <div class="resumen-seccion-header">
+            <h3>Pasaje de horas prestadas entre grupos</h3>
+            <button class="btn-pdf-prestadas" @click="generarPrestadasPdf" title="Descargar PDF de horas prestadas">
+              ⬇ PDF Prestadas
+            </button>
+          </div>
+
+          <div v-if="prestadasPasajeEntreGrupos.transferencias.length > 0" class="resumen-tabla">
+            <table>
+              <thead>
+                <tr>
+                  <th>Transferencia</th>
+                  <th>Horas</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(item, idx) in prestadasPasajeEntreGrupos.transferencias" :key="`transf-${idx}`">
+                  <td>{{ item.origen }} prestó a {{ item.destino }}</td>
+                  <td>{{ formatearHorasHm(item.horas) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div v-if="prestadasPasajeEntreGrupos.netos.length > 0" class="resumen-tabla" style="margin-top: 1rem;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Pasaje neto</th>
+                  <th>Horas</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(item, idx) in prestadasPasajeEntreGrupos.netos" :key="`neto-${idx}`">
+                  <td>{{ item.etiqueta }}</td>
+                  <td>{{ formatearHorasHm(item.abs) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p v-else-if="prestadasPasajeEntreGrupos.transferencias.length === 0" class="sin-datos">
+            Sin horas prestadas entre grupos en este período
+          </p>
+        </div>
+
         <!-- Resumen de horas prestadas por empleado -->
         <div class="resumen-seccion">
           <div class="resumen-seccion-header">
             <h3>Horas prestadas por empleado</h3>
-            <button class="btn-pdf-prestadas" @click="generarPrestadasPdf" title="Descargar PDF de horas prestadas">
-              ⬇ PDF Prestadas
-            </button>
           </div>
           <div v-if="prestadasAgrupadasEmpleado.length > 0" class="prestadas-acordeon">
             <div
@@ -2310,6 +2443,7 @@ onUnmounted(() => {
                       <th>Fecha</th>
                       <th>Grupo origen</th>
                       <th>Grupo destino</th>
+                      <th>Tipo</th>
                       <th>Horas</th>
                     </tr>
                   </thead>
@@ -2318,6 +2452,11 @@ onUnmounted(() => {
                       <td>{{ formatearFecha(prest.fecha) }}</td>
                       <td>{{ prest.grupo_origen }}</td>
                       <td>{{ prest.grupo_destino }}</td>
+                      <td>
+                        <span :class="['badge', getClaseBadgeTipoHora(prest)]">
+                          {{ prest.etiqueta_tipo || getEtiquetaTipoHora(prest) }}
+                        </span>
+                      </td>
                       <td>{{ formatearHoras(prest.cantidad_horas) }}</td>
                     </tr>
                   </tbody>
@@ -2480,7 +2619,7 @@ onUnmounted(() => {
                 Podés separar en la misma carga cuántas horas van al <strong>50%</strong> y cuántas al <strong>100%</strong>.
               </template>
               <template v-else>
-                Para este día solo se habilitan <strong>horas extra al 50%</strong>. Las horas al <strong>100%</strong> se cargan únicamente en <strong>sábados y feriados</strong>.
+                Para este día solo se habilitan <strong>horas extra al 50%</strong>. Las horas al <strong>100%</strong> se cargan en <strong>sábados, domingos y feriados</strong>.
               </template>
             </div>
 
@@ -2733,7 +2872,7 @@ onUnmounted(() => {
                     <input v-model="formRango.cantidad_horas_extra_50" type="text" inputmode="decimal" placeholder="0.30" />
                   </label>
                   <label class="form-group compact">
-                    <span>Extra 100% (sábados y feriados)</span>
+                    <span>Extra 100% (sábados, domingos y feriados)</span>
                     <input v-model="formRango.cantidad_horas_extra_100" type="text" inputmode="decimal" placeholder="0.30" />
                   </label>
                 </div>
@@ -2799,6 +2938,7 @@ onUnmounted(() => {
                       <span v-if="dia.tieneRegistrosExistentes && !dia.tieneMultiplesRegistros" class="badge badge-warning">Ya cargado</span>
                       <span v-if="dia.tieneMultiplesRegistros" class="badge badge-danger">Varios registros</span>
                       <span v-if="esSabado(dia.fecha)" class="badge badge-extra-100">Sábado</span>
+                      <span v-if="esDomingo(dia.fecha)" class="badge badge-extra-100">Domingo</span>
                     </div>
                   </div>
 
@@ -3538,6 +3678,16 @@ td {
 .badge-extra-100 {
   background-color: rgba(239, 68, 68, 0.18);
   color: #fca5a5;
+}
+
+.badge-extra-prestada {
+  background-color: rgba(168, 85, 247, 0.2);
+  color: #d8b4fe;
+}
+
+.badge-extra-prestada-100 {
+  background-color: rgba(236, 72, 153, 0.2);
+  color: #f9a8d4;
 }
 
 .acciones {

@@ -103,6 +103,15 @@ const sumHourValues = (values = []) => {
   return minutesToHourValue(totalMinutes)
 }
 
+const formatHoursHm = (value = 0) => {
+  const totalMinutes = Math.round(Number(value || 0) * 60)
+  const sign = totalMinutes < 0 ? "-" : ""
+  const absMinutes = Math.abs(totalMinutes)
+  const hours = Math.floor(absMinutes / 60)
+  const minutes = absMinutes % 60
+  return minutes > 0 ? `${sign}${hours}h ${minutes}m` : `${sign}${hours}h`
+}
+
 const normalizeTipoHoraExtra = (tipoHoraExtra) => {
   const normalizado = String(tipoHoraExtra || "").trim()
   if (normalizado === "100") return "100"
@@ -116,6 +125,28 @@ const getTipoHora = ({ es_hora_extra, tipo_hora_extra, es_prestada }) => {
   }
   if (es_prestada === true) return "prestada"
   return "normal"
+}
+
+const esHoraExtra100 = (hora = {}) => {
+  return String(hora?.tipo_hora_extra || "") === "100"
+    || String(hora?.tipo || "").includes("extra_100")
+}
+
+const getEtiquetaTipoHora = (hora = {}) => {
+  const partes = []
+  const esExtra = hora?.es_hora_extra === true
+    || String(hora?.tipo || "").includes("extra_50")
+    || String(hora?.tipo || "").includes("extra_100")
+  const esPrestada = hora?.es_prestada === true
+    || String(hora?.tipo || "").toLowerCase() === "prestada"
+
+  if (esExtra) {
+    partes.push(esHoraExtra100(hora) ? "Extra 100%" : "Extra 50%")
+  }
+  if (esPrestada) {
+    partes.push("Prestada")
+  }
+  return partes.length ? partes.join(" + ") : "Normal"
 }
 
 const normalizeNullableId = (value) => {
@@ -172,6 +203,15 @@ const isSaturdayDate = (dateValue) => {
   return Boolean(parsedDate) && parsedDate.getDay() === 6
 }
 
+const isSundayDate = (dateValue) => {
+  const parsedDate = parseLocalDateOnly(dateValue)
+  return Boolean(parsedDate) && parsedDate.getDay() === 0
+}
+
+const permiteHorasExtra100 = (dateValue, esFeriado = false) => {
+  return isSaturdayDate(dateValue) || isSundayDate(dateValue) || esFeriado === true
+}
+
 const resolveHorasExtraDetalle = ({
   fecha,
   horasComputadas,
@@ -215,8 +255,8 @@ const resolveHorasExtraDetalle = ({
     throw new Error("La suma de las horas extra (50% + 100%) no puede superar el total de horas cargadas")
   }
 
-  if (horasExtra100 > 0 && !(isSaturdayDate(fecha) || es_feriado === true)) {
-    throw new Error("Las horas extra al 100% solo corresponden a sábados o feriados")
+  if (horasExtra100 > 0 && !permiteHorasExtra100(fecha, es_feriado)) {
+    throw new Error("Las horas extra al 100% solo corresponden a sábados, domingos o feriados")
   }
 
   return {
@@ -523,11 +563,23 @@ router.get("/resumen/pdf", async (req, res) => {
     }
 
     const drawList = (items, leftLabel, rightLabel) => {
+      const labelWidth = 350
+      const rowPaddingY = 8
+
+      const measureRowHeight = (label) => {
+        doc.font("Helvetica").fontSize(10)
+        const textHeight = doc.heightOfString(String(label || ""), {
+          width: labelWidth,
+          align: "left",
+        })
+        return Math.max(26, Math.ceil(textHeight + rowPaddingY * 2))
+      }
+
       const drawTableHeader = () => {
         const headerY = doc.y
         doc.rect(45, headerY, pageWidth - 90, 26).fill(PDF_COLORS.navy)
         doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(9)
-        doc.text(leftLabel, 55, headerY + 9, { width: 350, align: "left" })
+        doc.text(leftLabel, 55, headerY + 9, { width: labelWidth, align: "left" })
         doc.text(rightLabel, 410, headerY + 9, { width: 120, align: "right" })
         doc.fillColor(PDF_COLORS.ink)
         doc.y = headerY + 26
@@ -543,18 +595,26 @@ router.get("/resumen/pdf", async (req, res) => {
       }
 
       items.forEach((it, idx) => {
-        if (y > getBottomLimit(26)) {
+        const rowHeight = measureRowHeight(it.label)
+        if (y > getBottomLimit(rowHeight)) {
           doc.addPage()
           doc.y = 60
           drawTableHeader()
           y = doc.y
         }
         const bg = idx % 2 === 0 ? "#f4f6f8" : "#ffffff"
-        doc.rect(45, y, pageWidth - 90, 26).fill(bg)
+        doc.rect(45, y, pageWidth - 90, rowHeight).fill(bg)
         doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(10)
-        doc.text(it.label, 55, y + 8, { width: 350, ellipsis: true, align: "left" })
-        doc.text(`${formatHoursAsClock(it.value)} hs`, 410, y + 8, { width: 120, align: "right" })
-        y += 26
+        doc.text(String(it.label || ""), 55, y + rowPaddingY, {
+          width: labelWidth,
+          align: "left",
+        })
+        doc.font("Helvetica-Bold")
+        doc.text(`${formatHoursAsClock(it.value)} hs`, 410, y + rowPaddingY, {
+          width: 120,
+          align: "right",
+        })
+        y += rowHeight
       })
       doc.y = y + 8
     }
@@ -653,13 +713,51 @@ router.get("/resumen/pdf", async (req, res) => {
         doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(10)
         doc.text(`${item.origen} prestó a ${item.destino}`, tableX + 10, y + 8, { width: detalleWidth - 20, align: "left", ellipsis: true })
         doc.font("Helvetica-Bold")
-        doc.text(`${formatHoursAsClock(item.horas)} hs`, tableX + detalleWidth, y + 8, { width: horasWidth - 10, align: "right" })
+        doc.text(formatHoursHm(item.horas), tableX + detalleWidth, y + 8, { width: horasWidth - 10, align: "right" })
         y += 26
       })
       doc.y = y + 8
     }
 
     const drawTransferDifferences = (items) => {
+      const drawHmList = (filas, leftLabel, rightLabel) => {
+        const drawTableHeader = () => {
+          const headerY = doc.y
+          doc.rect(45, headerY, pageWidth - 90, 26).fill(PDF_COLORS.navy)
+          doc.fillColor(PDF_COLORS.light).font("Helvetica-Bold").fontSize(9)
+          doc.text(leftLabel, 55, headerY + 9, { width: 350, align: "left" })
+          doc.text(rightLabel, 410, headerY + 9, { width: 120, align: "right" })
+          doc.fillColor(PDF_COLORS.ink)
+          doc.y = headerY + 26
+        }
+
+        drawTableHeader()
+        let y = doc.y
+
+        if (!filas.length) {
+          doc.font("Helvetica").fontSize(10).text("Sin datos para este período", 55, y)
+          doc.y = y + 22
+          return
+        }
+
+        filas.forEach((it, idx) => {
+          if (y > getBottomLimit(26)) {
+            doc.addPage()
+            doc.y = 60
+            drawTableHeader()
+            y = doc.y
+          }
+          const bg = idx % 2 === 0 ? "#f4f6f8" : "#ffffff"
+          doc.rect(45, y, pageWidth - 90, 26).fill(bg)
+          doc.fillColor(PDF_COLORS.ink).font("Helvetica").fontSize(10)
+          doc.text(it.label, 55, y + 8, { width: 350, ellipsis: true, align: "left" })
+          doc.font("Helvetica-Bold")
+          doc.text(formatHoursHm(it.value), 410, y + 8, { width: 120, align: "right" })
+          y += 26
+        })
+        doc.y = y + 8
+      }
+
       if (grupoSolicitado) {
         // "origen prestó a destino" = origen envió trabajadores a destino
         // → destino RECIBIÓ trabajo → destino le DEBE a origen
@@ -695,10 +793,10 @@ router.get("/resumen/pdf", async (req, res) => {
           ensureSpace(neededSpace)
           drawSectionTitle(title, neededSpace)
           if (!filas.length) {
-            drawList([{ label: emptyLabel, value: 0 }], headerLabel, "HORAS")
+            drawHmList([{ label: emptyLabel, value: 0 }], headerLabel, "HORAS")
             return
           }
-          drawList(filas, headerLabel, "HORAS")
+          drawHmList(filas, headerLabel, "HORAS")
         }
 
         drawNetList(
@@ -724,17 +822,20 @@ router.get("/resumen/pdf", async (req, res) => {
 
       // Vista global (sin grupo seleccionado): reservar espacio estimado
       ensureSpace(190)
-      drawSectionTitle("Diferencia entre horas prestadas", 140)
+      drawSectionTitle("Pasaje neto entre grupos", 140)
 
       const diferencias = {}
 
       items.forEach((item) => {
-        const origen = item.origen
-        const destino = item.destino
+        const origen = String(item.origen || "").trim()
+        const destino = String(item.destino || "").trim()
         const horas = Number(item.horas || 0)
+        const origenNorm = normalizeGroupName(origen)
+        const destinoNorm = normalizeGroupName(destino)
+        if (!origenNorm || !destinoNorm || origenNorm === destinoNorm) return
 
-        const [grupoA, grupoB] = [origen, destino].sort((a, b) => a.localeCompare(b))
-        const key = `${grupoA.toLowerCase()}|||${grupoB.toLowerCase()}`
+        const [grupoA, grupoB] = [origen, destino].sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }))
+        const key = `${normalizeGroupName(grupoA)}|||${normalizeGroupName(grupoB)}`
 
         if (!diferencias[key]) {
           diferencias[key] = {
@@ -745,33 +846,32 @@ router.get("/resumen/pdf", async (req, res) => {
           }
         }
 
-        if (origen === grupoA && destino === grupoB) {
-          diferencias[key].horasAaB += horas
+        if (origenNorm === normalizeGroupName(grupoA) && destinoNorm === normalizeGroupName(grupoB)) {
+          diferencias[key].horasAaB = addHourValues(diferencias[key].horasAaB, horas)
         } else {
-          diferencias[key].horasBaA += horas
+          diferencias[key].horasBaA = addHourValues(diferencias[key].horasBaA, horas)
         }
       })
 
       const rows = Object.values(diferencias)
         .map((item) => ({
           ...item,
-          diferencia: item.horasAaB - item.horasBaA,
+          diferencia: addHourValues(item.horasAaB, -item.horasBaA),
         }))
-        .filter((item) => item.diferencia !== 0)
+        .filter((item) => Math.abs(item.diferencia) > 0.009)
+        .sort((a, b) => Math.abs(b.diferencia) - Math.abs(a.diferencia))
 
-      drawList(
+      drawHmList(
         rows.map((item) => {
           const abs = Math.abs(item.diferencia)
-          const texto = item.diferencia > 0
-            ? `${item.grupoB} le debe ${formatHoursAsClock(abs)} hs a ${item.grupoA}`
-            : `${item.grupoA} le debe ${formatHoursAsClock(abs)} hs a ${item.grupoB}`
-
+          const deudor = item.diferencia > 0 ? item.grupoB : item.grupoA
+          const acreedor = item.diferencia > 0 ? item.grupoA : item.grupoB
           return {
-            label: texto,
+            label: `${deudor} le debe a ${acreedor}`,
             value: abs,
           }
         }),
-        "DIFERENCIA",
+        "PASAJE NETO",
         "HORAS"
       )
     }
@@ -1543,9 +1643,10 @@ router.get("/resumen/prestadas/pdf", async (req, res) => {
         empleadoGrupo.destinos.set(grupoDestino, { grupoDestino, total: 0, registros: [] })
       }
       const destinoEmpleado = empleadoGrupo.destinos.get(grupoDestino)
+      const tipoLabel = getEtiquetaTipoHora(h)
       destinoEmpleado.total = addHourValues(destinoEmpleado.total, hs)
-      destinoEmpleado.registros.push({ fecha, obra, hs })
-      empleadoGrupo.registros.push({ fecha, grupoDestino, obra, hs })
+      destinoEmpleado.registros.push({ fecha, obra, hs, tipoLabel })
+      empleadoGrupo.registros.push({ fecha, grupoDestino, obra, hs, tipoLabel })
     }
 
     const grupos = Array.from(byGrupo.values())
@@ -1636,24 +1737,34 @@ router.get("/resumen/prestadas/pdf", async (req, res) => {
           doc.text(`Total: ${formatHs(destino.total)}`, pageWidth - 160, y + 5, { width: 108, align: "right" })
           y += 18
 
-          const col = { fecha: 45, obra: 175 }
+          const col = { fecha: 45, obra: 120, tipo: 360 }
+          const obraWidth = 230
+          const tipoWidth = 110
+          const rowPaddingY = 4
           doc.rect(45, y, pageWidth - 90, 17).fillColor("#f0f0f0").fill()
           doc.rect(45, y, pageWidth - 90, 17).lineWidth(0.8).strokeColor("#000000").stroke()
           doc.font("Helvetica-Bold").fontSize(8.5).fillColor("#000000")
           doc.text("Fecha", col.fecha + 4, y + 4)
           doc.text("Obra / Cliente", col.obra + 4, y + 4)
+          doc.text("Tipo", col.tipo + 4, y + 4)
           doc.text("Horas", pageWidth - 90, y + 4, { width: 40, align: "right" })
           y += 17
 
           for (const r of destino.registros) {
-            checkPage(16)
-            doc.rect(45, y, pageWidth - 90, 16).fillColor("#ffffff").fill()
-            doc.rect(45, y, pageWidth - 90, 16).lineWidth(0.4).strokeColor("#888888").stroke()
+            doc.font("Helvetica").fontSize(8.5)
+            const obraHeight = doc.heightOfString(String(r.obra || ""), { width: obraWidth })
+            const tipoHeight = doc.heightOfString(String(r.tipoLabel || "Prestada"), { width: tipoWidth })
+            const rowHeight = Math.max(16, Math.ceil(Math.max(obraHeight, tipoHeight) + rowPaddingY * 2))
+
+            checkPage(rowHeight)
+            doc.rect(45, y, pageWidth - 90, rowHeight).fillColor("#ffffff").fill()
+            doc.rect(45, y, pageWidth - 90, rowHeight).lineWidth(0.4).strokeColor("#888888").stroke()
             doc.font("Helvetica").fontSize(8.5).fillColor("#000000")
-            doc.text(r.fecha, col.fecha + 4, y + 4, { width: 80 })
-            doc.text(r.obra, col.obra + 4, y + 4, { width: 290, ellipsis: true })
-            doc.text(formatHs(r.hs), pageWidth - 90, y + 4, { width: 40, align: "right" })
-            y += 16
+            doc.text(r.fecha, col.fecha + 4, y + rowPaddingY, { width: 70 })
+            doc.text(String(r.obra || ""), col.obra + 4, y + rowPaddingY, { width: obraWidth })
+            doc.text(String(r.tipoLabel || "Prestada"), col.tipo + 4, y + rowPaddingY, { width: tipoWidth })
+            doc.text(formatHs(r.hs), pageWidth - 90, y + rowPaddingY, { width: 40, align: "right" })
+            y += rowHeight
           }
 
           y += 8
@@ -1755,7 +1866,12 @@ router.get("/resumen/prestadas", async (req, res) => {
         grupo_origen: grupoOrigen?.nombre || "Sin grupo origen",
         grupo_destino: grupoDestino?.nombre || "Sin grupo destino",
         cantidad_horas: getCantidadHoras(h),
-        fecha: h.fecha
+        fecha: h.fecha,
+        es_hora_extra: h.es_hora_extra === true,
+        es_prestada: true,
+        tipo: h.tipo || null,
+        tipo_hora_extra: h.tipo_hora_extra || null,
+        etiqueta_tipo: getEtiquetaTipoHora(h),
       }
     })
 
