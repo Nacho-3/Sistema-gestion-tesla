@@ -1330,13 +1330,18 @@ SET medio_pago = LOWER(BTRIM(medio_pago))
 WHERE medio_pago IS NOT NULL
   AND medio_pago <> LOWER(BTRIM(medio_pago));
 
+-- Solo elimina filas realmente duplicadas.
+-- No tratar como duplicados cheques distintos con mismo monto/identificador vacío
+-- (p. ej. varios cheques físicos del control semanal).
 DELETE FROM detalles_medio_pago d
 USING detalles_medio_pago duplicado
 WHERE d.id < duplicado.id
   AND d.movimiento_id = duplicado.movimiento_id
   AND LOWER(BTRIM(d.medio_pago)) = LOWER(BTRIM(duplicado.medio_pago))
+  AND COALESCE(d.monto, 0) = COALESCE(duplicado.monto, 0)
+  AND COALESCE(d.libro_cheque_id, 0) = COALESCE(duplicado.libro_cheque_id, 0)
   AND COALESCE(NULLIF(BTRIM(d.identificador), ''), '-') = COALESCE(NULLIF(BTRIM(duplicado.identificador), ''), '-')
-  AND COALESCE(d.monto, 0) = COALESCE(duplicado.monto, 0);
+  AND COALESCE(NULLIF(BTRIM(d.numero_cheque), ''), '-') = COALESCE(NULLIF(BTRIM(duplicado.numero_cheque), ''), '-');
 
 DO $$
 BEGIN

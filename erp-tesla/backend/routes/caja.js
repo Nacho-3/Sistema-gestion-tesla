@@ -791,6 +791,71 @@ function numeroChequeControl(cheque) {
   return String(cheque?.numero_cheque || "").trim() || null
 }
 
+async function sincronizarDetallesControlConTabla({ client, movimientoId, cajaSemanalId }) {
+  const movId = Number(movimientoId || 0)
+  const semanaId = Number(cajaSemanalId || 0)
+  if (!Number.isInteger(movId) || movId <= 0 || !Number.isInteger(semanaId) || semanaId <= 0) {
+    return { agregados: 0 }
+  }
+
+  const faltantesQ = await client.query(
+    `
+      SELECT l.id, l.medio_pago, l.importe, l.identificador, l.banco, l.librador_endosante,
+             l.numero_cheque, l.fecha_cheque, l.fecha_entrada
+      FROM cajas_semanales_cheques_control c
+      JOIN libro_cheques_caja l ON l.id = c.libro_cheque_id
+      WHERE c.caja_semanal_id = $1
+        AND NOT EXISTS (
+          SELECT 1
+          FROM detalles_medio_pago d
+          WHERE d.movimiento_id = $2
+            AND d.libro_cheque_id = c.libro_cheque_id
+            AND d.medio_pago IN ('cheque', 'echeq')
+        )
+      ORDER BY l.id
+    `,
+    [semanaId, movId]
+  )
+
+  let agregados = 0
+  for (const cheque of faltantesQ.rows || []) {
+    await client.query(
+      `
+        INSERT INTO detalles_medio_pago (
+          movimiento_id, medio_pago, monto, identificador, banco, fecha_cobro,
+          librador_endosante, numero_cheque, fecha_cheque, fecha_entrada, libro_cheque_id
+        ) VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10)
+      `,
+      [
+        movId,
+        medioPagoControl(cheque),
+        roundMoney(Number(cheque.importe || 0)),
+        identificadorControl(cheque),
+        String(cheque.banco || "").trim() || null,
+        String(cheque.librador_endosante || "").trim() || null,
+        numeroChequeControl(cheque),
+        normalizarFechaISO(cheque.fecha_cheque),
+        normalizarFechaISO(cheque.fecha_entrada),
+        Number(cheque.id),
+      ]
+    )
+    agregados += 1
+  }
+
+  if (agregados > 0) {
+    const sumaQ = await client.query(
+      `SELECT COALESCE(SUM(monto), 0)::numeric AS total FROM detalles_medio_pago WHERE movimiento_id = $1`,
+      [movId]
+    )
+    await client.query(
+      `UPDATE movimientos_caja SET monto_total = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+      [movId, roundMoney(Number(sumaQ.rows?.[0]?.total || 0))]
+    )
+  }
+
+  return { agregados }
+}
+
 function filtrarFilasLibroPorCorte(rows, fechaInicio, fechaFin) {
   return (rows || [])
     .map((row) => {
@@ -3965,6 +4030,36 @@ router.get("/:id", async (req, res) => {
     } else if (String(movimiento?.tipo || "").toLowerCase() === "ingreso") {
       if (Boolean(movimiento?.es_control_semanal)) {
         const semanaControlId = normalizarCajaSemanalId(movimiento.caja_semanal_id)
+        if (semanaControlId) {
+          const clientSync = await pool.connect()
+          try {
+            await clientSync.query("BEGIN")
+            const syncResult = await sincronizarDetallesControlConTabla({
+              client: clientSync,
+              movimientoId: Number(movimiento.id),
+              cajaSemanalId: semanaControlId,
+            })
+            await clientSync.query("COMMIT")
+            if (Number(syncResult?.agregados || 0) > 0) {
+              const { data: movimientoResync } = await db
+                .from("movimientos_caja")
+                .select(`
+                  *,
+                  detalles_medio_pago(*)
+                `)
+                .eq("id", movimiento.id)
+                .single()
+              if (movimientoResync) {
+                Object.assign(movimiento, normalizarMovimiento(movimientoResync))
+              }
+            }
+          } catch (syncError) {
+            try { await clientSync.query("ROLLBACK") } catch (_) { /* no fatal */ }
+            console.error("Error al sincronizar detalles de control semanal:", syncError?.message || syncError)
+          } finally {
+            clientSync.release()
+          }
+        }
         movimiento.cheques_control_detalle = semanaControlId
           ? await obtenerChequesControladosSemana(semanaControlId)
           : []
@@ -4410,6 +4505,14 @@ router.put("/:id", async (req, res) => {
             await client.query("ROLLBACK")
             return res.status(400).json({ error: "Hay cheques fuera del control semanal actual; no se pueden modificar con la semana en curso" })
           }
+
+          // Evita desfasajes: si la tabla de control tiene cheques que no están
+          // en el movimiento, se reincorporan antes de tocar identificadores.
+          await sincronizarDetallesControlConTabla({
+            client,
+            movimientoId: Number(id),
+            cajaSemanalId: semanaId,
+          })
 
           for (const [libroId, identificador] of identificadoresPorLibro.entries()) {
             await client.query(
